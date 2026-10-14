@@ -41,8 +41,6 @@ class Config:
     llm_cache_ttl: int = 86400
     ehunt_min_remaining: int = 0  # EHunt 今日剩余 ≤ 此值时停止领取（0 = 用到额度耗尽）
     heartbeat_interval: float = 30.0
-    concurrency: int = 2  # 同时处理的任务数（worker 线程数，建议 2~3；Keepamore 全局限速 20 次/分钟由所有线程共享）
-    cache_purge_hours: float = 6.0  # provider_cache 过期行清理间隔（0 = 不清理）
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -79,6 +77,4 @@ class Config:
             llm_cache_ttl=int(e("LLM_CACHE_TTL_SECONDS", "86400")),
             ehunt_min_remaining=int(e("EHUNT_MIN_REMAINING", "0")),
             heartbeat_interval=float(e("HEARTBEAT_SECONDS", "30")),
-            concurrency=max(1, min(5, int(e("WORKER_CONCURRENCY", "2")))),
-            cache_purge_hours=float(e("CACHE_PURGE_HOURS", "6")),
         )

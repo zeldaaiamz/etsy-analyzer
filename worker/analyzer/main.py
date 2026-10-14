@@ -23,29 +23,17 @@ def _sig(*_):
     _stop = True
 
 
-CURRENT = {}  # worker_id -> 正在处理的 job id（多线程时每个线程一项）
+CURRENT = {"job": None}
 
 
-def heartbeat_loop(store, cfg, etsy, stop_evt, worker_ids=None):
-    """后台线程：每 heartbeat_interval 秒为每个 worker 线程写 worker_heartbeat，前端据此显示“分析服务离线”；
-    顺带每 cache_purge_hours 小时清理一次 provider_cache 过期行（L5）。"""
-    ids = worker_ids or [cfg.worker_id]
-    next_purge = time.monotonic() + 60
+def heartbeat_loop(store, cfg, etsy, stop_evt):
+    """后台线程：每 heartbeat_interval 秒写 worker_heartbeat，前端据此显示“分析服务离线”。"""
     while not stop_evt.is_set():
-        for wid in ids:
-            try:
-                store.heartbeat(wid, CURRENT.get(wid), {"ehunt_remaining": getattr(etsy, "remaining", None),
-                                                        "pid": __import__("os").getpid(), "threads": len(ids)})
-            except Exception:  # noqa: BLE001
-                log.warning("heartbeat failed", exc_info=True)
-        if cfg.cache_purge_hours and time.monotonic() >= next_purge:
-            next_purge = time.monotonic() + cfg.cache_purge_hours * 3600
-            try:
-                n = store.purge_expired_cache()
-                if n:
-                    log.info("purged %s expired provider_cache rows", n)
-            except Exception:  # noqa: BLE001
-                log.warning("cache purge failed (migration 015 not applied?)", exc_info=True)
+        try:
+            store.heartbeat(cfg.worker_id, CURRENT["job"], {"ehunt_remaining": getattr(etsy, "remaining", None),
+                                                            "pid": __import__("os").getpid()})
+        except Exception:  # noqa: BLE001
+            log.warning("heartbeat failed", exc_info=True)
         stop_evt.wait(cfg.heartbeat_interval)
 
 
@@ -65,59 +53,27 @@ def ehunt_paused(store):
     return pu > _now()
 
 
-def run_loop(store, providers, cfg, once=False, worker_id=None, stop_evt=None):
-    """单个 worker 循环：领取 → 处理 → 继续领取；没活时 sleep poll_interval。
-    多线程并发安全：claim_next_job 在 DB 里用 FOR UPDATE SKIP LOCKED（010），同一任务只会被一个线程领到。"""
+def run_loop(store, providers, cfg, once=False):
     etsy, amazon, llm = providers[:3]
     shot = providers[3] if len(providers) > 3 else None
-    wid = worker_id or cfg.worker_id
-    while not _stop and not (stop_evt and stop_evt.is_set()):
+    while not _stop:
         job = None
         try:  # 熔断判断在 claim_next_job 内：熔断中只领取 24h 缓存内的 listing（0 credit），过期自动恢复
-            job = store.claim_next_job(wid)
+            job = store.claim_next_job(cfg.worker_id)
         except Exception:  # noqa: BLE001 网络抖动
             log.exception("claim failed")
         if job:
-            log.info("[%s] processing %s %s", wid, job["id"], job["etsy_url"])
-            CURRENT[wid] = job["id"]
+            log.info("processing %s %s", job["id"], job["etsy_url"])
+            CURRENT["job"] = job["id"]
             try:
                 process_job(job, store, etsy, amazon, llm, cfg.max_amazon_results, shot, cfg.max_snapshots_per_kind,
                             cfg.min_reviews, cfg.supplement_shop_reviews, cfg.ehunt_min_remaining)
-            except Exception:  # noqa: BLE001  process_job 自己处理失败；这里兜底防止线程退出
-                log.exception("[%s] unexpected error", wid)
             finally:
-                CURRENT[wid] = None
+                CURRENT["job"] = None
             continue  # 有活就连续干
         if once:
             return
-        if stop_evt:
-            stop_evt.wait(cfg.poll_interval)
-        else:
-            time.sleep(cfg.poll_interval)
-
-
-def worker_ids(cfg, n=None):
-    n = max(1, n or getattr(cfg, "concurrency", 1))
-    return [cfg.worker_id] + [f"{cfg.worker_id}-{i}" for i in range(2, n + 1)]
-
-
-def run_workers(store, make_providers, cfg, n=None, once=False, stop_evt=None):
-    """M4：n 个 worker 线程并发处理队列。每个线程有独立的 provider 实例（用量计数按任务独立），
-    共享 store / provider_cache；Keepamore 的 20 次/分钟限速是进程级全局令牌（keepamore._throttle）。"""
-    ids = worker_ids(cfg, n)
-    if len(ids) == 1:
-        run_loop(store, make_providers(), cfg, once=once, worker_id=ids[0], stop_evt=stop_evt)
-        return ids
-    ths = [threading.Thread(target=run_loop, name=wid, args=(store, make_providers(), cfg),
-                            kwargs={"once": once, "worker_id": wid, "stop_evt": stop_evt}, daemon=True) for wid in ids]
-    for t in ths:
-        t.start()
-    for t in ths:
-        while t.is_alive():
-            t.join(1.0)
-            if _stop and stop_evt:
-                stop_evt.set()
-    return ids
+        time.sleep(cfg.poll_interval)
 
 
 def main(argv=None):
@@ -138,16 +94,12 @@ def main(argv=None):
                           "matches": store.matches}, ensure_ascii=False, indent=1, default=str))
         return store
     store = SupabaseStore(cfg.supabase_url, cfg.supabase_key, cfg.storage_bucket)
-    cache = StoreCache(store)
-    make = lambda: (*build_providers(cfg, cache=cache), build_screenshot(cfg))  # noqa: E731
-    ids = worker_ids(cfg)
-    first = make()
+    providers = (*build_providers(cfg, cache=StoreCache(store)), build_screenshot(cfg))
     stop_evt = threading.Event()
-    threading.Thread(target=heartbeat_loop, args=(store, cfg, first[0], stop_evt, ids), daemon=True).start()
-    log.info("worker %s polling every %ss with %d thread(s)", cfg.worker_id, cfg.poll_interval, len(ids))
-    pool = iter([first])
+    threading.Thread(target=heartbeat_loop, args=(store, cfg, providers[0], stop_evt), daemon=True).start()
+    log.info("worker %s polling every %ss", cfg.worker_id, cfg.poll_interval)
     try:
-        run_workers(store, lambda: next(pool, None) or make(), cfg, stop_evt=stop_evt)
+        run_loop(store, providers, cfg)
     finally:
         stop_evt.set()
 

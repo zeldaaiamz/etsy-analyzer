@@ -28,14 +28,11 @@ _rl_lock, _rl_last = threading.Lock(), [0.0]
 
 
 def _throttle():
-    """全局限速（进程内所有 worker 线程共享）：每次请求预约一个时间槽，间隔 ≥ MIN_INTERVAL（20 次/分钟）。
-    只在锁内预约、锁外等待：等 Keepamore 的线程不会挡住其它线程的 Etsy/LLM/截图等调用。"""
     with _rl_lock:
-        now = time.monotonic()
-        slot = max(now, _rl_last[0] + MIN_INTERVAL)
-        _rl_last[0] = slot
-    if slot > now:
-        time.sleep(slot - now)
+        wait = _rl_last[0] + MIN_INTERVAL - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        _rl_last[0] = time.monotonic()
 
 
 def is_transient(e):
