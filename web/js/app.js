@@ -1,4 +1,5 @@
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
+import { createScreen } from "./screen.js?v=f838aed4";
 
 // ?demo=1：纯前端示例数据，不登录、不连 Supabase，仅用于预览界面（&offline=1 / &quota=1 预览横幅）
 const QS = new URLSearchParams(location.search);
@@ -212,6 +213,7 @@ $("btnSubmit").onclick = async () => {
     const seen = new Set(); dupes = [...S.jobs.values()].filter((j) => ids.includes(Number(j.etsy_listing_id)) && j.status === "succeeded" && !seen.has(j.etsy_listing_id) && seen.add(j.etsy_listing_id));
     dupes = withLib(dupes, ids);
     if (dupes.length) { pending = { ok, bad, dupes }; return renderDupes(); }
+    if ($("preScreen")?.checked && QS.has("screen")) { location.hash = "#/screen"; return; }
     return showSubmitResult({ ok: true, text: `演示模式不会提交。${quotaPlan(ok.length)}` });
   }
   setBusy(true, "检查重复…");
@@ -254,7 +256,10 @@ async function submitJobs(list, badN = 0) {
   const { data: batch, error } = await sb.from("batches").insert({ name: new Date().toISOString() }).select().single();
   let res = { ok: false, text: error?.message };
   if (!error) {
-    const { data: rows, error: e2 } = await sb.from("jobs").insert(list.map((r) => ({ batch_id: batch.id, etsy_url: r.url, ...(r.id ? { etsy_listing_id: r.id } : {}) }))).select("id");
+    const pre = $("preScreen")?.checked;
+    const { data: rows, error: e2 } = await sb.from("jobs").insert(list.map((r) => ({ batch_id: batch.id, etsy_url: r.url, ...(r.id ? { etsy_listing_id: r.id } : {}), ...(pre ? { prescreen: true } : {}) }))).select("id");
+    if (!e2 && pre) { $("urls").value = ""; onUrlsInput(); setBusy(false); showSubmitResult({ ok: true, text: `✓ 已提交 ${list.length} 条预筛选：先取 EHunt 数据，确认后再分析。${quotaPlan(list.length, list.length)}` });
+      location.hash = `#/screen/${batch.id}`; return; }
     if (e2) res = { ok: false, text: `提交失败：${e2.message}` };
     else {
       res = { ok: true, text: `✓ 已提交 ${list.length} 条，已开始排队分析${badN ? `；忽略无效 ${badN} 条` : ""}。${quotaPlan(list.length, list.length)}` };
@@ -743,10 +748,12 @@ function renderLibrary() {
   $("libGrid").innerHTML = `<div class="card empty lib-empty"><div class="ico">★</div><h3>${totalAll ? (L.q || L.reason ? "没有匹配的产品" : `「${L.stage === "all" ? "全部" : STAGE_NAME[L.stage]}」里还没有产品`) : "产品库还是空的"}</h3>
     <p class="muted">${totalAll ? (L.stage === "candidate" || L.stage === "all" ? "在任务中点“☆ 加入产品库”会进入备选" : "在备选中选择产品移到这里") : "在已完成任务上点“☆ 加入产品库”，或勾选多个任务批量加入"}</p></div>`;
 }
+const SCR = createScreen({ $, esc, imgUrl, toast, getSb: () => sb, DEMO, QS });
 function route() {
-  const lib = location.hash.startsWith("#/library");
-  if (!$("nav").classList.contains("hidden")) { $("app").classList.toggle("hidden", lib); $("libraryView").classList.toggle("hidden", !lib); }
-  document.querySelectorAll("[data-nav]").forEach((a) => a.classList.toggle("active", (a.dataset.nav === "library") === lib));
+  const lib = location.hash.startsWith("#/library"), scr = location.hash.startsWith("#/screen");
+  if (!$("nav").classList.contains("hidden")) { $("app").classList.toggle("hidden", lib || scr); $("libraryView").classList.toggle("hidden", !lib); $("screenView").classList.toggle("hidden", !scr); }
+  document.querySelectorAll("[data-nav]").forEach((a) => a.classList.toggle("active", a.dataset.nav === (lib ? "library" : scr ? "screen" : "tasks")));
+  if (scr) { if (DEMO || (sb && currentUser)) SCR.show(location.hash.split("/")[2] || null); } else SCR.hide();
   if (lib) { renderLibrary(); if (!DEMO && sb && currentUser) loadLibrary(); }
 }
 window.addEventListener("hashchange", () => { closeDrawer(); route(); window.scrollTo(0, 0); });

@@ -8,12 +8,12 @@
 <link rel="preconnect" href="https://cdn.jsdelivr.net" crossorigin>
 <link rel="preconnect" href="https://oiymgpargbesvcfxyksj.supabase.co" crossorigin>
 <link rel="preconnect" href="https://i.etsystatic.com">
-<link rel="stylesheet" href="css/app.css?v=ed279c31">
+<link rel="stylesheet" href="css/app.css?v=e68ab02c">
 </head>
 <body>
 <header class="topbar">
   <div class="brand"><span class="logo">◆</span> 选品雷达 <span class="brand-sub">Etsy → Amazon US</span></div>
-  <nav id="nav" class="nav hidden"><a href="#/" data-nav="tasks">任务</a><a href="#/library" data-nav="library">产品库 <span id="libCount" class="nbadge">0</span></a></nav>
+  <nav id="nav" class="nav hidden"><a href="#/" data-nav="tasks">任务</a><a href="#/screen" data-nav="screen">预筛选</a><a href="#/library" data-nav="library">产品库 <span id="libCount" class="nbadge">0</span></a></nav>
   <div id="userBox" class="user hidden"><span id="quotaMeter" class="qmeter hidden" title="EHunt 每日额度（每条新 listing 1 次；24 小时内重复的 listing 走缓存不耗额度）"></span><span id="demoBadge" class="pill pill-warn hidden">演示数据</span><span id="who" class="muted"></span><button id="btnLogout" class="btn btn-ghost btn-sm">退出</button></div>
 </header>
 
@@ -27,6 +27,13 @@
       <button id="btnLogin" class="btn btn-primary btn-block">发送登录链接</button>
       <p id="loginMsg" class="hint"></p>
     </div>
+  </section>
+
+  <section id="screenView" class="hidden">
+    <div class="lib-head"><div><h2>预筛选 <span class="hint" id="screenSum"></span></h2><p class="muted">只取了 EHunt 数据（每条新 listing 1 次额度，24 小时内重复走缓存）。点 ✕ 排除不想要的，确认后剩余的才进入识别、亚马逊匹配和截图。每 50 条一批，图片加载完即可确认，后面的批次继续加载。</p></div></div>
+    <div id="screenTabs" class="fchips sc-tabs"></div>
+    <div id="screenBody"></div>
+    <div id="screenFoot"></div>
   </section>
 
   <section id="libraryView" class="hidden">
@@ -46,6 +53,7 @@
       <div id="dupeBox"></div>
       <div class="composer-foot"><span id="urlCount" class="muted">0 条有效链接 · 单次最多 500 条</span>
         <span class="spacer"></span>
+        <label class="pre-opt" title="先只取 EHunt 数据，看图排除后再做识别/匹配/截图，省 DeepSeek 与 Keepamore 调用"><input id="preScreen" type="checkbox" checked> 先预筛选</label>
         <button id="btnSubmit" class="btn btn-primary">开始分析 →</button></div>
       <div id="submitMsg" class="submit-msg" role="status" aria-live="polite"></div>
     </div>
@@ -76,6 +84,6 @@
   <div class="modal-foot"><button id="modalCancel" class="btn btn-ghost">取消</button><button id="modalOk" class="btn btn-primary">确定</button></div></div></div>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.js" integrity="sha384-BWcjm9OdFth9TbhCxZPdm+gAOUMAzQy9nmTs12ioXdCcbVnJaPMn+fMUoQCLt60R" crossorigin="anonymous"></script>
-<script type="module" src="js/app.js?v=34a095a0"></script>
+<script type="module" src="js/app.js?v=3c6745bc"></script>
 </body>
 </html>

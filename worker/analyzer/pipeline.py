@@ -1,5 +1,6 @@
 import logging
-from dataclasses import asdict
+from dataclasses import asdict, fields as dc_fields
+from .models import EtsyProduct
 from .etsy_url import parse_listing_id, parse_slug, is_short, resolve_short
 from .errors import PermanentError, JobCanceled, is_retryable
 from .scoring import assess, classify
@@ -132,6 +133,45 @@ def _snapshots(job, store, shot, pages, matches, limit, threads=SNAPSHOT_THREADS
     return rows
 
 
+def fetch_stage(job, store, etsy, step, min_reviews=50, supplement_shop=False, ehunt_min_remaining=0):
+    """取数段：解析 URL → EHunt（缓存优先）→ 评论 → 保存 etsy_products。"""
+    url = job["etsy_url"]
+    lid = parse_listing_id(url)
+    if not lid and is_short(url):
+        url = resolve_short(url) or ""
+        lid = parse_listing_id(url)
+        if not lid:
+            raise PermanentError("etsy.me 短链无法展开，请在浏览器打开后复制完整商品地址")
+    if not lid:
+        raise PermanentError("无法从 URL 解析 Etsy listing id")
+    step("fetch_etsy", status="running", etsy_listing_id=lid)
+    c0 = getattr(etsy, "calls", 0)
+    try:
+        prod = _get_listing(etsy, lid, parse_slug(url))
+    finally:
+        _check_ehunt_remaining(store, etsy, ehunt_min_remaining, c0)
+    reviews = etsy.get_reviews(prod, min_reviews=min_reviews, supplement_shop=supplement_shop)
+    store.save_etsy_product(job, {**{k: v for k, v in asdict(prod).items()},
+                                  "reviews": [asdict(r) for r in reviews]})
+    return prod, reviews
+
+
+def load_saved_product(store, etsy, job, min_reviews=50, supplement_shop=False):
+    """分析段：从库里还原取数段保存的 EtsyProduct（0 次 EHunt 调用）。"""
+    row = store.load_etsy_product(job)
+    if not row or not row.get("listing_id"):
+        return None, None
+    fields = {f.name for f in dc_fields(EtsyProduct)}
+    prod = EtsyProduct(**{k: v for k, v in row.items() if k in fields})
+    prod.listing_id = int(prod.listing_id)
+    prod.raw = dict(prod.raw or {})
+    totals = getattr(etsy, "_totals", None)
+    if isinstance(totals, dict):  # EHunt 无评论正文：评论总数来自已存的 ehunt 指标
+        totals.setdefault(prod.listing_id, (prod.raw.get("ehunt") or {}).get("reviews"))
+    reviews = etsy.get_reviews(prod, min_reviews=min_reviews, supplement_shop=supplement_shop)
+    return prod, reviews
+
+
 def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapshot_limit=0,
                 min_reviews=50, supplement_shop=False, ehunt_min_remaining=0):
     jid = job["id"]
@@ -148,24 +188,22 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
     if hasattr(amazon, "on_wait"):
         amazon.on_wait = lambda: store.update_job(jid, locked_at=_now())
     try:
+        pre, kept = bool(job.get("prescreen")), job.get("screen_state") == "kept"
+        if pre and kept:
+            # 分析段：EHunt 数据已在取数段入库 → 直接读库，不再调 EHunt（额度/熔断都不影响）
+            step("analyze", status="running")
+            prod, reviews = load_saved_product(store, etsy, job, min_reviews, supplement_shop)
+            if prod is None:  # 理论上不会发生（取数段已保存）；兜底走缓存优先的取数
+                prod, reviews = fetch_stage(job, store, etsy, step, min_reviews, supplement_shop, ehunt_min_remaining)
+        else:
+            prod, reviews = fetch_stage(job, store, etsy, step, min_reviews, supplement_shop, ehunt_min_remaining)
+            if pre:
+                # 预筛选：取数段到此为止，等用户在筛选页确认（screen_confirm）后再进入昂贵的分析段
+                store.update_job(jid, status="screening", stage="awaiting_confirm", screen_state="awaiting",
+                                 locked_by=None, error=None)
+                return True
+        lid = prod.listing_id
         url = job["etsy_url"]
-        lid = parse_listing_id(url)
-        if not lid and is_short(url):
-            url = resolve_short(url) or ""
-            lid = parse_listing_id(url)
-            if not lid:
-                raise PermanentError("etsy.me 短链无法展开，请在浏览器打开后复制完整商品地址")
-        if not lid:
-            raise PermanentError("无法从 URL 解析 Etsy listing id")
-        step("fetch_etsy", status="running", etsy_listing_id=lid)
-        c0 = getattr(etsy, "calls", 0)
-        try:
-            prod = _get_listing(etsy, lid, parse_slug(url))
-        finally:
-            _check_ehunt_remaining(store, etsy, ehunt_min_remaining, c0)
-        reviews = etsy.get_reviews(prod, min_reviews=min_reviews, supplement_shop=supplement_shop)
-        store.save_etsy_product(job, {**{k: v for k, v in asdict(prod).items()},
-                                      "reviews": [asdict(r) for r in reviews]})
 
         step("analyze")
         an = llm.analyze_product(prod, reviews)

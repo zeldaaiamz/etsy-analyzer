@@ -26,6 +26,7 @@ class Store:
     def cache_put(self, key, provider, payload, ttl): ...
     def discard_exhausted_job(self, job_id, error): ...
     def purge_expired_cache(self): return 0
+    def load_etsy_product(self, job): return None
 
 
 class MemoryStore(Store):
@@ -49,12 +50,32 @@ class MemoryStore(Store):
             self.snapshots = [s for s in self.snapshots if s["job_id"] != job_id]
             return "deleted"
 
-    def enqueue(self, url, user_id="mock-user", batch_id="mock-batch"):
+    def enqueue(self, url, user_id="mock-user", batch_id="mock-batch", prescreen=False):
         jid = str(uuid.uuid4())
         self.jobs[jid] = dict(id=jid, etsy_url=url, user_id=user_id, batch_id=batch_id,
                               status="queued", attempts=0, max_attempts=3, run_after=_now(),
-                              created_at=_now(), queued_at=_now(), error=None)
+                              created_at=_now(), queued_at=_now(), error=None,
+                              prescreen=prescreen, screen_state=None)
         return jid
+
+    def load_etsy_product(self, job):
+        return self.etsy.get(job["id"])
+
+    def screen_confirm(self, keep, reject=()):
+        """与 017 screen_confirm 一致：只作用于 status='screening' 的预筛选任务。"""
+        with self.lock:
+            nk = nr = 0
+            for jid in keep:
+                j = self.jobs.get(jid)
+                if j and j.get("prescreen") and j["status"] == "screening":
+                    j.update(status="queued", screen_state="kept", screened_at=_now(), attempts=0, error=None,
+                             stage=None, run_after=_now(), queued_at=_now(), finished_at=None); nk += 1
+            for jid in reject:
+                j = self.jobs.get(jid)
+                if j and j.get("prescreen") and j["status"] == "screening":
+                    j.update(status="canceled", screen_state="rejected", screened_at=_now(), finished_at=_now(),
+                             error="筛选时已排除"); nr += 1
+            return {"kept": nk, "rejected": nr}
 
     def claim_next_job(self, worker_id):
         with self.lock:  # 等价于 FOR UPDATE SKIP LOCKED
@@ -63,13 +84,14 @@ class MemoryStore(Store):
             q = sorted((j for j in self.jobs.values()
                         if j["status"] == "queued" and not j.get("cancel_requested")
                         and (j["run_after"] <= _now() or (paused and "额度" in (j.get("error") or "")))
-                        and (not paused or self._cached(j))),
+                        and (not paused or j.get("screen_state") == "kept" or self._cached(j))),
                        key=lambda j: j["created_at"])
             if not q:
                 return None
             j = q[0]
             j.update(status="running", locked_by=worker_id, attempts=j["attempts"] + 1,
-                     started_at=_now(), finished_at=None, stage="fetch_etsy", error=None)
+                     started_at=_now(), finished_at=None, error=None,
+                     stage="analyze" if j.get("screen_state") == "kept" else "fetch_etsy")
             return dict(j)
 
     def _cached(self, j):
@@ -140,8 +162,25 @@ class SupabaseStore(Store):
     def _call(self, method, path, body=None, params=None, prefer="return=minimal"):
         return request_json(method, self.base + path, {**self.h, "Prefer": prefer}, params, body)
 
+    v2 = None  # None=未探测；True/False=017 claim_next_job_v2 是否已部署
+
     def claim_next_job(self, worker_id):
+        """优先 claim_next_job_v2（017，含预筛选任务）；未部署则回退旧版（旧版跳过预筛选任务）。"""
+        if self.v2 is not False:
+            try:
+                rows = self._call("POST", "/rpc/claim_next_job_v2", {"p_worker": worker_id}, prefer="")
+                self.v2 = True
+                return rows[0] if rows else None
+            except Exception as e:  # noqa: BLE001
+                if self.v2 is None and ("HTTP 404" in str(e) or "PGRST202" in str(e)):
+                    self.v2 = False
+                else:
+                    raise
         rows = self._call("POST", "/rpc/claim_next_job", {"p_worker": worker_id}, prefer="")
+        return rows[0] if rows else None
+
+    def load_etsy_product(self, job):
+        rows = self._call("GET", "/etsy_products", params={"job_id": f"eq.{job['id']}", "select": "*"}, prefer="")
         return rows[0] if rows else None
 
     def update_job(self, job_id, **f):

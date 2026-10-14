@@ -127,3 +127,9 @@ stateDiagram-v2
 - 每关键词：`/productsearch`（5 units，亚马逊自然排序，排除广告）→ 前 `KEEPAMORE_RESULTS_PER_KEYWORD`（默认 10）个 ASIN → `/product?rating=1&history=false&stats=90`（1 unit/ASIN，补评分/评论数）。
 - 每任务约 3×(5+10)=45 units；每次调用的 unitsConsumed 与资源包剩余量写入决策过程“亚马逊搜索”步骤。
 - 可扩展（未接入）：ABA `/aba/search`→`/aba/word/:id` 验证关键词搜索排名与 Top3 ASIN 点击/转化（各 1 unit）；`/aba/asin-reverse` 反查竞品关键词；`/graphimage` 价格历史图（1 unit）可做快照；Google Trends 趋势。
+
+## 预筛选（016/017，分支 prescreen）
+- 提交时勾选“先预筛选”→ jobs.prescreen=true。worker（claim_next_job_v2）只跑**取数段**：EHunt `POST /api/v1/items`（24h provider_cache 优先）→ 保存 etsy_products → status='screening'、screen_state='awaiting'。额度熔断照旧：取不到的留在队列，次日 UTC 0 点继续。
+- 筛选页 `#/screen[/<batch_id>]`（web/js/screen.js）：screen_list() 读数据，每 50 条一批，大图 + 标题 + 价格，✕ 排除 / 撤销。一批的数据和图片都加载完就能确认；每批有自己的“分析剩余数据”按钮，底部另有一个覆盖全部已加载批次。
+- screen_confirm(keep, reject)：保留的 → screen_state='kept' 重新排队；worker 从**库里**读已存的 EHunt 数据（0 次 EHunt 调用，熔断中也放行），继续 DeepSeek → Keepamore → 截图。排除的 → status='canceled'、screen_state='rejected'，之后不再产生任何调用。它们不进任务列表（task_jobs 只放行 kept 的预筛选任务），在筛选页“已排除”标签里可以 screen_restore() 恢复。
+- 兼容：旧版 claim_next_job 跳过预筛选任务；新 worker 在 v2 不存在时自动回退旧版。演示：`?demo=1&screen=300#/screen`（`&sshot=loading|rejected|confirm|bottom`）。
