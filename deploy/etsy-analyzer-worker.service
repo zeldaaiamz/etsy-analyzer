@@ -1,0 +1,22 @@
+# 安装：sudo cp deploy/etsy-analyzer-worker.service /etc/systemd/system/
+#       sudo systemctl daemon-reload && sudo systemctl enable --now etsy-analyzer-worker
+[Unit]
+Description=Etsy->Amazon analyzer worker (polls Supabase job queue)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=box
+WorkingDirectory=/opt/etsy-analyzer/worker
+EnvironmentFile=/opt/etsy-analyzer/worker/.env
+ExecStart=/opt/etsy-analyzer/venv/bin/python -m analyzer.main
+Restart=always
+RestartSec=10
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target

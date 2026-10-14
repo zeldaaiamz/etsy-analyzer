@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Etsy → Amazon 选品分析</title>
+<style>
+ body{font-family:system-ui,"PingFang SC",sans-serif;margin:24px;max-width:1400px}
+ textarea{width:100%;height:120px} table{border-collapse:collapse;width:100%;font-size:13px;margin-top:16px}
+ th,td{border:1px solid #ddd;padding:6px;vertical-align:top} th{background:#f5f5f5}
+ .queued{color:#888}.running{color:#06c}.succeeded{color:#080}.failed{color:#c00}
+ .hidden{display:none} button{padding:6px 14px}
+</style>
+</head>
+<body>
+<h1>Etsy → Amazon US 选品分析</h1>
+<section id="login">
+  <input id="email" type="email" placeholder="邮箱"> <button id="btnLogin">发送登录链接</button>
+  <p id="loginMsg"></p>
+</section>
+<section id="app" class="hidden">
+  <p>已登录：<span id="who"></span> <button id="btnLogout">退出</button></p>
+  <textarea id="urls" placeholder="每行粘贴一个 Etsy 商品链接，例如 https://www.etsy.com/listing/1234567890/..."></textarea>
+  <button id="btnSubmit">提交分析</button> <span id="submitMsg"></span>
+  <table>
+    <thead><tr><th>状态</th><th>Etsy 链接</th><th>产品</th><th>目标人群</th><th>关键词</th>
+      <th>竞争</th><th>需求</th><th>机会分</th><th>结论</th><th>亚马逊相似品（评论/BSR/估算月销）</th></tr></thead>
+    <tbody id="rows"></tbody>
+  </table>
+</section>
+<script type="module" src="js/app.js"></script>
+</body>
+</html>
