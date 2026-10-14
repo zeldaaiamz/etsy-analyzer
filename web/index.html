@@ -10,6 +10,7 @@
 <body>
 <header class="topbar">
   <div class="brand"><span class="logo">◆</span> 选品雷达 <span class="brand-sub">Etsy → Amazon US</span></div>
+  <nav id="nav" class="nav hidden"><a href="#/" data-nav="tasks">任务</a><a href="#/library" data-nav="library">产品库 <span id="libCount" class="nbadge">0</span></a></nav>
   <div id="userBox" class="user hidden"><span id="demoBadge" class="pill pill-warn hidden">演示数据</span><span id="who" class="muted"></span><button id="btnLogout" class="btn btn-ghost btn-sm">退出</button></div>
 </header>
 
@@ -23,6 +24,11 @@
       <button id="btnLogin" class="btn btn-primary btn-block">发送登录链接</button>
       <p id="loginMsg" class="hint"></p>
     </div>
+  </section>
+
+  <section id="libraryView" class="hidden">
+    <div class="section-head"><div><h2>产品库 <span class="hint" id="libHeadN"></span></h2><p class="muted">从任务中“加入产品库”的选品备选。备注、分组、对比等更多功能即将推出。</p></div></div>
+    <div id="libList" class="lib-list"></div>
   </section>
 
   <section id="app" class="hidden">
@@ -49,6 +55,7 @@
       <button class="btn btn-ghost btn-sm" data-export="list" title="导出当前筛选结果">⇩ 导出 CSV</button></div>
     </div>
     <p id="pauseNote" class="note pause-note hidden">“暂停”仅对排队中的任务生效，继续后重新排队；运行中的任务可点“停止”，会在当前步骤完成后停下（已发出的请求仍会计费）。</p>
+    <div id="bulkBar" class="bulk-bar"></div>
     <div id="list" class="list"></div>
   </section>
 </main>
@@ -60,6 +67,8 @@
   <div class="drawer-head"><div id="drawerTitle" class="drawer-title"></div><button class="icon-btn" id="drawerClose" aria-label="关闭">✕</button></div>
   <div id="drawerBody" class="drawer-body"></div>
 </aside>
+<div id="modal" class="modal hidden" role="dialog" aria-modal="true"><div class="modal-card"><h3 id="modalTitle"></h3><div id="modalBody" class="modal-body"></div>
+  <div class="modal-foot"><button id="modalCancel" class="btn btn-ghost">取消</button><button id="modalOk" class="btn btn-primary">确定</button></div></div></div>
 <div id="toast" class="toast" role="status" aria-live="polite"></div>
 <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.js" integrity="sha384-BWcjm9OdFth9TbhCxZPdm+gAOUMAzQy9nmTs12ioXdCcbVnJaPMn+fMUoQCLt60R" crossorigin="anonymous"></script>
 <script type="module" src="js/app.js"></script>

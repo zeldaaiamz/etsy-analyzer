@@ -15,10 +15,10 @@ const monthly = (s) => s?.monthly_sold ?? s?.est_monthly_sales ?? (s?.raw || {})
 const KIND = { identical: "同款", similar: "类似品", search_result: "搜索页" };
 const STATUS = { queued: ["处理中 · 排队中", "pill-info"], running: ["处理中 · 进行中", "pill-info pill-running"], succeeded: ["已完成", "pill-ok"], failed: ["异常", "pill-bad"], paused: ["已暂停", "pill-warn"], canceled: ["已取消", ""] };
 // 任务分类：待我处理 = 已完成但未查看；处理中 = queued+running
-const CATS = [["all", "全部"], ["todo", "待我处理"], ["active", "处理中"], ["done", "已完成"], ["error", "异常"], ["paused", "已暂停"]];
+const CATS = [["all", "全部"], ["todo", "待我处理"], ["active", "处理中"], ["done", "已完成"], ["error", "异常"], ["paused", "已暂停"], ["lib", "已入库"]];
 const catOf = (j) => j.status === "failed" ? "error" : j.status === "paused" ? "paused" : j.status === "queued" || j.status === "running" ? "active"
   : j.status === "succeeded" ? (j.reviewed_at ? "done" : "todo") : "other";
-const inCat = (j, c) => c === "all" || catOf(j) === c || (c === "done" && j.status === "succeeded");
+const inCat = (j, c) => c === "all" || (c === "lib" && inLib(j)) || catOf(j) === c || (c === "done" && j.status === "succeeded");
 const PRIO = { todo: 0, error: 1, active: 2, paused: 3, done: 4, other: 5 };
 const F = { cat: "all", q: "" };
 const ts = (v) => (v ? new Date(v).getTime() : null);
@@ -36,8 +36,11 @@ const IMG_SRC = { mock_placeholder: "mock 占位图", product_image: "商品主�
 
 let sb = null;
 const S = { jobs: new Map(), analyses: new Map(), etsy: new Map(), snaps: new Map(), asins: new Map(), matches: new Map(),
-  signed: new Map(), loaded: false, statusLoaded: false, limit: PAGE, hasMore: false, flash: new Set(), status: null, hb: [], usage: [] };
+  signed: new Map(), lib: new Map(), sel: new Set(), loaded: false, statusLoaded: false, limit: PAGE, hasMore: false, flash: new Set(), status: null, hb: [], usage: [] };
 const group = (rows) => { const m = new Map(); rows.forEach((r) => { if (!m.has(r.job_id)) m.set(r.job_id, []); m.get(r.job_id).push(r); }); return m; };
+
+const lidOf = (j) => j && Number(j.etsy_listing_id || S.etsy.get(j.id)?.listing_id || 0) || null;
+const inLib = (j) => { const l = lidOf(j); return !!l && S.lib.has(l); };
 
 // ---------- 小工具：toast / 复制 / CSV ----------
 let toastT;
@@ -50,6 +53,16 @@ async function copyText(text) {
   catch { const ta = document.createElement("textarea"); ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand("copy"); ta.remove(); }
   toast(`已复制：${text.length > 60 ? text.slice(0, 60) + "…" : text}`, "ok");
 }
+let modalRes = null;
+function confirmDialog({ title, body, ok = "确定", danger = false }) {
+  $("modalTitle").textContent = title; $("modalBody").innerHTML = body;
+  $("modalOk").textContent = ok; $("modalOk").className = `btn ${danger ? "btn-danger" : "btn-primary"}`;
+  $("modal").classList.remove("hidden"); $("modalOk").focus();
+  return new Promise((res) => { modalRes = res; });
+}
+const closeModal = (v) => { $("modal").classList.add("hidden"); const r = modalRes; modalRes = null; r && r(v); };
+$("modalOk").onclick = () => closeModal(true); $("modalCancel").onclick = () => closeModal(false);
+$("modal").addEventListener("click", (ev) => { if (ev.target.id === "modal") closeModal(false); });
 const csvCell = (v) => { let s = v == null ? "" : Array.isArray(v) ? v.join(" | ") : String(v);
   if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; // 防 CSV 公式注入
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
@@ -69,7 +82,7 @@ async function boot() {
     const d = await import("./demo.js");
     showApp("demo@example.com");
     $("demoBadge").classList.remove("hidden");
-    setTimeout(() => {
+    setTimeout(async () => {
       const fx = d.fixtures(), shift = Date.now() - new Date(fx.now || Date.now()).getTime();
       fx.jobs.forEach((j) => ["created_at", "queued_at", "started_at", "finished_at", "reviewed_at"].forEach((k) => { if (j[k]) j[k] = new Date(new Date(j[k]).getTime() + shift).toISOString(); }));
       if (QS.has("flash")) S.flash = new Set(fx.jobs.filter((j) => j.status === "queued" || j.status === "running").map((j) => j.id));
@@ -77,7 +90,12 @@ async function boot() {
       S.hb = [{ worker_id: "demo", last_seen: new Date(Date.now() - (QS.has("offline") ? 9 * 60e3 : 5e3)).toISOString() }];
       S.statusLoaded = true;
       S.usage = [{ provider: "ehunt", calls: 7, units: 7, cache_hits: 3 }, { provider: "keepamore", calls: 36, units: 270, cache_hits: 12 }, { provider: "deepseek", calls: 14, units: 41210, cache_hits: 0 }];
+      const { libraryFixtures } = await import("./demo-library.js");
+      S.lib = new Map(libraryFixtures(fx).map((r) => [Number(r.etsy_listing_id), r]));
+      if (QS.has("failed")) fx.jobs.push({ ...fx.jobs.find((j) => j.status === "failed"), id: "demo-failed-2", etsy_url: "https://www.etsy.com/listing/1700000009/y", etsy_listing_id: 1700000009, error: "亚马逊搜索超时（Keepamore 504）" });
       ingest(fx);
+      if (QS.has("sel")) { [...S.jobs.values()].filter((j) => j.status !== "running").slice(0, Number(QS.get("sel")) || 3).forEach((j) => S.sel.add(j.id)); render(); }
+      if (QS.has("confirm")) bulk(QS.get("confirm") || "delete");
       if (QS.has("submitted")) showSubmitResult({ ok: true, text: "已提交 3 条，已开始排队分析（新任务已高亮）" });
       if (QS.has("open")) { const first = [...S.analyses.keys()][Number(QS.get("open")) || 0]; first && openDetail(first); }
       if (QS.has("paste")) { $("urls").value = QS.get("paste").split("|").join("\n"); onUrlsInput(); }
@@ -93,11 +111,11 @@ async function boot() {
     currentUser = uid;
     if (uid) { showApp(session.user.email); setTimeout(() => { loadAll(); loadStatus(); subscribe(); }, 0); }
     else { S.jobs = new Map(); S.loaded = false; S.signed.clear(); closeDrawer();
-      $("login").classList.remove("hidden"); $("app").classList.add("hidden"); $("userBox").classList.add("hidden"); }
+      $("login").classList.remove("hidden"); $("app").classList.add("hidden"); $("libraryView").classList.add("hidden"); $("nav").classList.add("hidden"); $("userBox").classList.add("hidden"); }
   });
 }
 function showApp(email) {
-  $("login").classList.add("hidden"); $("app").classList.remove("hidden");
+  $("login").classList.add("hidden"); $("nav").classList.remove("hidden"); route();
   $("userBox").classList.remove("hidden"); $("who").textContent = email;
 }
 const nextUtcMidnight = () => { const d = new Date(); d.setUTCHours(24, 0, 0, 0); return d.toISOString(); };
@@ -205,7 +223,8 @@ function ingest({ jobs, analyses, etsy, snaps, signed, matches }) {
   S.asins = new Map();
   [...snaps, ...(matches || [])].forEach((r) => { if (r.asin) { if (!S.asins.has(r.job_id)) S.asins.set(r.job_id, new Set()); S.asins.get(r.job_id).add(r.asin.toUpperCase()); } });
   if (signed) Object.entries(signed).forEach(([k, v]) => S.signed.set(k, { url: v, exp: Infinity }));
-  S.loaded = true; render(); renderBanners();
+  S.loaded = true; [...S.sel].forEach((id) => S.jobs.has(id) || S.sel.delete(id)); render(); renderBanners();
+  if (location.hash.startsWith("#/library")) renderLibrary();
   if (drawerState) renderSnaps();
 }
 let loading = false;
@@ -215,12 +234,14 @@ async function loadAll() {
     const j = await sb.from("jobs").select("*").order("created_at", { ascending: false }).limit(S.limit + 1);
     const jobs = j.data || []; S.hasMore = jobs.length > S.limit; jobs.length = Math.min(jobs.length, S.limit);
     const ids = jobs.map((x) => x.id), inIds = (q) => (ids.length ? q.in("job_id", ids) : q.limit(0));
-    const [a, e, s, m] = await Promise.all([
+    const [a, e, s, m, lb] = await Promise.all([
       inIds(sb.from("analyses").select("*")),
       inIds(sb.from("etsy_products").select("job_id,title,image_url,price,shop_name,listing_id,raw")),
       inIds(sb.from("evidence_snapshots").select("*").order("id")),
       inIds(sb.from("amazon_matches").select("job_id,asin")),
+      sb.from("product_library").select("*").order("added_at", { ascending: false }),
     ]);
+    if (!lb.error) S.lib = new Map((lb.data || []).map((r) => [Number(r.etsy_listing_id), r]));
     ingest({ jobs, analyses: a.data || [], etsy: e.data || [], snaps: s.data || [], matches: m.data || [] });
   } finally { loading = false; }
 }
@@ -286,6 +307,7 @@ function subscribe() {
     .on("postgres_changes", { event: "*", schema: "public", table: "analyses" }, reload)
     .on("postgres_changes", { event: "INSERT", schema: "public", table: "evidence_snapshots" }, reload)
     .on("postgres_changes", { event: "*", schema: "public", table: "service_status" }, loadStatus)
+    .on("postgres_changes", { event: "*", schema: "public", table: "product_library" }, reload)
     .subscribe();
   // 兜底：Realtime 掉线时，有处理中的任务就每 15 秒刷新；心跳/用量每 30 秒；签名 URL 每 5 分钟检查
   pollTimer = setInterval(() => { if ([...S.jobs.values()].some((j) => j.status === "queued" || j.status === "running")) loadAll(); }, 15000);
@@ -298,6 +320,8 @@ const RPC = { pause: ["pause_job", "paused"], resume: ["resume_job", "queued"], 
   reviewed: ["mark_job_reviewed", null], cancel: ["request_cancel", null] };
 async function jobAction(id, act) {
   const j = S.jobs.get(id); if (!j) return;
+  if (act === "lib") return libToggle([id], !inLib(j));
+  if (act === "del") return deleteJobs([id]);
   if (act === "rerun" && !confirm("重新分析会再次调用数据源（24 小时内的 Etsy/亚马逊数据走缓存，不重复扣费）。继续？")) return;
   if (act === "cancel" && j.status === "running" && !confirm("停止运行中的任务？会在当前步骤完成后停下，已发出的请求仍会计费。")) return;
   const [fn, st] = RPC[act], now = new Date().toISOString();
@@ -313,6 +337,106 @@ async function jobAction(id, act) {
   if (act === "cancel") toast(data === "requested" ? "已请求停止，将在当前步骤完成后停下" : "已取消", "ok");
   if (act === "rerun" || act === "retry") toast("已重新加入队列", "ok");
 }
+
+// ---------- 产品库 / 删除 / 批量 ----------
+const nIds = (n) => `<b>${n}</b>`;
+async function libToggle(ids, add) {
+  const jobs = ids.map((id) => S.jobs.get(id)).filter((j) => j && (add ? j.status === "succeeded" && !inLib(j) : inLib(j)));
+  if (!jobs.length) return toast(add ? "没有可加入的已完成任务" : "没有已入库的任务", "bad");
+  if (DEMO) {
+    jobs.forEach((j) => { const l = lidOf(j), e = S.etsy.get(j.id) || {}, a = S.analyses.get(j.id) || {};
+      if (add) S.lib.set(l, { id: `demo-${l}`, job_id: j.id, etsy_listing_id: l, etsy_url: j.etsy_url, title: e.title, image_url: e.image_url, price: e.price,
+        product_summary: a.product_summary, target_audience: a.target_audience, keywords: a.keywords, added_at: new Date().toISOString() });
+      else S.lib.delete(l); });
+  } else {
+    const { data, error } = add ? await sb.rpc("add_to_library", { p_jobs: jobs.map((j) => j.id) })
+      : await sb.rpc("remove_from_library", { p_items: null, p_jobs: jobs.map((j) => j.id) });
+    if (error) { toast(error.message, "bad"); return loadAll(); }
+    await loadAll();
+    if (!data) return toast("操作未生效，已刷新", "bad");
+  }
+  toast(add ? `已加入产品库 ${jobs.length} 个` : `已移出产品库 ${jobs.length} 个`, "ok");
+  render(); renderLibrary(); if (drawerState) refreshDrawerActs();
+}
+async function removeLibItems(items) {
+  if (!DEMO) { const { error } = await sb.rpc("remove_from_library", { p_items: items.map((r) => r.id), p_jobs: null });
+    if (error) return toast(error.message, "bad"); }
+  items.forEach((r) => S.lib.delete(Number(r.etsy_listing_id)));
+  toast(`已移出 ${items.length} 个`, "ok"); render(); renderLibrary();
+}
+async function deleteJobs(ids) {
+  const all = ids.map((id) => S.jobs.get(id)).filter(Boolean), run = all.filter((j) => j.status === "running"), jobs = all.filter((j) => j.status !== "running");
+  if (!jobs.length) return confirmDialog({ title: "无法删除", body: "运行中的任务不能删除，请先点“■ 停止”，停下后再删除。", ok: "知道了" });
+  const libN = jobs.filter(inLib).length;
+  const ok = await confirmDialog({ title: `删除 ${jobs.length} 个任务？`, danger: true, ok: `删除 ${jobs.length} 个`,
+    body: `<p>将永久删除任务及其分析结果、亚马逊匹配和证据截图，<b>不可恢复</b>。</p>
+      ${run.length ? `<p class="warn-t">已跳过 ${run.length} 个运行中的任务（请先停止）。</p>` : ""}
+      ${libN ? `<p class="warn-t">其中 ${libN} 个已在产品库：产品库条目会保留（标题/图片/价格等快照），但无法再打开分析详情。</p>` : ""}` });
+  if (!ok) return;
+  if (!DEMO) {
+    const { data, error } = await sb.rpc("delete_jobs", { p_jobs: jobs.map((j) => j.id) });
+    if (error) { toast(error.message, "bad"); return loadAll(); }
+    const paths = data?.paths || [];
+    for (let i = 0; i < paths.length; i += 100) await sb.storage.from(BUCKET).remove(paths.slice(i, i + 100)); // 尽力清理截图文件
+    toast(`已删除 ${data?.deleted ?? 0} 个任务${data?.skipped_running ? `，跳过运行中 ${data.skipped_running} 个` : ""}`, "ok");
+  } else toast(`已删除 ${jobs.length} 个任务（演示）`, "ok");
+  jobs.forEach((j) => { S.jobs.delete(j.id); S.sel.delete(j.id); S.lib.forEach((r) => { if (r.job_id === j.id) r.job_id = null; }); });
+  if (drawerState && jobs.some((j) => j.id === drawerState.id)) closeDrawer();
+  render(); renderLibrary(); if (!DEMO) loadAll();
+}
+async function retryJobs(ids) {
+  const jobs = ids.map((id) => S.jobs.get(id)).filter((j) => j && (j.status === "failed" || j.status === "canceled"));
+  if (!jobs.length) return;
+  if (!await confirmDialog({ title: `重新提交 ${jobs.length} 个任务？`, ok: "重新提交", body: "<p>任务会重新排队分析，可能再次消耗 EHunt/Keepamore 额度（24 小时内的数据走缓存）。</p>" })) return;
+  if (!DEMO) { const { data, error } = await sb.rpc("retry_jobs", { p_jobs: jobs.map((j) => j.id) });
+    if (error) { toast(error.message, "bad"); return loadAll(); }
+    toast(`已重新提交 ${data} 个`, "ok"); jobs.forEach((j) => S.sel.delete(j.id)); return loadAll(); }
+  jobs.forEach((j) => { Object.assign(j, { status: "queued", error: null, queued_at: new Date().toISOString(), started_at: null, finished_at: null }); S.sel.delete(j.id); });
+  toast(`已重新提交 ${jobs.length} 个`, "ok"); render();
+}
+const selJobs = () => [...S.sel].map((id) => S.jobs.get(id)).filter(Boolean);
+function bulk(kind) {
+  const js = selJobs();
+  if (kind === "lib") return libToggle(js.map((j) => j.id), true);
+  if (kind === "retry") return retryJobs(js.map((j) => j.id));
+  if (kind === "delete") return deleteJobs(js.map((j) => j.id));
+}
+function renderBulk(visible) {
+  const js = selJobs(), n = js.length;
+  const canLib = js.filter((j) => j.status === "succeeded" && !inLib(j)).length, canRetry = js.filter((j) => j.status === "failed" || j.status === "canceled").length,
+    canDel = js.filter((j) => j.status !== "running").length;
+  const allOn = visible.length && visible.every((j) => S.sel.has(j.id));
+  $("bulkBar").className = `bulk-bar${n ? " on" : ""}`;
+  $("bulkBar").innerHTML = visible.length ? `<label class="selall"><input type="checkbox" data-selall="1"${allOn ? " checked" : ""}> 全选当前 ${visible.length} 个</label>
+    ${n ? `<span class="bulk-n">已选 <b>${n}</b></span><span class="spacer"></span>
+    <button class="btn btn-ghost btn-sm" data-bulk="lib"${canLib ? "" : " disabled"}>★ 加入产品库${canLib ? ` (${canLib})` : ""}</button>
+    <button class="btn btn-ghost btn-sm" data-bulk="retry"${canRetry ? "" : " disabled"}>↻ 重新提交${canRetry ? ` (${canRetry})` : ""}</button>
+    <button class="btn btn-danger-ghost btn-sm" data-bulk="delete"${canDel ? "" : " disabled"}>🗑 删除${canDel ? ` (${canDel})` : ""}</button>
+    <button class="btn btn-ghost btn-sm" data-bulk="clear">取消选择</button>` : '<span class="hint">勾选任务可批量加入产品库 / 重新提交 / 删除</span>'}` : "";
+}
+function renderLibrary() {
+  const items = [...S.lib.values()].sort((a, b) => String(b.added_at).localeCompare(String(a.added_at)));
+  $("libCount").textContent = items.length; $("libHeadN").textContent = items.length ? `${items.length} 个` : "";
+  $("libList").innerHTML = items.length ? items.map((r) => { const img = imgUrl(r.image_url), job = r.job_id && S.jobs.get(r.job_id);
+    return `<article class="card lib-item">${img ? `<img class="thumb" src="${img}" data-zoom="${img}" data-cap="${esc(r.title)}" alt="" loading="lazy">` : '<div class="thumb thumb-empty">◆</div>'}
+      <div class="lib-main"><a class="title" href="${safeUrl(r.etsy_url || `https://www.etsy.com/listing/${r.etsy_listing_id}`)}" target="_blank" rel="noopener">${esc(r.title || `Etsy #${r.etsy_listing_id}`)} ↗</a>
+        <div class="sub">${esc(r.product_summary || "")}${r.target_audience ? ` · <span class="muted">${esc(r.target_audience)}</span>` : ""}</div>
+        <div class="meta">${r.price != null ? `<span class="chip">$${esc(r.price)}</span>` : ""}<span class="chip">#${esc(r.etsy_listing_id)}</span>
+          ${(r.keywords || []).slice(0, 4).map((k) => `<span class="chip chip-copy" data-copy="${esc(k)}" title="点击复制">${esc(k)}</span>`).join("")}
+          <span class="hint">加入于 ${esc(new Date(r.added_at).toLocaleDateString())}</span></div></div>
+      <div class="lib-act">${job && job.status === "succeeded" ? `<button class="btn btn-ghost btn-sm" data-detail="${esc(job.id)}">查看分析 →</button>`
+        : r.job_id ? `<a class="btn btn-ghost btn-sm" href="#/" data-view="${esc(r.job_id)}" data-lid="${esc(r.etsy_listing_id)}">在任务中查找</a>` : '<span class="hint">分析已删除</span>'}
+        <button class="btn btn-ghost btn-sm" data-unlib="${esc(r.id)}">移出</button></div></article>`; }).join("")
+    : `<div class="card empty"><div class="ico">★</div><h3>产品库还是空的</h3><p class="muted">在已完成任务上点“☆ 加入产品库”，或勾选多个任务批量加入</p></div>`;
+  $("libList").innerHTML += `<p class="note">产品库功能持续完善中：备注、分组、导出、利润测算等即将推出。</p>`;
+}
+function route() {
+  const lib = location.hash.startsWith("#/library");
+  if (!$("nav").classList.contains("hidden")) { $("app").classList.toggle("hidden", lib); $("libraryView").classList.toggle("hidden", !lib); }
+  document.querySelectorAll("[data-nav]").forEach((a) => a.classList.toggle("active", (a.dataset.nav === "library") === lib));
+  if (lib) renderLibrary();
+}
+window.addEventListener("hashchange", () => { closeDrawer(); route(); window.scrollTo(0, 0); });
 setInterval(() => { document.querySelectorAll("[data-tick]").forEach((el) => { const j = S.jobs.get(el.dataset.tick); if (j) el.textContent = timeText(j); }); }, 1000);
 setInterval(renderBanners, 30000);
 function timeText(j) {
@@ -366,8 +490,10 @@ function render() {
   const doneD = all.map(runMs).filter((v, i) => v != null && all[i].status === "succeeded");
   $("avgDur").textContent = doneD.length ? `平均分析耗时 ${dur(doneD.reduce((a, b) => a + b, 0) / doneD.length)}（${doneD.length} 个）` : "";
   if (!S.loaded) return ($("list").innerHTML = skeleton());
+  if (!all.length) $("bulkBar").innerHTML = "";
   if (!all.length) return ($("list").innerHTML = `<div class="card empty"><div class="ico">🔍</div><h3>还没有分析记录</h3><p class="muted">在上方粘贴 Etsy 商品链接，点击“开始分析”</p></div>`);
   const jobs = base.filter((j) => inCat(j, F.cat)).sort((x, y) => (PRIO[catOf(x)] - PRIO[catOf(y)]) || y.created_at.localeCompare(x.created_at));
+  renderBulk(jobs); renderLibCount();
   $("pauseNote").classList.toggle("hidden", !all.some((j) => j.status === "queued" || j.status === "running" || j.status === "paused"));
   const more = S.hasMore ? `<button class="btn btn-ghost load-more" data-more="1">加载更多（已显示最近 ${S.jobs.size} 个任务）</button>` : "";
   if (!jobs.length) return ($("list").innerHTML = `<div class="card empty"><div class="ico">🗂️</div><h3>没有符合条件的任务</h3><p class="muted">换个分类或<a href="#" data-clear="1">清除筛选</a>${S.hasMore ? "；较早的任务需先“加载更多”" : ""}</p></div>${more}`);
@@ -377,7 +503,8 @@ function render() {
     const [stText, stCls] = STATUS[j.status] || [j.status, ""];
     const img = imgUrl(e.image_url);
     const errText = j.error && (j.status === "failed" || j.status === "queued" || j.status === "canceled") ? friendlyErr(j) : "";
-    return `<article class="card row${S.flash.has(j.id) ? " flash" : ""}" data-row="${esc(j.id)}">
+    return `<article class="card row${S.flash.has(j.id) ? " flash" : ""}${S.sel.has(j.id) ? " selected" : ""}" data-row="${esc(j.id)}">
+      <label class="selbox" title="选择"><input type="checkbox" data-sel="${esc(j.id)}"${S.sel.has(j.id) ? " checked" : ""}></label>
       ${img ? `<img class="thumb" src="${img}" data-zoom="${img}" data-cap="${esc(e.title)}" alt="" loading="lazy">` : `<div class="thumb ${j.status === "running" || j.status === "queued" ? "sk" : ""}"></div>`}
       <div class="c-main">
         <a class="title" href="${safeUrl(j.etsy_url)}" target="_blank" rel="noopener">${esc(e.title || `Etsy #${j.etsy_listing_id || ""}`)}</a>
@@ -385,7 +512,7 @@ function render() {
         <div class="meta">${pill(stText + (j.status === "running" && STAGE[j.stage] ? " · " + STAGE[j.stage] : "") + (j.cancel_requested && j.status === "running" ? " · 停止中" : ""), stCls)}${S.flash.has(j.id) ? '<span class="pill pill-new">新提交</span>' : ""}
           ${e.price ? `<span class="chip">$${esc(e.price)}</span>` : ""}${ehuntChips(e)}${(a.keywords || []).map((k) => `<span class="chip chip-copy" data-copy="${esc(k)}" title="点击复制">${esc(k)}</span>`).join("")}</div>
         ${errText ? `<div class="err">${errText}</div>` : ""}
-        <div class="timing"><span data-tick="${esc(j.id)}">${esc(timeText(j))}</span>${j.status === "succeeded" && !j.reviewed_at ? ' <span class="pill pill-warn">待我处理</span>' : ""}</div>
+        <div class="timing"><span data-tick="${esc(j.id)}">${esc(timeText(j))}</span>${j.status === "succeeded" && !j.reviewed_at ? ' <span class="pill pill-warn">待我处理</span>' : ""}${inLib(j) ? ' <span class="pill pill-lib">★ 已入库</span>' : ""}</div>
       </div>
       <div class="c-aud"><div class="label">目标人群</div><div class="aud">${audienceSummary(a) || '<span class="hint">—</span>'}</div>${audienceDetail(a)}</div>
       <div class="c-act actions">${sn.some((s) => s.kind !== "search_result") ? `<div class="meta" style="margin:0;justify-content:flex-end">
@@ -409,10 +536,14 @@ const actBtns = (j) => { const b = (act, t, cls = "btn-ghost") => `<button class
     case "queued": return b("pause", "⏸ 暂停") + b("cancel", "✕ 取消");
     case "running": return j.cancel_requested ? '<button class="btn btn-ghost btn-sm" disabled>停止中…</button>' : b("cancel", "■ 停止");
     case "paused": return b("resume", "▶ 继续", "btn-primary") + b("cancel", "✕ 取消");
-    case "failed": case "canceled": return b("retry", "↻ 重试", "btn-primary");
-    case "succeeded": return (j.reviewed_at ? "" : b("reviewed", "✓ 标记已查看")) + b("rerun", "↻ 重新分析");
+    case "failed": case "canceled": return b("retry", "↻ 重新提交", "btn-primary") + b("del", "🗑 删除", "btn-danger-ghost");
+    case "succeeded": return libBtn(j) + (j.reviewed_at ? "" : b("reviewed", "✓ 标记已查看")) + b("rerun", "↻ 重新分析") + b("del", "🗑 删除", "btn-danger-ghost");
     default: return "";
   } };
+const libBtn = (j) => inLib(j) ? `<button class="btn btn-lib-on btn-sm" data-act="lib" data-id="${esc(j.id)}" title="点击移出产品库"><span class="on-t">★ 已加入产品库</span><span class="off-t">移出产品库</span></button>`
+  : `<button class="btn btn-lib btn-sm" data-act="lib" data-id="${esc(j.id)}">☆ 加入产品库</button>`;
+const renderLibCount = () => { $("libCount").textContent = S.lib.size; };
+function refreshDrawerActs() { const el = $("drawerActs"), j = drawerState && S.jobs.get(drawerState.id); if (el && j) el.innerHTML = libBtn(j) + `<button class="btn btn-danger-ghost btn-sm" data-act="del" data-id="${esc(j.id)}">🗑 删除</button>`; }
 const ehuntChips = (e) => { const m = (e.raw || {}).ehunt; if (!m) return "";
   return [["周销量", m.sales_weekly], ["总销量", m.sales_total], ["收藏", m.favorites], ["周收藏", m.favorites_weekly], ["评论", m.reviews]]
     .filter(([, v]) => v != null).map(([k, v]) => `<span class="chip">${k} ${esc(v)}</span>`).join(""); };
@@ -435,6 +566,7 @@ function openDetail(id) {
   drawerState = { id };
   $("drawerTitle").textContent = e.title || j.etsy_url;
   $("drawerBody").innerHTML = `
+    <div id="drawerActs" class="drawer-acts"></div>
     <div class="summary">
       ${a.product_summary ? `<div class="kv"><b>产品</b>　${esc(a.product_summary)}</div>` : ""}
       ${a.target_audience ? `<div class="kv"><b>人群</b>　${esc(a.target_audience)}</div>` : ""}
@@ -449,6 +581,7 @@ function openDetail(id) {
     <h3>亚马逊类似品 <span class="hint">${nS} 个</span></h3><div id="grid-similar" class="grid"></div>
     <h3 id="traceHead">决策过程</h3><ol class="timeline">${steps}</ol>
     <p class="note">亚马逊不公开精确销量：有“过去一月购买”(monthlySold) 的商品用该值，其余为 BSR 推算的估计值；同款/类似品判定方法见“匹配同款/类似”步骤。</p>`;
+  refreshDrawerActs();
   renderSnaps();
   loadMatches(id);
   if (j.status === "succeeded" && !j.reviewed_at) jobAction(id, "reviewed"); // 打开决策过程即视为已查看
@@ -507,7 +640,9 @@ function exportList() {
 function closeDrawer() { $("drawer").classList.remove("open"); $("drawer").setAttribute("aria-hidden", "true"); $("drawerMask").classList.add("hidden"); drawerState = null; }
 
 document.addEventListener("click", (ev) => {
-  const t = ev.target.closest("[data-zoom],[data-detail],[data-tab],[data-cat],[data-act],[data-clear],[data-copy],[data-copyall],[data-export],[data-more],[data-dupe],[data-view]") || ev.target;
+  const t = ev.target.closest("[data-zoom],[data-detail],[data-tab],[data-cat],[data-act],[data-clear],[data-copy],[data-copyall],[data-export],[data-more],[data-dupe],[data-view],[data-bulk],[data-unlib]") || ev.target;
+  if (t.dataset?.bulk) { if (t.dataset.bulk === "clear") { S.sel.clear(); return render(); } return bulk(t.dataset.bulk); }
+  if (t.dataset?.unlib) { const r = [...S.lib.values()].find((x) => x.id === t.dataset.unlib); return r && removeLibItems([r]); }
   if (t.dataset?.copy) return copyText(t.dataset.copy);
   if (t.dataset?.copyall && drawerState) return copyText((S.analyses.get(drawerState.id)?.keywords || []).join("\n"));
   if (t.dataset?.export) return t.dataset.export === "job" ? drawerState && exportJob(drawerState.id) : exportList();
@@ -517,6 +652,7 @@ document.addEventListener("click", (ev) => {
     if (DEMO) { pending = null; $("dupeBox").innerHTML = ""; return showSubmitResult({ ok: true, text: "演示模式不会提交" }); }
     return submitJobs(t.dataset.dupe === "skip" ? ok.filter((r) => !ids.has(r.id)) : ok, bad.length); }
   if (t.dataset?.view) { ev.preventDefault(); const id = t.dataset.view;
+    if (location.hash.startsWith("#/library")) location.hash = "#/";
     if (S.jobs.get(id)?.status === "succeeded") return openDetail(id);
     F.cat = "all"; F.q = t.dataset.lid; $("q").value = F.q; render(); return document.querySelector("[data-row]")?.scrollIntoView({ behavior: "smooth", block: "center" }); }
   if (t.dataset?.cat) { F.cat = t.dataset.cat; return render(); }
@@ -529,10 +665,14 @@ document.addEventListener("click", (ev) => {
 });
 document.addEventListener("keydown", (ev) => {
   if (ev.key !== "Escape") return;
+  if (!$("modal").classList.contains("hidden")) return closeModal(false);
   if (!$("lightbox").classList.contains("hidden")) $("lightbox").classList.add("hidden"); else closeDrawer();
 });
 
 $("q").addEventListener("input", () => { F.q = $("q").value; render(); });
-document.addEventListener("change", (ev) => { if (ev.target.id === "sortSel") { sortKey = ev.target.value; renderSnaps(); } });
+document.addEventListener("change", (ev) => { if (ev.target.id === "sortSel") { sortKey = ev.target.value; renderSnaps(); }
+  const t = ev.target;
+  if (t.dataset?.sel) { t.checked ? S.sel.add(t.dataset.sel) : S.sel.delete(t.dataset.sel); render(); }
+  if (t.dataset?.selall) { const ids = [...document.querySelectorAll("[data-sel]")].map((x) => x.dataset.sel); ids.forEach((id) => t.checked ? S.sel.add(id) : S.sel.delete(id)); render(); } });
 $("btnClear").onclick = () => { F.cat = "all"; F.q = ""; $("q").value = ""; render(); };
 boot();
