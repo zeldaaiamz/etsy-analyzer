@@ -6,6 +6,8 @@ Etsy 商品链接 → 亚马逊美国站竞品/机会分析。架构详见 [ARCH
 ```
 supabase/migrations/001_init.sql   数据库表、RLS、队列函数
 supabase/migrations/002_cancel_job_invoker.sql  安全修复：cancel_job 改 INVOKER + 列级权限
+supabase/migrations/003_evidence_trace_snapshots.sql  人群依据/决策过程/证据快照表 + 私有 Storage bucket
+supabase/migrations/004_match_type.sql  同款/类似品类型
 worker/                            Python worker（轮询 Supabase）
   analyzer/providers/              Etsy / Amazon / LLM 可插拔实现（含 mock）
   tests/                           单元 + mock 端到端测试

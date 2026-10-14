@@ -3,7 +3,7 @@
 注：搜索结果通常无 BSR，需对前 N 个 ASIN 再调 type=product 获取 bestsellers_rank（额外计费）。
 """
 from .base import AmazonProvider
-from ..models import AmazonItem
+from ..models import AmazonItem, SearchPage
 from ..http import request_json
 from ..scoring import estimate_monthly_sales_from_bsr
 
@@ -37,4 +37,7 @@ class RainforestAmazon(AmazonProvider):
                     it.est_monthly_sales = estimate_monthly_sales_from_bsr(it.bsr, it.bsr_category)
             except Exception:  # noqa: BLE001 单个失败不影响整体
                 pass
-        return items
+        info = d.get("search_information") or {}
+        return SearchPage(keyword=keyword, url=(d.get("request_metadata") or {}).get("amazon_url")
+                          or f"https://www.amazon.com/s?k={keyword.replace(' ', '+')}",
+                          total_results=info.get("total_results"), items=items)

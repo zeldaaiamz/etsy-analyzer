@@ -12,3 +12,9 @@ def request_json(method, url, headers=None, params=None, body=None, timeout=60):
     with urllib.request.urlopen(req, timeout=timeout) as r:
         raw = r.read()
         return json.loads(raw) if raw else None
+
+
+def request_bytes(method, url, headers=None, data=None, timeout=60):
+    req = urllib.request.Request(url, data=data, method=method, headers=headers or {})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return r.read(), r.headers.get("Content-Type", "")

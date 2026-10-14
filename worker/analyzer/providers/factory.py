@@ -1,4 +1,4 @@
-from .mock import MockEtsy, MockAmazon, MockLLM
+from .mock import MockEtsy, MockAmazon, MockLLM, MockScreenshot
 
 
 def build_providers(cfg):
@@ -20,3 +20,13 @@ def build_providers(cfg):
     else:
         llm = MockLLM()
     return etsy, amazon, llm
+
+
+def build_screenshot(cfg):
+    if cfg.screenshot_provider == "screenshot_api":
+        from .screenshot import ScreenshotApiScreenshot
+        return ScreenshotApiScreenshot(cfg.screenshot_api_url_template, cfg.screenshot_api_key)
+    if cfg.screenshot_provider == "product_image":
+        from .screenshot import ProductImageScreenshot
+        return ProductImageScreenshot()
+    return MockScreenshot()

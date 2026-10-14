@@ -25,6 +25,11 @@ class Config:
     llm_base_url: str = "https://api.openai.com/v1"
     llm_api_key: str = ""
     llm_model: str = "gpt-4o-mini"
+    screenshot_provider: str = "mock"
+    screenshot_api_url_template: str = ""
+    screenshot_api_key: str = ""
+    storage_bucket: str = "snapshots"
+    max_snapshots_per_kind: int = 0  # 0 = 不限
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -45,4 +50,9 @@ class Config:
             llm_base_url=e("LLM_BASE_URL", "https://api.openai.com/v1"),
             llm_api_key=e("LLM_API_KEY", ""),
             llm_model=e("LLM_MODEL", "gpt-4o-mini"),
+            screenshot_provider=e("SCREENSHOT_PROVIDER", "mock"),
+            screenshot_api_url_template=e("SCREENSHOT_API_URL_TEMPLATE", ""),
+            screenshot_api_key=e("SCREENSHOT_API_KEY", ""),
+            storage_bucket=e("STORAGE_BUCKET", "snapshots"),
+            max_snapshots_per_kind=int(e("MAX_SNAPSHOTS_PER_KIND", "0")),
         )

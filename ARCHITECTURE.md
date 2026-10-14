@@ -99,3 +99,11 @@ stateDiagram-v2
 - LLM 关键词偏差 → 保留人工编辑关键词并重跑的功能（V1）。
 - 本机宕机 → systemd 自动重启；锁超时回收未完成任务。
 - Supabase 免费项目暂停、service_role key 泄露 → key 只存本机，定期轮换。
+
+## 11. 证据与决策过程（迁移 003/004）
+- `analyses.audience_evidence`：`{source: reviews|listing_text, reviews_analyzed, listing_fields_used, method, signals[{signal,count,audience}], evidence[{quote,rating,signal}]}`。真实模式评论来自 Etsy Open API v3 `getReviewsByListing`，无评论时回退 `getReviewsByShop`；仍无则明确标注“依据商品文字推断”。LLM 引用的评论会校验是否为原文，计数由确定性规则计算，防止编造。
+- `analyses.decision_trace`：7 步 `[{step,title,input,output,reasoning}]`：识别产品 → 判断人群 → 生成搜索词 → 亚马逊搜索 → 匹配同款/类似 → 竞争与销量评估 → 结论。
+- `evidence_snapshots`：每条证据一行，`kind ∈ identical(同款) / similar(类似品) / search_result(关键词搜索页)`，含关键词、来源 URL、标题、价格、BSR、评论数、相似理由、图片路径。数量默认不限（`MAX_SNAPSHOTS_PER_KIND`）。
+- `amazon_matches.match_type / similarity_reason`：相似度 ≥0.55 同款，≥0.2 类似品，其余丢弃。
+- Storage：私有 bucket `snapshots`，路径 `{user_id}/{job_id}/NNN_kind.ext`；RLS 仅允许本人读取自己目录，前端用 1 小时 signed URL；只有 worker(service_role) 写入。
+- 截图 provider（`SCREENSHOT_PROVIDER`）：`mock` 生成 SVG 占位图；`product_image` 下载数据商返回的商品主图，搜索页生成“数据摘要卡”（标注非截图）；`screenshot_api` 调第三方截图服务，失败回退。亚马逊会对自动访问出验证码，本系统不做任何绕过。

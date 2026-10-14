@@ -2,7 +2,7 @@
 import threading
 import uuid
 from datetime import datetime, timezone, timedelta
-from .http import request_json
+from .http import request_json, request_bytes
 
 
 def _now():
@@ -15,12 +15,15 @@ class Store:
     def save_etsy_product(self, job, data): ...
     def save_analysis(self, job, data): ...
     def save_amazon_matches(self, job, rows): ...
+    def upload_image(self, path, data, content_type): ...
+    def save_snapshots(self, job, rows): ...
 
 
 class MemoryStore(Store):
     def __init__(self):
         self.lock = threading.Lock()
         self.jobs, self.etsy, self.analyses, self.matches = {}, {}, {}, []
+        self.files, self.snapshots = {}, []
 
     def enqueue(self, url, user_id="mock-user", batch_id="mock-batch"):
         jid = str(uuid.uuid4())
@@ -53,12 +56,20 @@ class MemoryStore(Store):
     def save_amazon_matches(self, job, rows):
         self.matches.extend(dict(r, job_id=job["id"]) for r in rows)
 
+    def upload_image(self, path, data, content_type):
+        self.files[path] = (data, content_type)
+
+    def save_snapshots(self, job, rows):
+        self.snapshots.extend(dict(r, job_id=job["id"]) for r in rows)
+
 
 class SupabaseStore(Store):
-    def __init__(self, url, service_key):
+    def __init__(self, url, service_key, bucket="snapshots"):
         if not url or not service_key:
             raise ValueError("SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY 未配置")
         self.base = url.rstrip("/") + "/rest/v1"
+        self.storage = url.rstrip("/") + "/storage/v1"
+        self.bucket = bucket
         self.h = {"apikey": service_key, "Authorization": f"Bearer {service_key}"}
 
     def _call(self, method, path, body=None, params=None, prefer="return=minimal"):
@@ -87,6 +98,17 @@ class SupabaseStore(Store):
         self._call("DELETE", "/amazon_matches", params={"job_id": f"eq.{job['id']}"})  # 重试时幂等
         if rows:
             self._call("POST", "/amazon_matches",
+                       [{**r, "job_id": job["id"], "user_id": job["user_id"]} for r in rows])
+
+
+    def upload_image(self, path, data, content_type):
+        request_bytes("POST", f"{self.storage}/object/{self.bucket}/{path}",
+                      {**self.h, "Content-Type": content_type, "x-upsert": "true"}, data)
+
+    def save_snapshots(self, job, rows):
+        self._call("DELETE", "/evidence_snapshots", params={"job_id": f"eq.{job['id']}"})
+        if rows:
+            self._call("POST", "/evidence_snapshots",
                        [{**r, "job_id": job["id"], "user_id": job["user_id"]} for r in rows])
 
 
