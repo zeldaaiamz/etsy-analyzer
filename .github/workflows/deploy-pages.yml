@@ -20,7 +20,7 @@ jobs:
           SUPABASE_URL: ${{ vars.SUPABASE_URL }}
           SUPABASE_ANON_KEY: ${{ vars.SUPABASE_ANON_KEY }}
         run: |
-          test -n "$SUPABASE_URL" && test -n "$SUPABASE_ANON_KEY"
+          if [ -z "$SUPABASE_URL" ] || [ -z "$SUPABASE_ANON_KEY" ]; then echo "::error::repo Variables SUPABASE_URL / SUPABASE_ANON_KEY 未设置"; exit 1; fi
           cat > web/js/config.js <<JS
           export const SUPABASE_URL = "${SUPABASE_URL}";
           export const SUPABASE_ANON_KEY = "${SUPABASE_ANON_KEY}";
