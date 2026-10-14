@@ -68,6 +68,9 @@ class KeepaAmazon(AmazonProvider):
     def reset_usage(self):
         self.tokens_used = 0
 
+    def usage_text(self):
+        return f"Keepa 消耗 {self.tokens_used} tokens，剩余 {self.tokens_left}（每分钟补充 {self.refill_rate}）"
+
     def _get(self, path, domain=True, **params):
         q = urllib.parse.urlencode({"key": self.key, **({"domain": 1} if domain else {}), **params})
         waited = 0

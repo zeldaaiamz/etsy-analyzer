@@ -13,6 +13,9 @@ def build_providers(cfg):
     elif cfg.amazon_provider == "keepa":
         from .keepa import KeepaAmazon
         amazon = KeepaAmazon(cfg.keepa_api_key, cfg.keepa_per_keyword)
+    elif cfg.amazon_provider == "keepamore":
+        from .keepamore import KeepamoreAmazon
+        amazon = KeepamoreAmazon(cfg.keepamore_api_key, cfg.keepamore_per_keyword)
     elif cfg.amazon_provider == "spapi":
         raise NotImplementedError(f"{cfg.amazon_provider} provider 待实现（见 ARCHITECTURE.md 第 8 节）")
     else:

@@ -97,13 +97,14 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
                     seen.add(it.asin)
                     items.append(it)
         trace.append({"step": "search", "title": "亚马逊搜索",
-                      "input": {"搜索词": [p.keyword for p in pages], "数据源": getattr(amazon, "name", "")},
+                      "input": {"搜索词": [p.keyword for p in pages], "数据源": getattr(amazon, "name", ""),
+                                **({"API 用量": {"调用": amazon.calls, "units": amazon.units_used, "剩余": amazon.remaining}}
+                                   if hasattr(amazon, "units_used") else {})},
                       "output": {p.keyword: f"约 {p.total_results} 个结果，取前 {len(p.items)}" for p in pages},
                       "reasoning": f"去重后共 {len(items)} 个候选 ASIN" + (
-                          f"；Keepa 消耗 {amazon.tokens_used} tokens，剩余 {amazon.tokens_left}（每分钟补充 {amazon.refill_rate}）"
-                          if hasattr(amazon, "tokens_used") else "") + (
+                          f"；{amazon.usage_text()}" if hasattr(amazon, "usage_text") else "") + (
                           f"；销量信号：{sum(1 for i in items if (i.raw or {}).get('sales_source') == 'monthlySold')} 个用亚马逊“过去一月购买”(monthlySold)，其余用 BSR 估算"
-                          if hasattr(amazon, "tokens_used") else "")})
+                          if hasattr(amazon, "usage_text") else "")})
 
         ranked = llm.rank_similarity(prod, items)
         matches = classify(ranked)[:max_results]
