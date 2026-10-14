@@ -27,14 +27,16 @@ class EtsyOpenAPI(EtsyProvider):
             image_url=imgs[0].get("url_570xN", "") if imgs else "",
             num_favorers=d.get("num_favorers"), raw=d)
 
-    def get_reviews(self, product, limit=50):
-        """getReviewsByListing；若该 listing 无评论则退回 getReviewsByShop（店铺整体评论，作为弱信号）。"""
-        def fetch(path):
-            d = request_json("GET", f"{BASE}{path}", self.h, params={"limit": min(limit, 100)})
-            return [Review(text=r.get("review") or "", rating=r.get("rating"),
-                           created_at=str(r.get("create_timestamp", ""))) for r in d.get("results", [])
-                    if r.get("review")]
-        revs = fetch(f"/listings/{product.listing_id}/reviews")
-        if not revs and product.shop_id:
-            revs = fetch(f"/shops/{product.shop_id}/reviews")
-        return revs
+    def _reviews(self, path, limit, offset):
+        d = request_json("GET", f"{BASE}{path}", self.h, params={"limit": limit, "offset": offset})
+        res = d.get("results", [])
+        return [Review(text=r.get("review") or "", rating=r.get("rating"), created_at=str(r.get("create_timestamp", "")))
+                for r in res if r.get("review")], d.get("count")
+
+    def fetch_listing_reviews(self, listing_id, limit, offset):
+        """getReviewsByListing，limit≤100，按 offset 分页；count 为总数。"""
+        return self._reviews(f"/listings/{listing_id}/reviews", limit, offset)
+
+    def fetch_shop_reviews(self, shop_id, limit, offset):
+        """getReviewsByShop（同店所有商品评论，只作补充）。"""
+        return self._reviews(f"/shops/{shop_id}/reviews", limit, offset)

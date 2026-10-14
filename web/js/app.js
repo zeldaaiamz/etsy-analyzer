@@ -122,17 +122,21 @@ const scoreCls = (n) => (n >= 60 ? "s-hi" : n >= 35 ? "s-mid" : "s-lo");
 function audienceSummary(a) {
   const ev = a.audience_evidence || {};
   if (!a.target_audience) return "";
+  const total = ev.listing_reviews_total ?? ev.reviews_analyzed;
   return ev.source === "reviews"
-    ? `<span class="muted">分析了 <b>${esc(ev.reviews_analyzed)}</b> 条评论 →</span> ${esc(a.target_audience)}`
+    ? `<span class="muted">分析了 <b>${esc(ev.reviews_analyzed)}</b> 条评论（商品共 ${esc(total)} 条）${ev.shop_reviews_used ? `，含同店补充 ${esc(ev.shop_reviews_used)} 条` : ""} →</span> ${esc(a.target_audience)}`
     : `<span class="muted">无评论，依据商品${esc((ev.listing_fields_used || []).map((f) => ({ title: "标题", tags: "标签", description: "描述" }[f] || f)).join("/"))} →</span> ${esc(a.target_audience)}`;
 }
 function audienceDetail(a) {
   const ev = a.audience_evidence;
   if (!ev) return "";
   const sig = (ev.signals || []).map((s) => `<span class="chip">${esc(s.signal)} ×${esc(s.count)}</span>`).join("");
-  const quotes = (ev.evidence || []).slice(0, 4).map((q) => `<div class="quote">${q.rating ? "★" + esc(q.rating) + " · " : ""}“${esc(q.quote)}”<br><small>→ ${esc(q.signal)}</small></div>`).join("");
+  const quotes = (ev.evidence || []).slice(0, 4).map((q) => `<div class="quote">${q.source === "shop" ? '<span class="chip">同店补充</span>' : ""}${q.rating ? "★" + esc(q.rating) + " · " : ""}“${esc(q.quote)}”<br><small>→ ${esc(q.signal)}</small></div>`).join("");
   return `<details class="evi"><summary>查看依据</summary><div class="evi-body">
-    <div class="kv"><b>来源</b>　${ev.source === "reviews" ? `Etsy 买家评论 ${esc(ev.reviews_analyzed)} 条` : "商品文字（0 条评论）"}</div>
+    <div class="kv"><b>来源</b>　${ev.source === "reviews"
+      ? `本商品评论 ${esc(ev.listing_reviews_used ?? ev.reviews_analyzed)} 条（共 ${esc(ev.listing_reviews_total ?? "?")} 条）${ev.shop_reviews_used ? ` + 同店其它商品评论 ${esc(ev.shop_reviews_used)} 条（补充，仅作参考）` : ""}`
+      : "商品文字（0 条评论）"}</div>
+    <div class="kv"><b>规则</b>　至少 ${esc(ev.min_reviews ?? 50)} 条，不足则全部${ev.shop_supplement_enabled ? "；允许同店补充" : "；未使用同店补充"}</div>
     <div class="kv"><b>方法</b>　${esc(ev.method)}</div>
     <div class="kv">${sig || "无明显信号"}</div>${quotes}</div></details>`;
 }

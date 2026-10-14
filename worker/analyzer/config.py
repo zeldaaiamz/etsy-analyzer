@@ -30,6 +30,8 @@ class Config:
     screenshot_api_key: str = ""
     storage_bucket: str = "snapshots"
     max_snapshots_per_kind: int = 0  # 0 = 不限
+    min_reviews: int = 50
+    supplement_shop_reviews: bool = False
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -55,4 +57,6 @@ class Config:
             screenshot_api_key=e("SCREENSHOT_API_KEY", ""),
             storage_bucket=e("STORAGE_BUCKET", "snapshots"),
             max_snapshots_per_kind=int(e("MAX_SNAPSHOTS_PER_KIND", "0")),
+            min_reviews=int(e("MIN_REVIEWS", "50")),
+            supplement_shop_reviews=e("SUPPLEMENT_SHOP_REVIEWS", "false").lower() in ("1", "true", "yes"),
         )

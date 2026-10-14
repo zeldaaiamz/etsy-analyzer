@@ -32,7 +32,8 @@ def run_loop(store, providers, cfg, once=False):
             job = None
         if job:
             log.info("processing %s %s", job["id"], job["etsy_url"])
-            process_job(job, store, etsy, amazon, llm, cfg.max_amazon_results, shot, cfg.max_snapshots_per_kind)
+            process_job(job, store, etsy, amazon, llm, cfg.max_amazon_results, shot, cfg.max_snapshots_per_kind,
+                        cfg.min_reviews, cfg.supplement_shop_reviews)
             continue  # 有活就连续干
         if once:
             return

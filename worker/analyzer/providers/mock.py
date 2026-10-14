@@ -23,20 +23,31 @@ class MockEtsy(EtsyProvider):
                            image_url=f"https://placehold.co/600x600/png?text={quote_plus(title[:30])}",
                            num_favorers=_h(listing_id, 5000))
 
-    def get_reviews(self, product, limit=50):
-        tpl = [
-            ("Bought this for my daughter's {t} party and the kids loved it!", 5),
-            ("Perfect gift for my sister, arrived quickly and well packed.", 5),
-            ("Ordered as a teacher gift for the whole classroom — great quality.", 4),
-            ("Used it for Halloween decor at home, looks even better in person.", 5),
-            ("Nice personalized touch, the name was spelled perfectly.", 5),
-            ("A bit smaller than expected but my mom still loved the present.", 4),
-            ("Great for baby shower favors, will order again.", 5),
-            ("Shipping was slow.", 3),
-        ]
-        n = 3 + _h(product.listing_id, 6)  # 3-8 条
-        t = product.tags[0] if product.tags else "birthday"
-        return [Review(text=a.format(t=t), rating=r) for a, r in tpl[:n]]
+    TOTALS = [120, 23, 67, 8, 240, 51, 0]  # 不同商品评论总数差异很大
+
+    def review_total(self, listing_id):
+        return self.TOTALS[_h(listing_id, len(self.TOTALS))]
+
+    def _gen(self, key, i):
+        who = ["my daughter", "my sister", "my son's teacher", "my mom", "the kids", "my coworkers", "my wife",
+               "my grandson", "myself", "our classroom", "my best friend", "the baby shower guests"]
+        why = ["for a Halloween party", "as a birthday gift", "for Christmas", "to decorate the living room",
+               "as a little thank-you present", "for a school event", "for our wedding favors", ""]
+        how = ["Absolutely love it!", "Great quality and arrived fast.", "Cute and well made.",
+               "The personalized name was perfect.", "Smaller than expected but still nice.",
+               "Colors are even better in person.", "Would buy again.", "Shipping took a while."]
+        k = f"{key}-{i}"
+        rating = [5, 5, 5, 4, 5, 4, 3, 5, 2][_h(k + "r", 9)]
+        txt = f"Bought this for {who[_h(k + 'w', len(who))]} {why[_h(k + 'y', len(why))]}. {how[_h(k + 'h', len(how))]}"
+        return Review(text=" ".join(txt.split()), rating=rating, created_at=f"2026-{1 + _h(k, 9):02d}-{1 + _h(k + 'd', 27):02d}")
+
+    def fetch_listing_reviews(self, listing_id, limit, offset):
+        total = self.review_total(listing_id)
+        return [self._gen(listing_id, i) for i in range(offset, min(total, offset + limit))], total
+
+    def fetch_shop_reviews(self, shop_id, limit, offset):
+        total = 300
+        return [self._gen(f"shop{shop_id}", i) for i in range(offset, min(total, offset + limit))], total
 
 
 class MockAmazon(AmazonProvider):

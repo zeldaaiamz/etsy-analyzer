@@ -8,8 +8,8 @@ from analyzer.queue import MemoryStore
 from analyzer.pipeline import process_job
 
 URLS = ["https://www.etsy.com/listing/4363176935/monster-boo-basket-tag-halloween-basket",
-        "https://www.etsy.com/listing/1580023417/personalized-teacher-gift-tote-bag",
-        "https://www.etsy.com/listing/1299871002/minimalist-line-art-wall-print"]
+        "https://www.etsy.com/listing/1580023428/personalized-teacher-gift-tote-bag",
+        "https://www.etsy.com/listing/1580023401/minimalist-line-art-wall-print"]
 COLORS = ["#f97316", "#8b5cf6", "#0ea5e9", "#10b981"]
 
 def thumb(text, color):

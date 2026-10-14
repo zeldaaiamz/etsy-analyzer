@@ -3,7 +3,7 @@ from dataclasses import asdict
 from .etsy_url import parse_listing_id, parse_slug
 from .scoring import assess, classify
 from .queue import _now, retry_delay
-from .audience import audience_summary
+from .audience import audience_summary, review_count_text
 from .providers.mock import MockScreenshot
 
 log = logging.getLogger("pipeline")
@@ -52,7 +52,8 @@ def _snapshots(job, store, shot, pages, matches, limit):
     return rows
 
 
-def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapshot_limit=0):
+def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapshot_limit=0,
+                min_reviews=50, supplement_shop=False):
     jid = job["id"]
     shot = shot or MockScreenshot()
     trace = []
@@ -62,7 +63,7 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
             raise PermanentError("无法从 URL 解析 Etsy listing id")
         store.update_job(jid, stage="fetch_etsy", etsy_listing_id=lid)
         prod = _get_listing(etsy, lid, parse_slug(job["etsy_url"]))
-        reviews = etsy.get_reviews(prod)
+        reviews = etsy.get_reviews(prod, min_reviews=min_reviews, supplement_shop=supplement_shop)
         store.save_etsy_product(job, {**{k: v for k, v in asdict(prod).items()},
                                       "reviews": [asdict(r) for r in reviews]})
 
@@ -74,7 +75,9 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
                       "output": {"产品": an.product_summary, "类目": an.category},
                       "reasoning": f"依据 Etsy 标题、标签、描述（{type(llm).__name__}）"})
         trace.append({"step": "audience", "title": "判断人群",
-                      "input": {"评论数": ev.get("reviews_analyzed", 0), "来源": ev.get("source")},
+                      "input": {"评论": review_count_text(ev) if ev.get("source") == "reviews" else "无评论，改用商品文字",
+                                "本商品评论": ev.get("listing_reviews_used", 0), "同店补充评论": ev.get("shop_reviews_used", 0),
+                                "规则": f"至少 {min_reviews} 条，不足则全部" + ("；允许同店补充" if supplement_shop else "；不使用同店补充")},
                       "output": {"人群": an.target_audience, "主要信号": [s["signal"] for s in ev.get("signals", [])[:5]]},
                       "reasoning": ev.get("method", "")})
         trace.append({"step": "keywords", "title": "生成搜索词",
