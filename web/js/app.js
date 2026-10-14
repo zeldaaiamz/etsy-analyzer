@@ -562,7 +562,7 @@ function libCard(r) {
       ${st === "rejected" ? `<div class="rchips">${(r.reject_reasons || []).map((k) => `<span class="rchip">${esc(REASON_NAME[k] || k)}</span>`).join("")}</div>
         ${r.stage_note ? `<div class="pline pnote" title="${esc(r.stage_note)}">“${esc(r.stage_note)}”</div>` : ""}` : ""}
       <div class="pacts">${acts}</div>
-      <div class="pacts2">${r.job_id && (!job || job.status === "succeeded") ? `<button class="btn btn-link btn-sm" data-detail="${esc(job.id)}">查看分析 →</button>` : ""}
+      <div class="pacts2">${r.job_id && (!job || job.status === "succeeded") ? `<button class="btn btn-link btn-sm" data-detail="${esc(r.job_id)}">查看分析 →</button>` : ""}
         <span class="spacer"></span><button class="btn btn-link btn-sm muted" data-unlib="${esc(r.id)}">移出产品库</button></div></div></article>`;
 }
 function renderLibrary() {
