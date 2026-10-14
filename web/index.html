@@ -34,7 +34,14 @@
         <button id="btnSubmit" class="btn btn-primary">开始分析 →</button></div>
     </div>
 
-    <div class="section-head"><h2>分析结果</h2><div id="stats" class="stats"></div></div>
+    <div class="section-head"><div><h2>我的任务</h2><p class="muted">待确认和异常任务优先显示</p></div><div id="avgDur" class="muted"></div></div>
+    <div class="filters">
+      <div id="chips" class="fchips"></div>
+      <span class="spacer"></span>
+      <input id="q" class="input input-sm" type="search" placeholder="搜索 Etsy listing id / 标题 / ASIN">
+      <button id="btnClear" class="btn btn-ghost btn-sm">清除筛选</button>
+    </div>
+    <p class="note pause-note">暂停后保留已保存的数据；重新启动会继续本任务。暂停生效前，已发出的请求仍可能计费。</p>
     <div id="list" class="list"></div>
   </section>
 </main>

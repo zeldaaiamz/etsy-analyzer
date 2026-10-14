@@ -4,3 +4,5 @@
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 [ -f "$ROOT/worker/.env" ] || exit 0
 setsid nohup "$ROOT/deploy/run-worker.sh" >/dev/null 2>&1 < /dev/null &
+# 自动同步（提交/推送 web、worker 改动并在 worker 代码变化时重启 worker）；flock 保证单实例
+setsid nohup "$ROOT/deploy/auto-sync.sh" >/dev/null 2>&1 < /dev/null &

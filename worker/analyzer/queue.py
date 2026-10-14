@@ -29,7 +29,7 @@ class MemoryStore(Store):
         jid = str(uuid.uuid4())
         self.jobs[jid] = dict(id=jid, etsy_url=url, user_id=user_id, batch_id=batch_id,
                               status="queued", attempts=0, max_attempts=3, run_after=_now(),
-                              created_at=_now(), error=None)
+                              created_at=_now(), queued_at=_now(), error=None)
         return jid
 
     def claim_next_job(self, worker_id):
@@ -40,7 +40,8 @@ class MemoryStore(Store):
             if not q:
                 return None
             j = q[0]
-            j.update(status="running", locked_by=worker_id, attempts=j["attempts"] + 1)
+            j.update(status="running", locked_by=worker_id, attempts=j["attempts"] + 1,
+                     started_at=_now(), finished_at=None, stage="fetch_etsy", error=None)
             return dict(j)
 
     def update_job(self, job_id, **f):

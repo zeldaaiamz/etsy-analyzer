@@ -10,6 +10,23 @@ log = logging.getLogger("pipeline")
 LEVEL = {"low": "低", "medium": "中", "high": "高"}
 
 
+def sales_source_note(matches):
+    """按匹配逐个说明销量来源：monthlySold（亚马逊“过去一月购买”）还是 BSR 估算。"""
+    ms = [m.asin for m in matches if (m.raw or {}).get("sales_source") == "monthlySold"]
+    est = [m.asin for m in matches if m.asin not in ms and m.est_monthly_sales]
+    none = len(matches) - len(ms) - len(est)
+    if not matches:
+        return "无匹配商品，无销量数据。"
+    parts = []
+    if ms:
+        parts.append(f"{len(ms)} 个用亚马逊“过去一月购买”(monthlySold)：{'、'.join(ms[:5])}{'…' if len(ms) > 5 else ''}")
+    if est:
+        parts.append(f"{len(est)} 个为 BSR 估算值：{'、'.join(est[:5])}{'…' if len(est) > 5 else ''}")
+    if none:
+        parts.append(f"{none} 个无销量数据")
+    return f"销量来源（{len(matches)} 个匹配）：" + "；".join(parts) + "。"
+
+
 class PermanentError(Exception):
     """不可重试的错误（如 URL 非法）。"""
 
@@ -61,7 +78,7 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
         lid = parse_listing_id(job["etsy_url"])
         if not lid:
             raise PermanentError("无法从 URL 解析 Etsy listing id")
-        store.update_job(jid, stage="fetch_etsy", etsy_listing_id=lid)
+        store.update_job(jid, status="running", stage="fetch_etsy", etsy_listing_id=lid)  # 领取时已是 running，这里再确认一次
         prod = _get_listing(etsy, lid, parse_slug(job["etsy_url"]))
         reviews = etsy.get_reviews(prod, min_reviews=min_reviews, supplement_shop=supplement_shop)
         store.save_etsy_product(job, {**{k: v for k, v in asdict(prod).items()},
@@ -134,8 +151,7 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
         trace.append({"step": "conclusion", "title": "结论",
                       "input": {"竞争": LEVEL[a.competition_level], "需求": LEVEL[a.demand_level]},
                       "output": {"结论": a.verdict, "机会分": a.opportunity_score},
-                      "reasoning": f"{audience_summary(ev, an.target_audience)}；{a.reasoning[1]}；{a.reasoning[2]}" + (f"；{a.reasoning[-1]}" if a.reasoning[-1].startswith("证据薄弱") else "") + "。"
-                                   "注意：销量为 BSR 估算值。"})
+                      "reasoning": f"{audience_summary(ev, an.target_audience)}；{a.reasoning[1]}；{a.reasoning[2]}" + (f"；{a.reasoning[-1]}" if a.reasoning[-1].startswith("证据薄弱") else "") + "。" + sales_source_note(matches)})
 
         store.update_job(jid, stage="snapshots")
         _snapshots(job, store, shot, pages, matches, snapshot_limit)

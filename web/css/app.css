@@ -145,3 +145,19 @@ a{color:var(--primary);text-decoration:none}a:hover{text-decoration:underline}
   .brand-sub{display:none}.composer-foot{flex-wrap:wrap}.composer-foot .btn{width:100%}
   .drawer-body{padding:var(--s4)}.io{grid-template-columns:1fr}
 }
+
+/* ===== 我的任务：分类筛选 ===== */
+.section-head p{margin:2px 0 0;font-size:13px}
+.filters{display:flex;flex-wrap:wrap;align-items:center;gap:var(--s2);margin:0 0 var(--s2)}
+.fchips{display:flex;flex-wrap:wrap;gap:var(--s2)}
+.fchip{display:inline-flex;align-items:center;gap:6px;height:30px;padding:0 var(--s3);border-radius:999px;border:1px solid var(--border);
+  background:var(--surface);color:var(--text-2);font:500 13px var(--font);cursor:pointer;transition:background .15s,border-color .15s,color .15s}
+.fchip:hover{border-color:var(--border-strong);color:var(--text)}
+.fchip .n{min-width:18px;padding:0 6px;border-radius:999px;background:var(--muted-bg);font-size:12px;text-align:center}
+.fchip.active{background:var(--primary-soft);border-color:var(--primary);color:var(--text)}
+.fchip.active .n{background:var(--primary);color:#fff}
+.fc-todo .n{color:var(--warn)}.fc-error .n{color:var(--bad)}.fchip.active.fc-todo .n,.fchip.active.fc-error .n{color:#fff}
+.input-sm{height:30px;width:260px;max-width:100%;padding:0 var(--s3);font-size:13px}
+.pause-note{margin:0 0 var(--s4);font-size:12px;color:var(--text-3)}
+.timing{margin-top:6px;font-size:12px;color:var(--text-3);font-variant-numeric:tabular-nums}
+.c-act .btn + .btn{margin-top:6px}
