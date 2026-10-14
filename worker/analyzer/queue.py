@@ -85,7 +85,7 @@ class MemoryStore(Store):
                         if j["status"] == "queued" and not j.get("cancel_requested")
                         and (j["run_after"] <= _now() or (paused and "额度" in (j.get("error") or "")))
                         and (not paused or j.get("screen_state") == "kept" or self._cached(j))),
-                       key=lambda j: j["created_at"])
+                       key=lambda j: (0 if j.get("prescreen") and j.get("screen_state") != "kept" else 1, j["created_at"]))
             if not q:
                 return None
             j = q[0]
@@ -93,6 +93,9 @@ class MemoryStore(Store):
                      started_at=_now(), finished_at=None, error=None,
                      stage="analyze" if j.get("screen_state") == "kept" else "fetch_etsy")
             return dict(j)
+
+    def job_exists(self, job_id):
+        return job_id in self.jobs
 
     def _cached(self, j):
         """熔断中只放行 24h 缓存内的 listing（0 credit），与 claim_next_job (010) 一致。"""
@@ -215,6 +218,9 @@ class SupabaseStore(Store):
             keys = sorted({k for r in rows for k in r})  # PostgREST 批量插入要求每行键一致
             self._call("POST", "/evidence_snapshots",
                        [{**{k: r.get(k) for k in keys}, "job_id": job["id"], "user_id": job["user_id"]} for r in rows])
+
+    def job_exists(self, job_id):
+        return bool(self._call("GET", "/jobs", params={"id": f"eq.{job_id}", "select": "id"}, prefer=""))
 
     def is_cancel_requested(self, job_id):
         rows = self._call("GET", "/jobs", params={"id": f"eq.{job_id}", "select": "cancel_requested,status"}, prefer="")

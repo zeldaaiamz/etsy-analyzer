@@ -45,6 +45,18 @@ def _bump(store, name, before, after):
 
 
 PROBE_RETRY = timedelta(hours=1)
+RATE_LIMIT_RETRY = timedelta(seconds=60)
+
+
+def _job_gone(store, jid, e):
+    """失败时判断任务是否已被删除：外键错误（23503 / is not present in table "jobs"）或库里查不到。"""
+    s = str(e)
+    if not ("23503" in s or "HTTP 409" in s or "HTTP 404" in s):
+        return False
+    try:
+        return not store.job_exists(jid)
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def _check_ehunt_remaining(store, etsy, threshold, before_calls=None):
@@ -302,6 +314,14 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
         return False
     except Exception as e:  # noqa: BLE001
         attempts = job.get("attempts", 1)
+        if _job_gone(store, jid, e):  # 任务在运行中被用户删除（如 evidence_snapshots 外键 23503）→ 安静结束
+            log.info("job %s no longer exists (deleted mid-run); stopping quietly", jid)
+            return False
+        if getattr(e, "rate_limited", False):  # EHunt 每秒限速等非额度 429：不熔断，回队列 1 分钟后再试，不计尝试次数
+            log.warning("job %s: %s; requeued", jid, e)
+            store.update_job(jid, status="queued", stage=None, error=str(e)[:500], locked_by=None,
+                             attempts=max(0, attempts - 1), run_after=_now() + RATE_LIMIT_RETRY)
+            return False
         if getattr(e, "breaker", False):  # EHunt 429：全局熔断到次日（UTC），本任务回到队列且不计入尝试次数
             until = breaker_until(store)
             log.warning("EHunt quota exhausted; circuit open until %s", until)
