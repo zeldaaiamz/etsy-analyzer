@@ -104,13 +104,14 @@ def test_ehunt_cached_before_keepamore_failure():
     """EHunt 成功后立即写 provider_cache；Keepamore 失败导致任务重试时 EHunt 0 credit。"""
     from analyzer.providers.ehunt import EHuntEtsy
     from analyzer.models import EtsyProduct
-    class C(dict):
-        def get(self, k): return dict.get(self, k)
-        def put(self, k, prov, v, ttl): self[k] = v
+    class C:
+        def __init__(self): self.d = {}
+        def get(self, k): return self.d.get(k)
+        def put(self, k, prov, v, ttl): self.d[k] = v
     c, fetched = C(), []
     e = EHuntEtsy("k", cache=c)
-    e._fetch = lambda lid, slug=None: (fetched.append(lid), EtsyProduct(listing_id=lid, url="u", title="t"))[1]
+    e._fetch = lambda lid, slug=None: (fetched.append(lid), EtsyProduct(listing_id=lid, title="t"))[1]
     e.get_listing(1)
-    assert "ehunt:listing:1" in c  # 写缓存发生在 get_listing 返回前，即 Keepamore 步骤之前
+    assert "ehunt:listing:1" in c.d  # 写缓存发生在 get_listing 返回前，即 Keepamore 步骤之前
     e.get_listing(1)
     assert fetched == [1] and e.cache_hits == 1
