@@ -2,34 +2,50 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Etsy → Amazon 选品分析</title>
+<title>选品雷达 · Etsy → Amazon</title>
 <link rel="stylesheet" href="css/app.css">
 </head>
 <body>
-<h1>Etsy → Amazon US 选品分析</h1>
-<section id="login">
-  <input id="email" type="email" placeholder="邮箱"> <button id="btnLogin">发送登录链接</button>
-  <p id="loginMsg"></p>
-</section>
-<section id="app" class="hidden">
-  <p>已登录：<span id="who"></span> <button id="btnLogout">退出</button></p>
-  <textarea id="urls" placeholder="每行粘贴一个 Etsy 商品链接，例如 https://www.etsy.com/listing/1234567890/..."></textarea>
-  <button id="btnSubmit">提交分析</button> <span id="submitMsg"></span>
-  <table>
-    <thead><tr><th>图片</th><th>状态</th><th>产品</th><th>目标人群</th><th>搜索词</th>
-      <th>竞争</th><th>需求</th><th>机会分</th><th>结论</th><th>亚马逊证据</th><th></th></tr></thead>
-    <tbody id="rows"></tbody>
-  </table>
-</section>
+<header class="topbar">
+  <div class="brand"><span class="logo">◆</span> 选品雷达 <span class="brand-sub">Etsy → Amazon US</span></div>
+  <div id="userBox" class="user hidden"><span id="demoBadge" class="pill pill-warn hidden">演示数据</span><span id="who" class="muted"></span><button id="btnLogout" class="btn btn-ghost btn-sm">退出</button></div>
+</header>
 
-<div id="lightbox" class="overlay hidden"><img id="lbImg" alt=""><p id="lbCap"></p></div>
+<main class="container">
+  <section id="login" class="login-wrap hidden">
+    <div class="card login-card">
+      <div class="logo logo-lg">◆</div>
+      <h1>登录选品雷达</h1>
+      <p class="muted">输入邮箱，我们会发送一个一次性登录链接</p>
+      <input id="email" class="input" type="email" placeholder="you@example.com" autocomplete="email">
+      <button id="btnLogin" class="btn btn-primary btn-block">发送登录链接</button>
+      <p id="loginMsg" class="hint"></p>
+    </div>
+  </section>
 
-<div id="detail" class="overlay hidden">
-  <div class="panel">
-    <button class="close" id="detailClose" aria-label="关闭">×</button>
-    <div id="detailBody"></div>
-  </div>
-</div>
+  <section id="app" class="hidden">
+    <div class="card composer">
+      <div class="composer-head">
+        <div><h2>新建分析</h2><p class="muted">每行粘贴一个 Etsy 商品链接，系统会逐条识别产品、人群并搜索亚马逊同款与类似品</p></div>
+      </div>
+      <textarea id="urls" class="input textarea" placeholder="https://www.etsy.com/listing/1234567890/..."></textarea>
+      <div class="composer-foot"><span id="urlCount" class="muted">0 条有效链接</span>
+        <span class="spacer"></span><span id="submitMsg" class="hint"></span>
+        <button id="btnSubmit" class="btn btn-primary">开始分析 →</button></div>
+    </div>
+
+    <div class="section-head"><h2>分析结果</h2><div id="stats" class="stats"></div></div>
+    <div id="list" class="list"></div>
+  </section>
+</main>
+
+<div id="lightbox" class="lightbox hidden"><img id="lbImg" alt=""><p id="lbCap"></p></div>
+
+<div id="drawerMask" class="mask hidden"></div>
+<aside id="drawer" class="drawer" aria-hidden="true">
+  <div class="drawer-head"><div id="drawerTitle" class="drawer-title"></div><button class="icon-btn" id="drawerClose" aria-label="关闭">✕</button></div>
+  <div id="drawerBody" class="drawer-body"></div>
+</aside>
 <script type="module" src="js/app.js"></script>
 </body>
 </html>
