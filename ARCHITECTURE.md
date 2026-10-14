@@ -114,3 +114,10 @@ stateDiagram-v2
 - 同店补充（`SUPPLEMENT_SHOP_REVIEWS`，**默认关闭**）：本商品评论不足时，可用 `getReviewsByShop` 的同店其它商品评论补足到 MIN_REVIEWS。决定默认关闭，因为它们评价的是别的商品，会污染人群判断；开启时每条评论带 `source=shop`，依据中分开计数并在引用上标“同店补充”。
 - `audience_evidence` 新增：`min_reviews, listing_reviews_total, listing_reviews_used, shop_reviews_used, shop_reviews_total, shop_supplement_enabled`；前端显示“分析了 N 条评论（商品共 M 条）”。
 - LLM 处理 50+ 条：map-reduce，每批 ≤40 条抽取信号与原文引用（引用逐条校验为原文），合并计数后再做一次总结生成人群与搜索词；评论数量统计由代码计算，不由 LLM 给出。
+
+## 13. Keepa provider（AMAZON_PROVIDER=keepa）
+- `/search?type=product&asins-only=1` 取关键词 ASIN（每关键词最多 `KEEPA_RESULTS_PER_KEYWORD`，默认 10）→ `/product?asin=…&stats=90` 每批 ≤100 个 ASIN 取详情。
+- 字段：价格 stats.current[18]/[0]/[1]（美分）；BSR current[3]；评分 current[16]/10；评论 current[17]；图片 images[].l / imagesCSV → `https://m.media-amazon.com/images/I/<id>`。
+- 销量：优先 `monthlySold`（亚马逊“过去一月购买 X+”，真实信号），缺失才用 BSR 估算；决策过程中注明各自数量。
+- Token：每次响应记录 tokensConsumed/tokensLeft/refillRate，每个任务的消耗写入决策过程“亚马逊搜索”步骤；429 时每 60 秒重试，最多等 10 分钟。
+- 证据图：配合 `SCREENSHOT_PROVIDER=product_image` 使用 Keepa 商品主图；搜索页为“数据摘要卡”（非截图）。

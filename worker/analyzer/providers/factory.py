@@ -10,7 +10,10 @@ def build_providers(cfg):
     if cfg.amazon_provider == "rainforest":
         from .rainforest import RainforestAmazon
         amazon = RainforestAmazon(cfg.rainforest_api_key)
-    elif cfg.amazon_provider in ("keepa", "spapi"):
+    elif cfg.amazon_provider == "keepa":
+        from .keepa import KeepaAmazon
+        amazon = KeepaAmazon(cfg.keepa_api_key, cfg.keepa_per_keyword)
+    elif cfg.amazon_provider == "spapi":
         raise NotImplementedError(f"{cfg.amazon_provider} provider 待实现（见 ARCHITECTURE.md 第 8 节）")
     else:
         amazon = MockAmazon()

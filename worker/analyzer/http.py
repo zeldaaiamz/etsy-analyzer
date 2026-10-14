@@ -2,6 +2,13 @@ import json
 import urllib.request
 import urllib.parse
 import urllib.error
+import gzip
+
+
+def _decode(raw, enc):
+    if (enc or '').lower() == 'gzip' or raw[:2] == b'\x1f\x8b':
+        return gzip.decompress(raw)
+    return raw
 
 
 class HttpError(Exception):
@@ -12,7 +19,7 @@ def _open(req, timeout):
     try:
         return urllib.request.urlopen(req, timeout=timeout)
     except urllib.error.HTTPError as e:
-        body = e.read()[:500].decode(errors='replace')
+        body = _decode(e.read(), e.headers.get('Content-Encoding'))[:500].decode(errors='replace')
         raise HttpError(f"HTTP {e.code} {req.get_method()} {req.full_url.split('?')[0]}: {body}") from None
 
 
@@ -23,7 +30,7 @@ def request_json(method, url, headers=None, params=None, body=None, timeout=60):
     req = urllib.request.Request(url, data=data, method=method, headers={
         "Content-Type": "application/json", **(headers or {})})
     with _open(req, timeout) as r:
-        raw = r.read()
+        raw = _decode(r.read(), r.headers.get('Content-Encoding'))
         return json.loads(raw) if raw else None
 
 

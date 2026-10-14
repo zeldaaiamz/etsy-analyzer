@@ -86,6 +86,8 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
                       "reasoning": an.keyword_reasoning or "取最能代表产品的英文词组"})
 
         store.update_job(jid, stage="search_amazon")
+        if hasattr(amazon, "reset_usage"):
+            amazon.reset_usage()
         pages, items, seen = [], [], set()
         for kw in an.keywords[:3]:
             pg = amazon.search(kw, limit=max_results)
@@ -97,7 +99,11 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
         trace.append({"step": "search", "title": "亚马逊搜索",
                       "input": {"搜索词": [p.keyword for p in pages], "数据源": getattr(amazon, "name", "")},
                       "output": {p.keyword: f"约 {p.total_results} 个结果，取前 {len(p.items)}" for p in pages},
-                      "reasoning": f"去重后共 {len(items)} 个候选 ASIN"})
+                      "reasoning": f"去重后共 {len(items)} 个候选 ASIN" + (
+                          f"；Keepa 消耗 {amazon.tokens_used} tokens，剩余 {amazon.tokens_left}（每分钟补充 {amazon.refill_rate}）"
+                          if hasattr(amazon, "tokens_used") else "") + (
+                          f"；销量信号：{sum(1 for i in items if (i.raw or {}).get('sales_source') == 'monthlySold')} 个用亚马逊“过去一月购买”(monthlySold)，其余用 BSR 估算"
+                          if hasattr(amazon, "tokens_used") else "")})
 
         ranked = llm.rank_similarity(prod, items)
         matches = classify(ranked)[:max_results]
