@@ -27,8 +27,10 @@
   </section>
 
   <section id="libraryView" class="hidden">
-    <div class="section-head"><div><h2>产品库 <span class="hint" id="libHeadN"></span></h2><p class="muted">从任务中“加入产品库”的选品备选。备注、分组、对比等更多功能即将推出。</p></div></div>
-    <div id="libList" class="lib-list"></div>
+    <div class="lib-head"><div><h2>产品库 <span class="hint" id="libHeadN"></span></h2><p class="muted">任务中加入的产品默认进入“备选”，可移到“进行中”或“不考虑”。</p></div>
+      <input id="libQ" class="input input-sm lib-q" type="search" placeholder="搜索产品库"></div>
+    <div class="lib-layout"><aside id="libSide" class="lib-side" role="tablist"></aside>
+      <div class="lib-body"><div id="libBar" class="lib-bar"></div><div id="libGrid" class="lib-grid"></div></div></div>
   </section>
 
   <section id="app" class="hidden">

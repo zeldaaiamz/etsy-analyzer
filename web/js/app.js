@@ -54,14 +54,15 @@ async function copyText(text) {
   toast(`已复制：${text.length > 60 ? text.slice(0, 60) + "…" : text}`, "ok");
 }
 let modalRes = null;
-function confirmDialog({ title, body, ok = "确定", danger = false }) {
-  $("modalTitle").textContent = title; $("modalBody").innerHTML = body;
+let modalValidate = null;
+function confirmDialog({ title, body, ok = "确定", danger = false, validate = null }) {
+  modalValidate = validate; $("modalTitle").textContent = title; $("modalBody").innerHTML = body;
   $("modalOk").textContent = ok; $("modalOk").className = `btn ${danger ? "btn-danger" : "btn-primary"}`;
   $("modal").classList.remove("hidden"); $("modalOk").focus();
   return new Promise((res) => { modalRes = res; });
 }
-const closeModal = (v) => { $("modal").classList.add("hidden"); const r = modalRes; modalRes = null; r && r(v); };
-$("modalOk").onclick = () => closeModal(true); $("modalCancel").onclick = () => closeModal(false);
+const closeModal = (v) => { modalValidate = null; $("modal").classList.add("hidden"); const r = modalRes; modalRes = null; r && r(v); };
+$("modalOk").onclick = () => { const v = modalValidate ? modalValidate() : true; if (v) closeModal(v); }; $("modalCancel").onclick = () => closeModal(false);
 $("modal").addEventListener("click", (ev) => { if (ev.target.id === "modal") closeModal(false); });
 const csvCell = (v) => { let s = v == null ? "" : Array.isArray(v) ? v.join(" | ") : String(v);
   if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; // 防 CSV 公式注入
@@ -95,6 +96,10 @@ async function boot() {
       if (QS.has("failed")) fx.jobs.push({ ...fx.jobs.find((j) => j.status === "failed"), id: "demo-failed-2", etsy_url: "https://www.etsy.com/listing/1700000009/y", etsy_listing_id: 1700000009, error: "亚马逊搜索超时（Keepamore 504）" });
       ingest(fx);
       if (QS.has("sel")) { [...S.jobs.values()].filter((j) => j.status !== "running").slice(0, Number(QS.get("sel")) || 3).forEach((j) => S.sel.add(j.id)); render(); }
+      if (QS.has("libstage")) { L.stage = QS.get("libstage"); renderLibrary(); }
+      if (QS.has("libsel")) { L.sel = new Set([...S.lib.values()].filter((r) => (r.stage || "candidate") === L.stage).slice(0, Number(QS.get("libsel")) || 2).map((r) => r.id)); renderLibrary(); }
+      if (QS.has("libreason")) { moveStage([[...S.lib.values()].find((r) => (r.stage || "candidate") === "candidate")?.id], "rejected");
+        setTimeout(() => { ["ip_risk", "other"].forEach((v) => { const c = document.querySelector(`input[name="rj"][value="${v}"]`); c.checked = true; c.dispatchEvent(new Event("change", { bubbles: true })); }); $("modalOk").click(); }, 80); }
       if (QS.has("confirm")) bulk(QS.get("confirm") || "delete");
       if (QS.has("submitted")) showSubmitResult({ ok: true, text: "已提交 3 条，已开始排队分析（新任务已高亮）" });
       if (QS.has("open")) { const first = [...S.analyses.keys()][Number(QS.get("open")) || 0]; first && openDetail(first); }
@@ -346,7 +351,7 @@ async function libToggle(ids, add) {
   if (DEMO) {
     jobs.forEach((j) => { const l = lidOf(j), e = S.etsy.get(j.id) || {}, a = S.analyses.get(j.id) || {};
       if (add) S.lib.set(l, { id: `demo-${l}`, job_id: j.id, etsy_listing_id: l, etsy_url: j.etsy_url, title: e.title, image_url: e.image_url, price: e.price,
-        product_summary: a.product_summary, target_audience: a.target_audience, keywords: a.keywords, added_at: new Date().toISOString() });
+        product_summary: a.product_summary, target_audience: a.target_audience, keywords: a.keywords, stage: "candidate", reject_reasons: [], added_at: new Date().toISOString() });
       else S.lib.delete(l); });
   } else {
     const { data, error } = add ? await sb.rpc("add_to_library", { p_jobs: jobs.map((j) => j.id) })
@@ -358,7 +363,10 @@ async function libToggle(ids, add) {
   toast(add ? `已加入产品库 ${jobs.length} 个` : `已移出产品库 ${jobs.length} 个`, "ok");
   render(); renderLibrary(); if (drawerState) refreshDrawerActs();
 }
-async function removeLibItems(items) {
+async function removeLibItems(items, ask = false) {
+  if (!items.length) return;
+  if (ask && !await confirmDialog({ title: `移出 ${items.length} 个产品？`, danger: true, ok: "移出", body: "<p>将从产品库删除这些条目（阶段、原因与备注一并删除），任务与分析结果不受影响。</p>" })) return;
+  items.forEach((r) => L.sel.delete(r.id));
   if (!DEMO) { const { error } = await sb.rpc("remove_from_library", { p_items: items.map((r) => r.id), p_jobs: null });
     if (error) return toast(error.message, "bad"); }
   items.forEach((r) => S.lib.delete(Number(r.etsy_listing_id)));
@@ -414,21 +422,91 @@ function renderBulk(visible) {
     <button class="btn btn-danger-ghost btn-sm" data-bulk="delete"${canDel ? "" : " disabled"}>🗑 删除${canDel ? ` (${canDel})` : ""}</button>
     <button class="btn btn-ghost btn-sm" data-bulk="clear">取消选择</button>` : '<span class="hint">勾选任务可批量加入产品库 / 重新提交 / 删除</span>'}` : "";
 }
+// ---------- 产品库：阶段（备选/进行中/不考虑）----------
+const STAGES = [["candidate", "备选", "◇"], ["active", "进行中", "▶"], ["rejected", "不考虑", "✕"]];
+const STAGE_NAME = Object.fromEntries(STAGES.map(([k, n]) => [k, n]));
+const REASONS = [["roi_low", "ROI 太低"], ["cost_high", "成本太高"], ["ip_risk", "侵权风险"], ["competition", "竞争太激烈"], ["demand_low", "市场需求太小"],
+  ["seasonal", "季节性太强"], ["logistics", "物流难做（易碎/超大/超重）"], ["compliance", "认证合规问题"], ["supply", "供应链难找"], ["other", "其他"]];
+const REASON_NAME = Object.fromEntries(REASONS);
+const L = { stage: "candidate", q: "", reason: null, sel: new Set() };
+const stageOf = (r) => r.stage || "candidate";
+const libById = (id) => [...S.lib.values()].find((x) => x.id === id);
+const libMatch = (r, q) => !q || [r.title, r.etsy_listing_id, r.product_summary, r.target_audience, r.shop_name, r.stage_note, ...(r.keywords || [])]
+  .some((v) => String(v ?? "").toLowerCase().includes(q));
+function libVisible() {
+  const q = L.q.trim().toLowerCase();
+  return [...S.lib.values()].filter((r) => stageOf(r) === L.stage && libMatch(r, q) && (L.stage !== "rejected" || !L.reason || (r.reject_reasons || []).includes(L.reason)))
+    .sort((a, b) => String(b.stage_changed_at || b.added_at).localeCompare(String(a.stage_changed_at || a.added_at)));
+}
+function reasonDialog(n) {
+  const body = `<p>请选择不考虑${n > 1 ? "这 " : "这"}${n > 1 ? `<b>${n}</b> 个产品` : "个产品"}的原因（至少一项，可多选）：</p>
+    <div class="reason-grid">${REASONS.map(([k, v]) => `<label class="reason-opt"><input type="checkbox" name="rj" value="${k}"> <span>${esc(v)}</span></label>`).join("")}</div>
+    <textarea id="rjNote" class="input textarea rj-note" maxlength="2000" placeholder="补充说明（可选）"></textarea><p id="rjErr" class="rj-err"></p>`;
+  const p = confirmDialog({ title: "移到「不考虑」", ok: "确认不考虑", danger: true, body, validate: () => {
+    const reasons = [...document.querySelectorAll('input[name="rj"]:checked')].map((x) => x.value), note = $("rjNote").value.trim();
+    const err = !reasons.length ? "请至少选择一个原因" : reasons.includes("other") && !note ? "选择“其他”时请填写说明" : "";
+    $("rjErr").textContent = err; return err ? false : { reasons, note }; } });
+  const sync = () => { const other = document.querySelector('input[name="rj"][value="other"]')?.checked;
+    $("rjNote").placeholder = other ? "请说明“其他”原因（必填）" : "补充说明（可选）"; $("rjNote").classList.toggle("req", !!other);
+    document.querySelectorAll(".reason-opt").forEach((l) => l.classList.toggle("on", l.querySelector("input").checked)); };
+  $("modalBody").addEventListener("change", sync);
+  return p;
+}
+async function moveStage(ids, stage) {
+  const allow = stage === "candidate" ? ["active", "rejected"] : ["candidate"];
+  const items = ids.map(libById).filter((r) => r && allow.includes(stageOf(r)));
+  if (!items.length) return toast("只有“备选”中的产品可以移到进行中或不考虑", "bad");
+  let reasons = [], note = null;
+  if (stage === "rejected") { const v = await reasonDialog(items.length); if (!v) return; ({ reasons, note } = v); }
+  if (!DEMO) {
+    const { data, error } = await sb.rpc("set_library_stage", { p_items: items.map((r) => r.id), p_stage: stage, p_reasons: reasons, p_note: note || null });
+    if (error) { toast(error.message, "bad"); return loadAll(); }
+    if (data !== items.length) toast(`部分条目状态已变化，已刷新（成功 ${data}/${items.length}）`, "bad");
+    await loadAll();
+  } else items.forEach((r) => Object.assign(r, { stage, reject_reasons: stage === "rejected" ? reasons : [], stage_note: stage === "rejected" ? note || null : null, stage_changed_at: new Date().toISOString() }));
+  items.forEach((r) => L.sel.delete(r.id));
+  toast(`已移到「${STAGE_NAME[stage]}」${items.length} 个`, "ok"); renderLibrary();
+}
+function libCard(r) {
+  const img = imgUrl(r.image_url), job = r.job_id && S.jobs.get(r.job_id), st = stageOf(r), on = L.sel.has(r.id);
+  const url = safeUrl(r.etsy_url || `https://www.etsy.com/listing/${r.etsy_listing_id}`);
+  const ic = r.identical_count, sc = r.similar_count;
+  const acts = st === "candidate"
+    ? `<button class="btn btn-primary btn-sm" data-lmove="active" data-id="${esc(r.id)}">▶ 进行中</button><button class="btn btn-danger-ghost btn-sm" data-lmove="rejected" data-id="${esc(r.id)}">✕ 不考虑</button>`
+    : `<button class="btn btn-link btn-sm" data-lmove="candidate" data-id="${esc(r.id)}" title="撤销，移回备选">↩ 移回备选</button>`;
+  return `<article class="pcard${on ? " sel" : ""}">
+    <div class="pimg">${img ? `<img src="${img}" data-zoom="${img}" data-cap="${esc(r.title)}" alt="" loading="lazy">` : '<div class="pimg-empty">◆</div>'}
+      <label class="psel" title="选择"><input type="checkbox" data-lsel="${esc(r.id)}"${on ? " checked" : ""}></label>
+      <div class="pbadges">${ic ? `<span class="pb pb-id">同款 ${ic}</span>` : ""}${sc ? `<span class="pb pb-sim">类似 ${sc}</span>` : ""}${!r.job_id ? '<span class="pb" title="分析任务已删除，仅保留快照">无分析</span>' : ""}</div></div>
+    <div class="pinfo"><a class="ptitle" href="${url}" target="_blank" rel="noopener" title="${esc(r.title)}">${esc(r.title || `Etsy #${r.etsy_listing_id}`)}</a>
+      <div class="pprice">${r.price != null ? `$${esc(Number(r.price).toFixed(2))}` : '<span class="muted">—</span>'}</div>
+      ${r.keywords?.length ? `<div class="pline pkw" title="${esc(r.keywords.join(", "))}">${esc(r.keywords.slice(0, 3).join(" · "))}</div>` : ""}
+      <div class="pline muted">同款 ${ic ?? "—"} · 类似品 ${sc ?? "—"} · ${esc(new Date(r.added_at).toLocaleDateString(undefined, { month: "numeric", day: "numeric" }))} 加入</div>
+      ${st === "rejected" ? `<div class="rchips">${(r.reject_reasons || []).map((k) => `<span class="rchip">${esc(REASON_NAME[k] || k)}</span>`).join("")}</div>
+        ${r.stage_note ? `<div class="pline pnote" title="${esc(r.stage_note)}">“${esc(r.stage_note)}”</div>` : ""}` : ""}
+      <div class="pacts">${acts}</div>
+      <div class="pacts2">${job && job.status === "succeeded" ? `<button class="btn btn-link btn-sm" data-detail="${esc(job.id)}">查看分析 →</button>` : ""}
+        <span class="spacer"></span><button class="btn btn-link btn-sm muted" data-unlib="${esc(r.id)}">移出产品库</button></div></div></article>`;
+}
 function renderLibrary() {
-  const items = [...S.lib.values()].sort((a, b) => String(b.added_at).localeCompare(String(a.added_at)));
-  $("libCount").textContent = items.length; $("libHeadN").textContent = items.length ? `${items.length} 个` : "";
-  $("libList").innerHTML = items.length ? items.map((r) => { const img = imgUrl(r.image_url), job = r.job_id && S.jobs.get(r.job_id);
-    return `<article class="card lib-item">${img ? `<img class="thumb" src="${img}" data-zoom="${img}" data-cap="${esc(r.title)}" alt="" loading="lazy">` : '<div class="thumb thumb-empty">◆</div>'}
-      <div class="lib-main"><a class="title" href="${safeUrl(r.etsy_url || `https://www.etsy.com/listing/${r.etsy_listing_id}`)}" target="_blank" rel="noopener">${esc(r.title || `Etsy #${r.etsy_listing_id}`)} ↗</a>
-        <div class="sub">${esc(r.product_summary || "")}${r.target_audience ? ` · <span class="muted">${esc(r.target_audience)}</span>` : ""}</div>
-        <div class="meta">${r.price != null ? `<span class="chip">$${esc(r.price)}</span>` : ""}<span class="chip">#${esc(r.etsy_listing_id)}</span>
-          ${(r.keywords || []).slice(0, 4).map((k) => `<span class="chip chip-copy" data-copy="${esc(k)}" title="点击复制">${esc(k)}</span>`).join("")}
-          <span class="hint">加入于 ${esc(new Date(r.added_at).toLocaleDateString())}</span></div></div>
-      <div class="lib-act">${job && job.status === "succeeded" ? `<button class="btn btn-ghost btn-sm" data-detail="${esc(job.id)}">查看分析 →</button>`
-        : r.job_id ? `<a class="btn btn-ghost btn-sm" href="#/" data-view="${esc(r.job_id)}" data-lid="${esc(r.etsy_listing_id)}">在任务中查找</a>` : '<span class="hint">分析已删除</span>'}
-        <button class="btn btn-ghost btn-sm" data-unlib="${esc(r.id)}">移出</button></div></article>`; }).join("")
-    : `<div class="card empty"><div class="ico">★</div><h3>产品库还是空的</h3><p class="muted">在已完成任务上点“☆ 加入产品库”，或勾选多个任务批量加入</p></div>`;
-  $("libList").innerHTML += `<p class="note">产品库功能持续完善中：备注、分组、导出、利润测算等即将推出。</p>`;
+  const all = [...S.lib.values()], cnt = Object.fromEntries(STAGES.map(([k]) => [k, all.filter((r) => stageOf(r) === k).length]));
+  [...L.sel].forEach((id) => { const r = libById(id); if (!r || stageOf(r) !== L.stage) L.sel.delete(id); });
+  $("libCount").textContent = all.length; $("libHeadN").textContent = all.length ? `${all.length} 个` : "";
+  $("libSide").innerHTML = `<div class="side-t">阶段</div>` + STAGES.map(([k, n, ic]) => `<button class="side-i${L.stage === k ? " on" : ""} st-${k}" role="tab" data-lstage="${k}"><span class="side-ic">${ic}</span>${n}<span class="side-n">${cnt[k]}</span></button>`).join("")
+    + `<p class="side-hint">加入产品库默认进入备选；只有备选可移到进行中或不考虑。</p>`;
+  const vis = libVisible(), n = L.sel.size, allOn = vis.length && vis.every((r) => L.sel.has(r.id));
+  let bar = "";
+  if (L.stage === "rejected") { const rc = {}; all.filter((r) => stageOf(r) === "rejected").forEach((r) => (r.reject_reasons || []).forEach((k) => (rc[k] = (rc[k] || 0) + 1)));
+    bar += `<div class="rfilter"><span class="hint">按原因：</span><button class="fchip${!L.reason ? " active" : ""}" data-lreason="all">全部</button>${REASONS.filter(([k]) => rc[k]).map(([k, v]) => `<button class="fchip${L.reason === k ? " active" : ""}" data-lreason="${k}">${esc(v)} <span class="n">${rc[k]}</span></button>`).join("")}</div>`; }
+  bar += vis.length ? `<div class="lbulk${n ? " on" : ""}"><label class="selall"><input type="checkbox" data-lselall="1"${allOn ? " checked" : ""}> 全选 ${vis.length} 个</label>
+    ${n ? `<span class="bulk-n">已选 <b>${n}</b></span><span class="spacer"></span>${L.stage === "candidate"
+      ? `<button class="btn btn-primary btn-sm" data-lbulk="active">▶ 进行中 (${n})</button><button class="btn btn-danger-ghost btn-sm" data-lbulk="rejected">✕ 不考虑 (${n})</button>`
+      : `<button class="btn btn-ghost btn-sm" data-lbulk="candidate">↩ 移回备选 (${n})</button>`}
+      <button class="btn btn-ghost btn-sm" data-lbulk="remove">移出产品库</button><button class="btn btn-ghost btn-sm" data-lbulk="clear">取消选择</button>`
+      : `<span class="hint">勾选卡片可批量${L.stage === "candidate" ? "移到进行中 / 不考虑" : "移回备选"}</span>`}</div>` : "";
+  $("libBar").innerHTML = bar;
+  $("libGrid").innerHTML = vis.length ? vis.map(libCard).join("") : `<div class="card empty lib-empty"><div class="ico">★</div><h3>${all.length ? (L.q || L.reason ? "没有匹配的产品" : `「${STAGE_NAME[L.stage]}」里还没有产品`) : "产品库还是空的"}</h3>
+    <p class="muted">${all.length ? (L.stage === "candidate" ? "在任务中点“☆ 加入产品库”会进入备选" : "在备选中选择产品移到这里") : "在已完成任务上点“☆ 加入产品库”，或勾选多个任务批量加入"}</p></div>`;
 }
 function route() {
   const lib = location.hash.startsWith("#/library");
@@ -640,9 +718,15 @@ function exportList() {
 function closeDrawer() { $("drawer").classList.remove("open"); $("drawer").setAttribute("aria-hidden", "true"); $("drawerMask").classList.add("hidden"); drawerState = null; }
 
 document.addEventListener("click", (ev) => {
-  const t = ev.target.closest("[data-zoom],[data-detail],[data-tab],[data-cat],[data-act],[data-clear],[data-copy],[data-copyall],[data-export],[data-more],[data-dupe],[data-view],[data-bulk],[data-unlib]") || ev.target;
+  const t = ev.target.closest("[data-zoom],[data-detail],[data-tab],[data-cat],[data-act],[data-clear],[data-copy],[data-copyall],[data-export],[data-more],[data-dupe],[data-view],[data-bulk],[data-unlib],[data-lstage],[data-lmove],[data-lreason],[data-lbulk]") || ev.target;
   if (t.dataset?.bulk) { if (t.dataset.bulk === "clear") { S.sel.clear(); return render(); } return bulk(t.dataset.bulk); }
   if (t.dataset?.unlib) { const r = [...S.lib.values()].find((x) => x.id === t.dataset.unlib); return r && removeLibItems([r]); }
+  if (t.dataset?.lstage) { L.stage = t.dataset.lstage; L.reason = null; L.sel.clear(); return renderLibrary(); }
+  if (t.dataset?.lreason) { L.reason = t.dataset.lreason === "all" || L.reason === t.dataset.lreason ? null : t.dataset.lreason; return renderLibrary(); }
+  if (t.dataset?.lmove) return moveStage([t.dataset.id], t.dataset.lmove);
+  if (t.dataset?.lbulk) { if (t.dataset.lbulk === "clear") { L.sel.clear(); return renderLibrary(); }
+    if (t.dataset.lbulk === "remove") return removeLibItems([...L.sel].map(libById).filter(Boolean), true);
+    return moveStage([...L.sel], t.dataset.lbulk); }
   if (t.dataset?.copy) return copyText(t.dataset.copy);
   if (t.dataset?.copyall && drawerState) return copyText((S.analyses.get(drawerState.id)?.keywords || []).join("\n"));
   if (t.dataset?.export) return t.dataset.export === "job" ? drawerState && exportJob(drawerState.id) : exportList();
@@ -673,6 +757,9 @@ $("q").addEventListener("input", () => { F.q = $("q").value; render(); });
 document.addEventListener("change", (ev) => { if (ev.target.id === "sortSel") { sortKey = ev.target.value; renderSnaps(); }
   const t = ev.target;
   if (t.dataset?.sel) { t.checked ? S.sel.add(t.dataset.sel) : S.sel.delete(t.dataset.sel); render(); }
+  if (t.dataset?.lsel) { t.checked ? L.sel.add(t.dataset.lsel) : L.sel.delete(t.dataset.lsel); return renderLibrary(); }
+  if (t.dataset?.lselall) { libVisible().forEach((r) => t.checked ? L.sel.add(r.id) : L.sel.delete(r.id)); return renderLibrary(); }
   if (t.dataset?.selall) { const ids = [...document.querySelectorAll("[data-sel]")].map((x) => x.dataset.sel); ids.forEach((id) => t.checked ? S.sel.add(id) : S.sel.delete(id)); render(); } });
+$("libQ").addEventListener("input", () => { L.q = $("libQ").value; renderLibrary(); });
 $("btnClear").onclick = () => { F.cat = "all"; F.q = ""; $("q").value = ""; render(); };
 boot();
