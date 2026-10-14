@@ -19,7 +19,7 @@ def test_map():
 
 
 def test_429():
-    with mock.patch.object(ehunt, "request_json", side_effect=HttpError("HTTP 429 POST x: k")):
+    with mock.patch.object(ehunt, "request_json", side_effect=HttpError("HTTP 429 POST x: k today quota exhausted")):
         try:
             EHuntEtsy("k").get_listing(42)
             assert False

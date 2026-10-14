@@ -86,13 +86,13 @@ def test_probe_after_expiry_rearms_one_hour_then_resumes():
     store, ids, etsy = setup(2)
     clock = Clock(MID + timedelta(seconds=5))
     store.status["ehunt_paused_until"] = MID                               # 已过期
-    assert run(store, etsy, clock, HttpError("HTTP 429 POST x")) == 1
+    assert run(store, etsy, clock, HttpError('HTTP 429 POST x: {"code":429,"message":"daily quota exceeded"}')) == 1
     assert store.status["ehunt_paused_until"] == clock.t + timedelta(hours=1)
     assert store.jobs[ids[0]]["status"] == "queued" and store.jobs[ids[0]]["attempts"] == 0
     clock.t += timedelta(minutes=30)
-    assert run(store, etsy, clock, HttpError("HTTP 429 POST x")) == 0
+    assert run(store, etsy, clock, HttpError('HTTP 429 POST x: {"code":429,"message":"daily quota exceeded"}')) == 0
     clock.t += timedelta(minutes=31)                                       # 仍未重置 → 再 1 小时
-    assert run(store, etsy, clock, HttpError("HTTP 429 POST x")) == 1
+    assert run(store, etsy, clock, HttpError('HTTP 429 POST x: {"code":429,"message":"daily quota exceeded"}')) == 1
     assert store.status["ehunt_paused_until"] == clock.t + timedelta(hours=1)
     clock.t += timedelta(hours=1, seconds=1)
     assert run(store, etsy, clock, lambda *a, **kw: resp(lid_of(kw), 1, 199)) == 2
@@ -102,5 +102,5 @@ def test_probe_after_expiry_rearms_one_hour_then_resumes():
 def test_fresh_429_breaks_until_utc_midnight():
     store, ids, etsy = setup(1)
     clock = Clock(T0)
-    run(store, etsy, clock, HttpError("HTTP 429 POST x"))
+    run(store, etsy, clock, HttpError('HTTP 429 POST x: {"code":429,"message":"daily quota exceeded"}'))
     assert store.status["ehunt_paused_until"] == MID and store.jobs[ids[0]]["run_after"] == MID

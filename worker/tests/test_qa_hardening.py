@@ -133,7 +133,7 @@ def test_429_circuit_breaker_keeps_queue():
     j1 = store.enqueue("https://www.etsy.com/listing/42/a")
     j2 = store.enqueue("https://www.etsy.com/listing/43/b")
     _, amazon, llm = mock_providers()
-    with mock.patch.object(ehunt, "request_json", side_effect=HttpError("HTTP 429 POST x")) as rq:
+    with mock.patch.object(ehunt, "request_json", side_effect=HttpError('HTTP 429 POST x: {"code":429,"message":"daily quota exceeded"}')) as rq:
         run_loop(store, (EHuntEtsy("k"), amazon, llm), Config(), once=True)
     assert rq.call_count == 1
     for j in (j1, j2):
