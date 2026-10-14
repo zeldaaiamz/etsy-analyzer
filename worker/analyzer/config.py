@@ -18,6 +18,7 @@ class Config:
     supabase_key: str = ""
     etsy_provider: str = "mock"
     etsy_api_key: str = ""
+    ehunt_api_key: str = ""
     amazon_provider: str = "mock"
     rainforest_api_key: str = ""
     keepa_api_key: str = ""
@@ -48,6 +49,7 @@ class Config:
             supabase_key=e("SUPABASE_SERVICE_ROLE_KEY", ""),
             etsy_provider=e("ETSY_PROVIDER", "mock"),
             etsy_api_key=e("ETSY_API_KEY", ""),
+            ehunt_api_key=e("EHUNT_API_KEY", ""),
             amazon_provider=e("AMAZON_PROVIDER", "mock"),
             rainforest_api_key=e("RAINFOREST_API_KEY", ""),
             keepa_api_key=e("KEEPA_API_KEY", ""),

@@ -5,6 +5,9 @@ def build_providers(cfg):
     if cfg.etsy_provider == "etsy_api":
         from .etsy_api import EtsyOpenAPI
         etsy = EtsyOpenAPI(cfg.etsy_api_key)
+    elif cfg.etsy_provider == "ehunt":
+        from .ehunt import EHuntEtsy
+        etsy = EHuntEtsy(cfg.ehunt_api_key)
     else:
         etsy = MockEtsy()
     if cfg.amazon_provider == "rainforest":

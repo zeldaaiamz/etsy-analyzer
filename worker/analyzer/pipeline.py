@@ -70,12 +70,23 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
         store.update_job(jid, stage="analyze")
         an = llm.analyze_product(prod, reviews)
         ev = an.audience_evidence
+        if getattr(etsy, "no_review_text", False):
+            ev["no_text_provider"] = "EHunt"
+            ev["method"] = f"{review_count_text(ev)}；" + ev.get("method", "")
+        em = (prod.raw or {}).get("ehunt") or {}
+        etsy_metrics = {k: v for k, v in {"周销量": em.get("sales_weekly"), "总销量": em.get("sales_total"),
+                        "收藏": em.get("favorites"), "周收藏": em.get("favorites_weekly"),
+                        "评论数": em.get("reviews"), "周评论": em.get("reviews_weekly"),
+                        "畅销": em.get("is_bestsell"), "Etsy 精选": em.get("is_pick"),
+                        "好评如潮": em.get("is_raving"), "上架": em.get("release_time")}.items() if v not in (None, "")}
+        if getattr(etsy, "remaining", None) is not None:
+            etsy_metrics["EHunt 今日剩余额度"] = etsy.remaining
         trace.append({"step": "identify", "title": "识别产品",
-                      "input": {"listing_id": lid, "标题": prod.title, "标签": prod.tags, "价格": prod.price},
+                      "input": {"listing_id": lid, "标题": prod.title, "标签": prod.tags, "价格": prod.price, **etsy_metrics},
                       "output": {"产品": an.product_summary, "类目": an.category},
                       "reasoning": f"依据 Etsy 标题、标签、描述（{type(llm).__name__}）"})
         trace.append({"step": "audience", "title": "判断人群",
-                      "input": {"评论": review_count_text(ev) if ev.get("source") == "reviews" else "无评论，改用商品文字",
+                      "input": {"评论": review_count_text(ev) if ev.get("source") == "reviews" or ev.get("no_text_provider") else "无评论，改用商品文字",
                                 "本商品评论": ev.get("listing_reviews_used", 0), "同店补充评论": ev.get("shop_reviews_used", 0),
                                 "规则": f"至少 {min_reviews} 条，不足则全部" + ("；允许同店补充" if supplement_shop else "；不使用同店补充")},
                       "output": {"人群": an.target_audience, "主要信号": [s["signal"] for s in ev.get("signals", [])[:5]]},
@@ -138,7 +149,7 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
         return True
     except Exception as e:  # noqa: BLE001
         log.exception("job %s failed", jid)
-        permanent = isinstance(e, PermanentError) or job.get("attempts", 1) >= job.get("max_attempts", 3)
+        permanent = isinstance(e, PermanentError) or type(e).__name__ == "EHuntQuotaError" or job.get("attempts", 1) >= job.get("max_attempts", 3)
         if permanent:
             store.update_job(jid, status="failed", error=str(e)[:1000], finished_at=_now(), locked_by=None)
         else:

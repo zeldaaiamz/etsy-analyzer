@@ -164,7 +164,7 @@ function render() {
         <a class="title" href="${safeUrl(j.etsy_url)}" target="_blank" rel="noopener">${esc(e.title || `Etsy #${j.etsy_listing_id || ""}`)}</a>
         <div class="sub">${esc(a.product_summary || (j.status === "succeeded" ? "" : "等待分析…"))}</div>
         <div class="meta">${pill(stText + (j.status === "running" && STAGE[j.stage] ? " · " + STAGE[j.stage] : ""), stCls)}
-          ${e.price ? `<span class="chip">$${esc(e.price)}</span>` : ""}${(a.keywords || []).map((k) => `<span class="chip">${esc(k)}</span>`).join("")}</div>
+          ${e.price ? `<span class="chip">$${esc(e.price)}</span>` : ""}${ehuntChips(e)}${(a.keywords || []).map((k) => `<span class="chip">${esc(k)}</span>`).join("")}</div>
         ${j.error ? `<div class="err">${esc(j.error)}</div>` : ""}
       </div>
       <div class="c-aud"><div class="label">目标人群</div><div class="aud">${audienceSummary(a) || '<span class="hint">—</span>'}</div>${audienceDetail(a)}</div>
@@ -177,6 +177,10 @@ function render() {
     </article>`;
   }).join("");
 }
+
+const ehuntChips = (e) => { const m = (e.raw || {}).ehunt; if (!m) return "";
+  return [["周销量", m.sales_weekly], ["总销量", m.sales_total], ["收藏", m.favorites], ["周收藏", m.favorites_weekly], ["评论", m.reviews]]
+    .filter(([, v]) => v != null).map(([k, v]) => `<span class="chip">${k} ${esc(v)}</span>`).join(""); };
 
 // ---------- 渲染：抽屉 ----------
 const fmt = (v) => Array.isArray(v) ? v.map((x) => esc(typeof x === "object" ? JSON.stringify(x) : x)).join("、") : v && typeof v === "object" ? esc(JSON.stringify(v)) : esc(v);

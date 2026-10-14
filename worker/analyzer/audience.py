@@ -52,7 +52,8 @@ def infer_audience(product, reviews):
 
 def review_count_text(ev):
     n, m, k = ev.get("reviews_analyzed", 0), ev.get("listing_reviews_total"), ev.get("shop_reviews_used", 0)
-    t = f"分析了 {n} 条评论（商品共 {m if m is not None else '?'} 条）"
+    t = f"{ev['no_text_provider']} 无评论原文，" if ev.get("no_text_provider") else ""
+    t += f"分析了 {n} 条评论（商品共 {m if m is not None else '?'} 条）"
     if k:
         t += f"，其中 {k} 条为同店其它商品评论补充"
     return t
@@ -61,4 +62,6 @@ def review_count_text(ev):
 def audience_summary(ev, audience):
     if ev.get("source") == "reviews":
         return f"{review_count_text(ev)} → 人群：{audience}"
+    if ev.get("no_text_provider"):
+        return f"{review_count_text(ev)}，依据商品文字（{'/'.join(ev.get('listing_fields_used', []))}）→ 人群：{audience}"
     return f"无评论（商品共 0 条），依据商品文字（{'/'.join(ev.get('listing_fields_used', []))}）→ 人群：{audience}"
