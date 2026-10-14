@@ -13,7 +13,7 @@ const EXTRA = [
 export const libraryFixtures = (fx) => {
   const ok = fx.jobs.filter((j) => j.status === "succeeded"), e = new Map(fx.etsy.map((r) => [r.job_id, r])), a = new Map(fx.analyses.map((r) => [r.job_id, r]));
   const day = (d) => new Date(new Date(fx.now).getTime() - d * 864e5).toISOString();
-  const items = ok.slice(0, 2).map((j, i) => { const p = e.get(j.id) || {}, an = a.get(j.id) || {};
+  const items = ok.slice(0, 1).map((j, i) => { const p = e.get(j.id) || {}, an = a.get(j.id) || {};
     return { id: `demo-lib-${i}`, job_id: j.id, etsy_listing_id: j.etsy_listing_id || p.listing_id, etsy_url: j.etsy_url, title: p.title, image_url: p.image_url,
       price: p.price, product_summary: an.product_summary, target_audience: an.target_audience, keywords: an.keywords, identical_count: 2 + i, similar_count: 8 - i,
       stage: i ? "active" : "candidate", reject_reasons: [], stage_note: null, added_at: day(i), stage_changed_at: i ? day(0) : null }; });

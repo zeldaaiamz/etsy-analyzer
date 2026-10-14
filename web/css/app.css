@@ -344,3 +344,8 @@ a{color:var(--primary);text-decoration:none}a:hover{text-decoration:underline}
 @media (max-width:760px){.qmeter .qm-t,.qmeter .qm-bar{display:none}}
 @media (max-width:760px){.nav a{white-space:nowrap}.qmeter{padding:2px 8px;gap:4px}.qmeter .qm-u{display:none}.user{gap:var(--s2)}}
 @media (max-width:480px){#demoBadge{display:none}.brand-sub{display:none}}
+/* 加入产品库后的撤销 toast */
+.toast.has-act{pointer-events:auto;display:flex;align-items:center;gap:14px}
+.toast .toast-a{background:none;border:0;padding:0;font:inherit;font-weight:600;color:var(--primary);cursor:pointer;text-decoration:none;white-space:nowrap}
+.toast .toast-a:hover{text-decoration:underline}
+.dupe .pill-lib{margin-left:2px}
