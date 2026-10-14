@@ -377,3 +377,7 @@ a{color:var(--primary);text-decoration:none}a:hover{text-decoration:underline}
 @media (max-width:760px){.qwrap{flex:1 1 100%}.qwrap .input{width:100%}.usage{text-align:left}.avg-dur{display:block;margin:2px 0 0}}
 .pacts2{flex-wrap:nowrap;white-space:nowrap}.pacts2 .btn-link{flex:0 0 auto}
 @media (max-width:760px){.side-i{padding:0 6px;gap:4px;font-size:13px;flex:1 0 auto}.side-ic{display:none}.side-n{margin-left:3px}}
+/* H3：长列表离屏卡片跳过布局/绘制（浏览器原生虚拟化） */
+.list > .row{content-visibility:auto;contain-intrinsic-size:auto 150px}
+.lib-grid > .pcard{content-visibility:auto;contain-intrinsic-size:auto 380px}
+.lib-more{grid-column:1/-1;justify-self:center}

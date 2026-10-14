@@ -25,6 +25,7 @@ class Store:
     def cache_get_many(self, keys): return {}
     def cache_put(self, key, provider, payload, ttl): ...
     def discard_exhausted_job(self, job_id, error): ...
+    def purge_expired_cache(self): return 0
 
 
 class MemoryStore(Store):
@@ -119,6 +120,13 @@ class MemoryStore(Store):
     def cache_put(self, key, provider, payload, ttl):
         self.kv[key] = (_now() + timedelta(seconds=ttl), payload)
 
+    def purge_expired_cache(self):
+        with self.lock:
+            dead = [k for k, v in self.kv.items() if v[0] <= _now()]
+            for k in dead:
+                del self.kv[k]
+            return len(dead)
+
 
 class SupabaseStore(Store):
     def __init__(self, url, service_key, bucket="snapshots"):
@@ -203,6 +211,10 @@ class SupabaseStore(Store):
                                         "created_at": _now().isoformat(),
                                         "expires_at": (_now() + timedelta(seconds=ttl)).isoformat()})
 
+
+    def purge_expired_cache(self):
+        """L5：删除过期超过 1 小时的 provider_cache 行（015 purge_expired_provider_cache；未部署时静默跳过）。"""
+        return self._call("POST", "/rpc/purge_expired_provider_cache", {}, prefer="") or 0
 
     def discard_exhausted_job(self, job_id, error):
         r = self._call("POST", "/rpc/discard_exhausted_job", {"p_job": job_id, "p_error": error}, prefer="") or {}

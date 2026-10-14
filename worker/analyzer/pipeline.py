@@ -88,16 +88,14 @@ def _get_listing(etsy, lid, slug):
         return etsy.get_listing(lid)
 
 
-def _snapshots(job, store, shot, pages, matches, limit):
-    rows, n = [], 0
+SNAPSHOT_THREADS = 4
+
+
+def _snapshots(job, store, shot, pages, matches, limit, threads=SNAPSHOT_THREADS):
+    """证据图：每张图（下载/截图 + 上传）互不依赖 → 线程池并发；编号与顺序和串行时完全一致。"""
+    specs = []
     def add(kind, url, title, image_url, meta, extra):
-        nonlocal n
-        n += 1
-        data, ct, src = shot.capture(kind, url, title, image_url, meta)
-        ext = {"image/svg+xml": "svg", "image/png": "png", "image/webp": "webp"}.get(ct, "jpg")
-        path = f"{job['user_id']}/{job['id']}/{n:03d}_{kind}.{ext}"
-        store.upload_image(path, data, ct)
-        rows.append({"kind": kind, "source_url": url, "title": title, "image_path": path, "image_source": src, **extra})
+        specs.append((len(specs) + 1, kind, url, title, image_url, meta, extra))
     for pg in pages:
         top = pg.items[:3]
         add("search_result", pg.url, f"亚马逊搜索：{pg.keyword}", "",
@@ -115,6 +113,21 @@ def _snapshots(job, store, shot, pages, matches, limit):
             {"keyword": it.keyword, "asin": it.asin, "price": it.price, "bsr": it.bsr, "review_count": it.review_count,
              "rating": it.rating, "similarity": it.similarity, "similarity_reason": it.similarity_reason,
              "provider": it.provider})
+
+    def one(spec):
+        n, kind, url, title, image_url, meta, extra = spec
+        data, ct, src = shot.capture(kind, url, title, image_url, meta)
+        ext = {"image/svg+xml": "svg", "image/png": "png", "image/webp": "webp"}.get(ct, "jpg")
+        path = f"{job['user_id']}/{job['id']}/{n:03d}_{kind}.{ext}"
+        store.upload_image(path, data, ct)
+        return {"kind": kind, "source_url": url, "title": title, "image_path": path, "image_source": src, **extra}
+
+    if threads > 1 and len(specs) > 1:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=min(threads, len(specs)), thread_name_prefix="snap") as ex:
+            rows = list(ex.map(one, specs))  # map 保持顺序；任何一张失败都会抛出（与串行行为一致）
+    else:
+        rows = [one(sp) for sp in specs]
     store.save_snapshots(job, rows)
     return rows
 
@@ -232,8 +245,11 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
                       "reasoning": f"{audience_summary(ev, an.target_audience)}；{a.reasoning[1]}；{a.reasoning[2]}" + (f"；{a.reasoning[-1]}" if a.reasoning[-1].startswith("证据薄弱") else "") + "。" + sales_source_note(matches)})
 
         step("snapshots")
-        _snapshots(job, store, shot, pages, matches, snapshot_limit)
-        store.save_amazon_matches(job, [{k: v for k, v in asdict(i).items()} for i in matches])
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=1, thread_name_prefix="matches") as ex:  # 匹配写库与证据图并行
+            fm = ex.submit(store.save_amazon_matches, job, [{k: v for k, v in asdict(i).items()} for i in matches])
+            _snapshots(job, store, shot, pages, matches, snapshot_limit)
+            fm.result()
         an_d = asdict(an)
         an_d.pop("keyword_reasoning", None)
         a_d = asdict(a)
