@@ -27,7 +27,7 @@
   </section>
 
   <section id="libraryView" class="hidden">
-    <div class="lib-head"><div><h2>产品库 <span class="hint" id="libHeadN"></span></h2><p class="muted">任务中加入的产品默认进入“备选”，可移到“进行中”或“不考虑”。</p></div>
+    <div class="lib-head"><div><h2>产品库 <span class="hint" id="libHeadN"></span></h2><p class="muted">新加入的产品在“备选”；只有备选可移到“进行中”或“不考虑”。</p></div>
       <input id="libQ" class="input input-sm lib-q" type="search" placeholder="搜索产品库"></div>
     <div class="lib-layout"><aside id="libSide" class="lib-side" role="tablist"></aside>
       <div class="lib-body"><div id="libBar" class="lib-bar"></div><div id="libGrid" class="lib-grid"></div></div></div>
@@ -48,15 +48,15 @@
     </div>
 
     <div id="banners"></div>
-    <div class="section-head"><div><h2>我的任务</h2><p class="muted">待确认和异常任务优先显示</p></div><div class="head-r"><div id="avgDur" class="muted"></div><div id="usage" class="usage"></div></div></div>
+    <div class="section-head"><div><h2>我的任务 <span id="avgDur" class="avg-dur"></span></h2><p class="muted">待确认和异常任务优先显示</p></div><div class="head-r"><div id="usage" class="usage"></div></div></div>
     <div class="filters">
       <div id="chips" class="fchips"></div>
       <span class="spacer"></span>
-      <input id="q" class="input input-sm" type="search" placeholder="搜索 Etsy listing id / 标题 / ASIN">
+      <span class="qwrap"><input id="q" class="input input-sm" type="search" placeholder="搜索 Etsy listing id / 标题 / ASIN"><button id="qClear" class="q-clear hidden" type="button" aria-label="清除搜索" title="清除搜索">×</button></span>
       <div class="fbtns"><button id="btnClear" class="btn btn-ghost btn-sm">清除筛选</button>
       <button class="btn btn-ghost btn-sm" data-export="list" title="导出当前筛选结果">⇩ 导出 CSV</button></div>
     </div>
-    <p id="pauseNote" class="note pause-note hidden">“暂停”仅对排队中的任务生效，继续后重新排队；运行中的任务可点“停止”，会在当前步骤完成后停下（已发出的请求仍会计费）。</p>
+    <div id="searchBanner"></div>
     <div id="bulkBar" class="bulk-bar"></div>
     <div id="list" class="list"></div>
   </section>

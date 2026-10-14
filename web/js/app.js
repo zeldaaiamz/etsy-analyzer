@@ -16,7 +16,7 @@ const KIND = { identical: "同款", similar: "类似品", search_result: "搜索
 const STATUS = { queued: ["处理中 · 排队中", "pill-info"], running: ["处理中 · 进行中", "pill-info pill-running"], succeeded: ["已完成", "pill-ok"], failed: ["异常", "pill-bad"], paused: ["已暂停", "pill-warn"], canceled: ["已取消", ""] };
 // 任务分类：待我处理 = 已完成但未查看；处理中 = queued+running
 const CATS = [["all", "全部"], ["todo", "待我处理"], ["active", "处理中"], ["done", "已完成"], ["error", "异常"], ["paused", "已暂停"]];
-const catOf = (j) => j.status === "failed" ? "error" : j.status === "paused" ? "paused" : j.status === "queued" || j.status === "running" ? "active"
+const catOf = (j) => j.status === "succeeded" && S.keep?.has(j.id) ? "todo" : j.status === "failed" ? "error" : j.status === "paused" ? "paused" : j.status === "queued" || j.status === "running" ? "active"
   : j.status === "succeeded" ? (j.reviewed_at ? "done" : "todo") : "other";
 const inCat = (j, c) => c === "all" || catOf(j) === c || (c === "done" && j.status === "succeeded");
 const PRIO = { todo: 0, error: 1, active: 2, paused: 3, done: 4, other: 5 };
@@ -36,7 +36,7 @@ const IMG_SRC = { mock_placeholder: "mock 占位图", product_image: "商品主�
 
 let sb = null;
 const S = { jobs: new Map(), analyses: new Map(), etsy: new Map(), snaps: new Map(), asins: new Map(), matches: new Map(),
-  signed: new Map(), lib: new Map(), sel: new Set(), loaded: false, statusLoaded: false, limit: PAGE, hasMore: false, flash: new Set(), status: null, hb: [], usage: [] };
+  signed: new Map(), lib: new Map(), sel: new Set(), loaded: false, statusLoaded: false, limit: PAGE, hasMore: false, flash: new Set(), keep: new Set(), libPending: new Set(), status: null, hb: [], usage: [] };
 const group = (rows) => { const m = new Map(); rows.forEach((r) => { if (!m.has(r.job_id)) m.set(r.job_id, []); m.get(r.job_id).push(r); }); return m; };
 
 const lidOf = (j) => j && Number(j.etsy_listing_id || S.etsy.get(j.id)?.listing_id || 0) || null;
@@ -100,6 +100,10 @@ async function boot() {
       S.hb = [{ worker_id: "demo", last_seen: new Date(Date.now() - (QS.has("offline") ? 9 * 60e3 : 5e3)).toISOString() }];
       S.statusLoaded = true;
       S.usage = [{ provider: "ehunt", calls: 7, units: 7, cache_hits: 3 }, { provider: "keepamore", calls: 36, units: 270, cache_hits: 12 }, { provider: "deepseek", calls: 14, units: 41210, cache_hits: 0 }];
+      const KW = [["monster boo basket tag", "halloween basket tag", "personalized boo basket"], ["personalized teacher tote bag", "teacher appreciation gift"], ["minimalist line art print", "abstract face wall art", "boho bedroom decor"]];
+      fx.analyses.forEach((a, i) => { if (KW[i]) a.keywords = KW[i]; });
+      fx.snaps.forEach((s, i) => { if (s.asin) { const ms = i % 3 !== 2; s.raw = { ...(s.raw || {}), sales_source: ms ? "monthlySold" : "bsr_estimate" }; s.monthly_sold = ms ? [300, 1000, 50, 200][i % 4] : null; s.est_monthly_sales = ms ? s.monthly_sold : 120 + (s.bsr % 400); } });
+      if (QS.has("q")) { F.q = QS.get("q"); $("q").value = F.q; }
       const { libraryFixtures } = await import("./demo-library.js");
       S.lib = new Map(libraryFixtures(fx).map((r) => [Number(r.etsy_listing_id), r]));
       if (QS.has("failed")) fx.jobs.push({ ...fx.jobs.find((j) => j.status === "failed"), id: "demo-failed-2", etsy_url: "https://www.etsy.com/listing/1700000009/y", etsy_listing_id: 1700000009, error: "亚马逊搜索超时（Keepamore 504）" });
@@ -111,6 +115,10 @@ async function boot() {
         setTimeout(() => { ["ip_risk", "other"].forEach((v) => { const c = document.querySelector(`input[name="rj"][value="${v}"]`); c.checked = true; c.dispatchEvent(new Event("change", { bubbles: true })); }); $("modalOk").click(); }, 80); }
       if (QS.has("confirm")) bulk(QS.get("confirm") || "delete");
       if (QS.has("submitted")) showSubmitResult({ ok: true, text: "已提交 3 条，已开始排队分析（新任务已高亮）" });
+      if (QS.has("reviewed")) { const id = [...S.analyses.keys()][1]; openDetail(id); setTimeout(closeDrawer, 50); }
+      if (QS.has("libmove")) setTimeout(() => moveStage([[...S.lib.values()].find((r) => stageOf(r) === "candidate")?.id], "active"), 50);
+      if (QS.has("rjempty")) { moveStage([[...S.lib.values()].find((r) => stageOf(r) === "candidate")?.id], "rejected"); setTimeout(() => $("modalOk").click(), 80); }
+      if (QS.has("delall")) { const ids = fx.jobs.filter((j) => j.status === "succeeded").map((j) => j.id); deleteJobs(ids); }
       if (QS.has("open")) { const first = [...S.analyses.keys()][Number(QS.get("open")) || 0]; first && openDetail(first); }
       if (QS.has("paste")) { const pv = QS.get("paste"); $("urls").value = /^\d+$/.test(pv) ? Array.from({ length: Number(pv) }, (_, i) => `https://www.etsy.com/listing/${1900000000 + i}/item-${i}`).join("\n") : pv.split("|").join("\n"); onUrlsInput(); }
       if (QS.has("submit")) $("btnSubmit").click();
@@ -268,6 +276,9 @@ async function loadAll() {
     const lb = await sb.from("product_library").select("*").order("added_at", { ascending: false });
     if (!lb.error) S.lib = new Map((lb.data || []).map((r) => [Number(r.etsy_listing_id), r]));
     const libIds = [...S.lib.keys()];
+    const orphan = [...S.lib.values()].filter((r) => !r.job_id).map((r) => Number(r.etsy_listing_id));
+    if (orphan.length) { const { data: pj } = await sb.from("jobs").select("etsy_listing_id").in("etsy_listing_id", orphan).in("status", ["queued", "running"]);
+      S.libPending = new Set((pj || []).map((x) => Number(x.etsy_listing_id))); } else S.libPending = new Set();
     let j = S.noView ? { error: true } : await sb.from("task_jobs").select("*").order("created_at", { ascending: false }).limit(S.limit + 1);
     if (j.error) { S.noView = true; let q = sb.from("jobs").select("*");
       if (libIds.length) q = q.or(`etsy_listing_id.is.null,etsy_listing_id.not.in.(${libIds.join(",")})`);
@@ -356,10 +367,12 @@ function renderBanners() {
   renderQuota();
   $("banners").innerHTML = out.join("");
   const u = Object.fromEntries((S.usage || []).map((r) => [r.provider, r]));
-  const part = (k, label, unit) => u[k] ? `${label} ${u[k][unit]}${unit === "units" && k === "deepseek" ? " tokens" : unit === "units" ? " units" : " 次"}${u[k].cache_hits ? `（缓存 ${u[k].cache_hits}）` : ""}` : "";
-  const parts = [part("ehunt", "EHunt", "calls"), part("keepamore", "Keepamore", "units"), part("deepseek", "DeepSeek", "units")].filter(Boolean);
-  const rem = S.status?.ehunt_remaining;
-  $("usage").textContent = parts.length || rem != null ? `今日用量(UTC)：${parts.join(" · ") || "0"}${rem != null ? ` · EHunt 剩余 ${rem}` : ""}` : "";
+  const kfmt = (n) => n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
+  const parts = [u.ehunt && `Etsy 数据 <b>${u.ehunt.calls}</b> 次${u.ehunt.cache_hits ? `（缓存 ${u.ehunt.cache_hits}）` : ""}`,
+    u.keepamore && `亚马逊数据 <b>${u.keepamore.units}</b> 点`, u.deepseek && `AI <b>${kfmt(u.deepseek.units)}</b> 字`].filter(Boolean);
+  const rem = S.status?.ehunt_remaining, el = $("usage");
+  el.innerHTML = parts.length || rem != null ? `今日用量：${parts.join(" · ") || "0"}${rem != null ? ` · Etsy 额度剩余 <b>${rem}</b>` : ""}` : "";
+  el.title = "Etsy 数据 = EHunt（每条新商品 1 次，缓存命中不计）\n亚马逊数据 = Keepamore（Keepa 数据点）\nAI = DeepSeek（tokens，约等于字数）\n按 UTC 日统计（北京时间 8:00 刷新）";
 }
 
 let channel = null, pollTimer = null, statusTimer = null, reloadT = null, resignTimer = null;
@@ -453,20 +466,22 @@ async function deleteJobs(ids) {
   const all = ids.map((id) => S.jobs.get(id)).filter(Boolean), run = all.filter((j) => j.status === "running"), jobs = all.filter((j) => j.status !== "running");
   if (!jobs.length) return confirmDialog({ title: "无法删除", body: "运行中的任务不能删除，请先点“■ 停止”，停下后再删除。", ok: "知道了" });
   const libN = jobs.filter(inLib).length;
-  const ok = await confirmDialog({ title: `删除 ${jobs.length} 个任务？`, danger: true, ok: `删除 ${jobs.length} 个`,
+  if (libN === jobs.length) return confirmDialog({ title: "已在产品库，不会删除", ok: "知道了", body: `<p>${libN > 1 ? `这 ${libN} 个任务` : "这个任务"}对应的产品在产品库中，分析结果会保留，供产品库“查看分析”使用。如需删除，请先将产品移出产品库。</p>` });
+  const ok = await confirmDialog({ title: `删除 ${jobs.length - libN} 个任务？`, danger: true, ok: libN === jobs.length ? "知道了" : `删除 ${jobs.length - libN} 个`,
     body: `<p>将永久删除任务及其分析结果、亚马逊匹配和证据截图，<b>不可恢复</b>。</p>
       ${run.length ? `<p class="warn-t">已跳过 ${run.length} 个运行中的任务（请先停止）。</p>` : ""}
-      ${libN ? `<p class="warn-t">其中 ${libN} 个已在产品库：产品库条目会保留（标题/图片/价格等快照），但无法再打开分析详情。</p>` : ""}` });
+      ${libN ? `<p class="warn-t">其中 ${libN} 个已在产品库：这些<b>不会删除</b>，分析结果保留，可在产品库“查看分析”。实际删除 ${jobs.length - libN} 个。</p>` : ""}` });
   if (!ok) return;
   if (!DEMO) {
     const { data, error } = await sb.rpc("delete_jobs", { p_jobs: jobs.map((j) => j.id) });
     if (error) { toast(error.message, "bad"); return loadAll(); }
     const paths = data?.paths || [];
     for (let i = 0; i < paths.length; i += 100) await sb.storage.from(BUCKET).remove(paths.slice(i, i + 100)); // 尽力清理截图文件
-    toast(`已删除 ${data?.deleted ?? 0} 个任务${data?.skipped_running ? `，跳过运行中 ${data.skipped_running} 个` : ""}`, "ok");
-  } else toast(`已删除 ${jobs.length} 个任务（演示）`, "ok");
-  jobs.forEach((j) => { S.jobs.delete(j.id); S.sel.delete(j.id); S.lib.forEach((r) => { if (r.job_id === j.id) r.job_id = null; }); });
-  if (drawerState && jobs.some((j) => j.id === drawerState.id)) closeDrawer();
+    toast(`已删除 ${data?.deleted ?? 0} 个任务${data?.skipped_running ? `，跳过运行中 ${data.skipped_running} 个` : ""}${data?.kept_library ? `，保留产品库中的 ${data.kept_library} 个（分析仍可查看）` : ""}`, "ok");
+  } else toast(`已删除 ${jobs.length - libN} 个任务（演示）${libN ? `，保留产品库中的 ${libN} 个` : ""}`, "ok");
+  jobs.filter((j) => !inLib(j)).forEach((j) => { S.jobs.delete(j.id); S.sel.delete(j.id); });
+  jobs.forEach((j) => S.sel.delete(j.id));
+  if (drawerState && jobs.some((j) => j.id === drawerState.id && !inLib(j))) closeDrawer();
   render(); renderLibrary(); if (!DEMO) loadAll();
 }
 async function retryJobs(ids) {
@@ -486,6 +501,13 @@ function bulk(kind) {
   if (kind === "retry") return retryJobs(js.map((j) => j.id));
   if (kind === "delete") return deleteJobs(js.map((j) => j.id));
 }
+function bulkWhy(js, canLib, canRetry, canDel) {
+  const n = js.length, run = js.filter((j) => j.status === "running").length, why = [];
+  if (run) why.push(`运行中的 ${run} 个不能删除`);
+  if (canLib < n) why.push("仅已完成的可加入产品库");
+  if (canRetry < n) why.push("仅失败的可重新提交");
+  return why.length && (canLib !== n || canRetry !== n || canDel !== n) ? `<div class="bulk-why">${why.join("；")}</div>` : "";
+}
 function renderBulk(visible) {
   const js = selJobs(), n = js.length;
   const canLib = js.filter((j) => j.status === "succeeded" && !inLib(j)).length, canRetry = js.filter((j) => j.status === "failed" || j.status === "canceled").length,
@@ -494,10 +516,10 @@ function renderBulk(visible) {
   $("bulkBar").className = `bulk-bar${n ? " on" : ""}`;
   $("bulkBar").innerHTML = visible.length ? `<label class="selall"><input type="checkbox" data-selall="1"${allOn ? " checked" : ""}> 全选当前 ${visible.length} 个</label>
     ${n ? `<span class="bulk-n">已选 <b>${n}</b></span><span class="spacer"></span>
-    <button class="btn btn-ghost btn-sm" data-bulk="lib"${canLib ? "" : " disabled"}>★ 加入产品库${canLib ? ` (${canLib})` : ""}</button>
-    <button class="btn btn-ghost btn-sm" data-bulk="retry"${canRetry ? "" : " disabled"}>↻ 重新提交${canRetry ? ` (${canRetry})` : ""}</button>
-    <button class="btn btn-danger-ghost btn-sm" data-bulk="delete"${canDel ? "" : " disabled"}>🗑 删除${canDel ? ` (${canDel})` : ""}</button>
-    <button class="btn btn-ghost btn-sm" data-bulk="clear">取消选择</button>` : '<span class="hint">勾选任务可批量加入产品库 / 重新提交 / 删除</span>'}` : "";
+    <button class="btn btn-ghost btn-sm" data-bulk="lib" title="仅“已完成”的任务可加入产品库"${canLib ? "" : " disabled"}>★ 加入产品库${canLib ? ` (${canLib})` : ""}</button>
+    <button class="btn btn-ghost btn-sm" data-bulk="retry" title="仅“异常/已取消”的任务可重新提交"${canRetry ? "" : " disabled"}>↻ 重新提交${canRetry ? ` (${canRetry})` : ""}</button>
+    <button class="btn btn-danger-ghost btn-sm" data-bulk="delete" title="运行中的任务不能删除，需先停止"${canDel ? "" : " disabled"}>🗑 删除${canDel ? ` (${canDel})` : ""}</button>
+    <button class="btn btn-ghost btn-sm" data-bulk="clear">取消选择</button>${bulkWhy(js, canLib, canRetry, canDel)}` : '<span class="hint">勾选任务可批量加入产品库 / 重新提交 / 删除</span>'}` : "";
 }
 // ---------- 产品库：阶段（备选/进行中/不考虑）----------
 const STAGES = [["candidate", "备选", "◇"], ["active", "进行中", "▶"], ["rejected", "不考虑", "✕"]];
@@ -505,14 +527,14 @@ const STAGE_NAME = Object.fromEntries(STAGES.map(([k, n]) => [k, n]));
 const REASONS = [["roi_low", "ROI 太低"], ["cost_high", "成本太高"], ["ip_risk", "侵权风险"], ["competition", "竞争太激烈"], ["demand_low", "市场需求太小"],
   ["seasonal", "季节性太强"], ["logistics", "物流难做（易碎/超大/超重）"], ["compliance", "认证合规问题"], ["supply", "供应链难找"], ["other", "其他"]];
 const REASON_NAME = Object.fromEntries(REASONS);
-const L = { stage: "candidate", q: "", reason: null, sel: new Set() };
+const L = { stage: "all", q: "", reason: null, sel: new Set() };
 const stageOf = (r) => r.stage || "candidate";
 const libById = (id) => [...S.lib.values()].find((x) => x.id === id);
 const libMatch = (r, q) => !q || [r.title, r.etsy_listing_id, r.product_summary, r.target_audience, r.shop_name, r.stage_note, ...(r.keywords || [])]
   .some((v) => String(v ?? "").toLowerCase().includes(q));
 function libVisible() {
   const q = L.q.trim().toLowerCase();
-  return [...S.lib.values()].filter((r) => stageOf(r) === L.stage && libMatch(r, q) && (L.stage !== "rejected" || !L.reason || (r.reject_reasons || []).includes(L.reason)))
+  return [...S.lib.values()].filter((r) => (L.stage === "all" || stageOf(r) === L.stage) && libMatch(r, q) && (L.stage !== "rejected" || !L.reason || (r.reject_reasons || []).includes(L.reason)))
     .sort((a, b) => String(b.stage_changed_at || b.added_at).localeCompare(String(a.stage_changed_at || a.added_at)));
 }
 function reasonDialog(n) {
@@ -542,7 +564,16 @@ async function moveStage(ids, stage) {
     await loadAll();
   } else items.forEach((r) => Object.assign(r, { stage, reject_reasons: stage === "rejected" ? reasons : [], stage_note: stage === "rejected" ? note || null : null, stage_changed_at: new Date().toISOString() }));
   items.forEach((r) => L.sel.delete(r.id));
-  toast(`已移到「${STAGE_NAME[stage]}」${items.length} 个`, "ok"); renderLibrary();
+  const prev = items.map((r) => ({ r, stage: stageOf(r) })); renderLibrary();
+  toast(`已移到「${STAGE_NAME[stage]}」${items.length > 1 ? ` ${items.length} 个` : ""}`, "ok", [
+    ...(stage !== "candidate" ? [{ label: "撤销", run: () => undoStage(prev.map((p) => p.r.id)) }] : []),
+    { label: "查看", run: () => { L.stage = stage; L.reason = null; L.sel.clear(); renderLibrary(); } }], 7000);
+}
+async function undoStage(ids) { // 撤销 = 移回备选（set_library_stage 允许 active|rejected → candidate）
+  if (!DEMO) { const { error } = await sb.rpc("set_library_stage", { p_items: ids, p_stage: "candidate", p_reasons: null, p_note: null });
+    if (error) return toast(error.message, "bad"); await loadAll(); }
+  else ids.map(libById).forEach((r) => r && Object.assign(r, { stage: "candidate", reject_reasons: [], stage_note: null, stage_changed_at: new Date().toISOString() }));
+  toast("已撤销，移回「备选」", "ok"); renderLibrary();
 }
 function libCard(r) {
   const img = imgUrl(r.image_url), job = r.job_id && S.jobs.get(r.job_id), st = stageOf(r), on = L.sel.has(r.id);
@@ -554,36 +585,51 @@ function libCard(r) {
   return `<article class="pcard${on ? " sel" : ""}">
     <div class="pimg">${img ? `<img src="${img}" data-zoom="${img}" data-cap="${esc(r.title)}" alt="" loading="lazy">` : '<div class="pimg-empty">◆</div>'}
       <label class="psel" title="选择"><input type="checkbox" data-lsel="${esc(r.id)}"${on ? " checked" : ""}></label>
-      <div class="pbadges">${ic ? `<span class="pb pb-id">同款 ${ic}</span>` : ""}${sc ? `<span class="pb pb-sim">类似 ${sc}</span>` : ""}${!r.job_id ? '<span class="pb" title="分析任务已删除，仅保留快照">无分析</span>' : ""}</div></div>
+      <div class="pbadges">${L.stage === "all" ? `<span class="pb pb-st st-${st}">${esc(STAGE_NAME[st])}</span>` : ""}${!r.job_id ? `<span class="pb pb-del" title="分析任务已删除，仅保留加入时的快照">${S.libPending.has(Number(r.etsy_listing_id)) ? "重新分析中…" : "分析已删除"}</span>` : ""}</div></div>
     <div class="pinfo"><a class="ptitle" href="${url}" target="_blank" rel="noopener" title="${esc(r.title)}">${esc(r.title || `Etsy #${r.etsy_listing_id}`)}</a>
       <div class="pprice">${r.price != null ? `$${esc(Number(r.price).toFixed(2))}` : '<span class="muted">—</span>'}</div>
-      ${r.keywords?.length ? `<div class="pline pkw" title="${esc(r.keywords.join(", "))}">${esc(r.keywords.slice(0, 3).join(" · "))}</div>` : ""}
-      <div class="pline muted">同款 ${ic ?? "—"} · 类似品 ${sc ?? "—"} · ${esc(new Date(r.added_at).toLocaleDateString(undefined, { month: "numeric", day: "numeric" }))} 加入</div>
+      ${r.keywords?.length ? `<div class="pline pkw" title="${esc(r.keywords.join(", "))}">${esc(r.keywords.slice(0, 3).join(", "))}</div>` : ""}
+      <div class="pline muted" title="加入产品库时的匹配数量">加入时：同款 ${ic ?? "—"} · 类似 ${sc ?? "—"} · ${esc(new Date(r.added_at).toLocaleDateString(undefined, { month: "numeric", day: "numeric" }))}</div>
       ${st === "rejected" ? `<div class="rchips">${(r.reject_reasons || []).map((k) => `<span class="rchip">${esc(REASON_NAME[k] || k)}</span>`).join("")}</div>
         ${r.stage_note ? `<div class="pline pnote" title="${esc(r.stage_note)}">“${esc(r.stage_note)}”</div>` : ""}` : ""}
       <div class="pacts">${acts}</div>
-      <div class="pacts2">${r.job_id && (!job || job.status === "succeeded") ? `<button class="btn btn-link btn-sm" data-detail="${esc(r.job_id)}">查看分析 →</button>` : ""}
+      <div class="pacts2">${r.job_id && (!job || job.status === "succeeded") ? `<button class="btn btn-link btn-sm" data-detail="${esc(r.job_id)}">查看分析 →</button>`
+        : S.libPending.has(Number(r.etsy_listing_id)) ? '<span class="hint">重新分析中…</span>' : `<button class="btn btn-link btn-sm" data-reana="${esc(r.id)}" title="为这个商品提交新的分析（24 小时内的数据走缓存，几乎不耗额度）">↻ 重新分析</button>`}
         <span class="spacer"></span><button class="btn btn-link btn-sm muted" data-unlib="${esc(r.id)}">移出产品库</button></div></div></article>`;
+}
+function libAllBulk() {
+  const sel = [...L.sel].map(libById).filter(Boolean), c = sel.filter((r) => stageOf(r) === "candidate").length, o = sel.length - c;
+  return `${c ? `<button class="btn btn-primary btn-sm" data-lbulk="active">▶ 进行中 (${c})</button><button class="btn btn-danger-ghost btn-sm" data-lbulk="rejected">✕ 不考虑 (${c})</button>` : ""}${o ? `<button class="btn btn-ghost btn-sm" data-lbulk="candidate">↩ 移回备选 (${o})</button>` : ""}`;
+}
+async function reanalyze(r) {
+  const lid = Number(r.etsy_listing_id), url = r.etsy_url || `https://www.etsy.com/listing/${lid}`;
+  if (S.libPending.has(lid)) return;
+  if (!DEMO) {
+    const { data: b, error } = await sb.from("batches").insert({ name: `重新分析 #${lid}` }).select().single();
+    const e2 = error || (await sb.from("jobs").insert({ batch_id: b.id, etsy_url: url, etsy_listing_id: lid })).error;
+    if (e2) return toast(`提交失败：${e2.message}`, "bad");
+  }
+  S.libPending.add(lid); renderLibrary();
+  toast("已提交重新分析，完成后自动关联到产品库（任务列表中不显示）", "ok", null, 4000);
 }
 function renderLibrary() {
   const all = [...S.lib.values()], cnt = Object.fromEntries(STAGES.map(([k]) => [k, all.filter((r) => stageOf(r) === k).length]));
-  [...L.sel].forEach((id) => { const r = libById(id); if (!r || stageOf(r) !== L.stage) L.sel.delete(id); });
+  [...L.sel].forEach((id) => { const r = libById(id); if (!r || (L.stage !== "all" && stageOf(r) !== L.stage)) L.sel.delete(id); });
   $("libCount").textContent = all.length; $("libHeadN").textContent = all.length ? `${all.length} 个` : "";
-  $("libSide").innerHTML = `<div class="side-t">阶段</div>` + STAGES.map(([k, n, ic]) => `<button class="side-i${L.stage === k ? " on" : ""} st-${k}" role="tab" data-lstage="${k}"><span class="side-ic">${ic}</span>${n}<span class="side-n">${cnt[k]}</span></button>`).join("")
-    + `<p class="side-hint">加入产品库默认进入备选；只有备选可移到进行中或不考虑。</p>`;
+  $("libSide").innerHTML = `<div class="side-t">阶段</div><button class="side-i${L.stage === "all" ? " on" : ""} st-all" role="tab" data-lstage="all"><span class="side-ic">▦</span>全部<span class="side-n">${all.length}</span></button>` + STAGES.map(([k, n, ic]) => `<button class="side-i${L.stage === k ? " on" : ""} st-${k}" role="tab" data-lstage="${k}"><span class="side-ic">${ic}</span>${n}<span class="side-n">${cnt[k]}</span></button>`).join("");
   const vis = libVisible(), n = L.sel.size, allOn = vis.length && vis.every((r) => L.sel.has(r.id));
   let bar = "";
   if (L.stage === "rejected") { const rc = {}; all.filter((r) => stageOf(r) === "rejected").forEach((r) => (r.reject_reasons || []).forEach((k) => (rc[k] = (rc[k] || 0) + 1)));
     bar += `<div class="rfilter"><span class="hint">按原因：</span><button class="fchip${!L.reason ? " active" : ""}" data-lreason="all">全部</button>${REASONS.filter(([k]) => rc[k]).map(([k, v]) => `<button class="fchip${L.reason === k ? " active" : ""}" data-lreason="${k}">${esc(v)} <span class="n">${rc[k]}</span></button>`).join("")}</div>`; }
   bar += vis.length ? `<div class="lbulk${n ? " on" : ""}"><label class="selall"><input type="checkbox" data-lselall="1"${allOn ? " checked" : ""}> 全选 ${vis.length} 个</label>
-    ${n ? `<span class="bulk-n">已选 <b>${n}</b></span><span class="spacer"></span>${L.stage === "candidate"
+    ${n ? `<span class="bulk-n">已选 <b>${n}</b></span><span class="spacer"></span>${L.stage === "all" ? libAllBulk() : L.stage === "candidate"
       ? `<button class="btn btn-primary btn-sm" data-lbulk="active">▶ 进行中 (${n})</button><button class="btn btn-danger-ghost btn-sm" data-lbulk="rejected">✕ 不考虑 (${n})</button>`
       : `<button class="btn btn-ghost btn-sm" data-lbulk="candidate">↩ 移回备选 (${n})</button>`}
       <button class="btn btn-ghost btn-sm" data-lbulk="remove">移出产品库</button><button class="btn btn-ghost btn-sm" data-lbulk="clear">取消选择</button>`
-      : `<span class="hint">勾选卡片可批量${L.stage === "candidate" ? "移到进行中 / 不考虑" : "移回备选"}</span>`}</div>` : "";
+      : `<span class="hint">勾选卡片可批量${L.stage === "candidate" ? "移到进行中 / 不考虑" : L.stage === "all" ? "移动阶段 / 移出" : "移回备选"}</span>`}</div>` : "";
   $("libBar").innerHTML = bar;
-  $("libGrid").innerHTML = vis.length ? vis.map(libCard).join("") : `<div class="card empty lib-empty"><div class="ico">★</div><h3>${all.length ? (L.q || L.reason ? "没有匹配的产品" : `「${STAGE_NAME[L.stage]}」里还没有产品`) : "产品库还是空的"}</h3>
-    <p class="muted">${all.length ? (L.stage === "candidate" ? "在任务中点“☆ 加入产品库”会进入备选" : "在备选中选择产品移到这里") : "在已完成任务上点“☆ 加入产品库”，或勾选多个任务批量加入"}</p></div>`;
+  $("libGrid").innerHTML = vis.length ? vis.map(libCard).join("") : `<div class="card empty lib-empty"><div class="ico">★</div><h3>${all.length ? (L.q || L.reason ? "没有匹配的产品" : `「${L.stage === "all" ? "全部" : STAGE_NAME[L.stage]}」里还没有产品`) : "产品库还是空的"}</h3>
+    <p class="muted">${all.length ? (L.stage === "candidate" || L.stage === "all" ? "在任务中点“☆ 加入产品库”会进入备选" : "在备选中选择产品移到这里") : "在已完成任务上点“☆ 加入产品库”，或勾选多个任务批量加入"}</p></div>`;
 }
 function route() {
   const lib = location.hash.startsWith("#/library");
@@ -595,11 +641,11 @@ window.addEventListener("hashchange", () => { closeDrawer(); route(); window.scr
 setInterval(() => { document.querySelectorAll("[data-tick]").forEach((el) => { const j = S.jobs.get(el.dataset.tick); if (j) el.textContent = timeText(j); }); }, 1000);
 setInterval(renderBanners, 30000);
 function timeText(j) {
-  const w = waitMs(j), r = runMs(j), parts = [];
-  if (w != null) parts.push(`排队等待 ${dur(w)}`);
-  if (j.status === "running") parts.push(`已运行 ${dur(r)}`);
-  else if (r != null && (j.status === "succeeded" || j.status === "failed")) parts.push(`耗时 ${dur(r)}`);
-  return parts.join(" · ");
+  const w = waitMs(j), r = runMs(j);
+  if (j.status === "queued") return w != null ? `已排队 ${dur(w)}` : "";
+  if (j.status === "running") return [w != null ? `排队 ${dur(w)}` : "", `已运行 ${dur(r)}`].filter(Boolean).join(" · ");
+  if (r != null && (j.status === "succeeded" || j.status === "failed")) return [w != null ? `排队 ${dur(w)}` : "", `耗时 ${dur(r)}`].filter(Boolean).join(" · ");
+  return w != null && j.status !== "paused" ? `排队 ${dur(w)}` : "";
 }
 
 // ---------- 渲染：列表 ----------
@@ -641,15 +687,17 @@ function render() {
     return String(j.etsy_listing_id || e.listing_id || "").includes(q) || (e.title || "").toLowerCase().includes(q)
       || j.etsy_url.toLowerCase().includes(q) || [...(S.asins.get(j.id) || [])].some((a) => a.toLowerCase().includes(q)); };
   const base = all.filter(match);
-  $("chips").innerHTML = S.loaded ? CATS.map(([k, t]) => `<button class="fchip ${F.cat === k ? "active" : ""} fc-${k}" data-cat="${k}">${t} <span class="n">${base.filter((j) => inCat(j, k)).length}</span></button>`).join("") : "";
+  $("chips").innerHTML = S.loaded ? CATS.map(([k, t]) => `<button class="fchip ${F.cat === k ? "active" : ""} fc-${k}" data-cat="${k}">${t} <span class="n">${base.filter((j) => inCat(j, k)).length}</span></button>`).join("") + (q ? '<span class="hint chips-q">（搜索结果）</span>' : "") : "";
+  $("qClear").classList.toggle("hidden", !q);
+  const nShown = base.filter((j) => inCat(j, F.cat)).length;
+  $("searchBanner").innerHTML = q ? `<div class="sbanner">正在搜索“<b>${esc(F.q.trim())}</b>”，共 <b>${nShown}</b> 条${F.cat !== "all" ? `（${esc(CATS.find(([k]) => k === F.cat)[1])}）` : ""} · <a href="#" data-clear="1">清除</a></div>` : "";
   const doneD = all.map(runMs).filter((v, i) => v != null && all[i].status === "succeeded");
-  $("avgDur").textContent = doneD.length ? `平均分析耗时 ${dur(doneD.reduce((a, b) => a + b, 0) / doneD.length)}（${doneD.length} 个）` : "";
+  $("avgDur").textContent = doneD.length ? `平均每条分析 ${dur(doneD.reduce((a, b) => a + b, 0) / doneD.length)}（基于 ${doneD.length} 条已完成）` : "";
   if (!S.loaded) return ($("list").innerHTML = skeleton());
   if (!all.length) $("bulkBar").innerHTML = "";
   if (!all.length) return ($("list").innerHTML = `<div class="card empty"><div class="ico">🔍</div><h3>还没有分析记录</h3><p class="muted">在上方粘贴 Etsy 商品链接，点击“开始分析”</p></div>`);
   const jobs = base.filter((j) => inCat(j, F.cat)).sort((x, y) => (PRIO[catOf(x)] - PRIO[catOf(y)]) || y.created_at.localeCompare(x.created_at));
   renderBulk(jobs); renderLibCount();
-  $("pauseNote").classList.toggle("hidden", !all.some((j) => j.status === "queued" || j.status === "running" || j.status === "paused"));
   const more = S.hasMore ? `<button class="btn btn-ghost load-more" data-more="1">加载更多（已显示 ${all.length} 个任务）</button>` : "";
   if (!jobs.length) return ($("list").innerHTML = `<div class="card empty"><div class="ico">🗂️</div><h3>没有符合条件的任务</h3><p class="muted">换个分类或<a href="#" data-clear="1">清除筛选</a>${S.hasMore ? "；较早的任务需先“加载更多”" : ""}</p></div>${more}`);
   $("list").innerHTML = jobs.map((j) => {
@@ -665,9 +713,9 @@ function render() {
         <a class="title" href="${safeUrl(j.etsy_url)}" target="_blank" rel="noopener">${esc(e.title || `Etsy #${j.etsy_listing_id || ""}`)}</a>
         <div class="sub">${esc(a.product_summary || (j.status === "succeeded" || j.status === "failed" ? "" : j.status === "paused" ? "已暂停，点击继续后重新排队" : j.status === "queued" && quota().exhausted ? "等待额度刷新" : "等待分析…"))}</div>
         <div class="meta">${pill(stText + (j.status === "running" && STAGE[j.stage] ? " · " + STAGE[j.stage] : "") + (j.cancel_requested && j.status === "running" ? " · 停止中" : ""), stCls)}${j.status === "queued" && quota().exhausted ? '<span class="pill pill-warn">等待额度刷新</span>' : ""}${S.flash.has(j.id) ? '<span class="pill pill-new">新提交</span>' : ""}
-          ${e.price ? `<span class="chip">$${esc(e.price)}</span>` : ""}${ehuntChips(e)}${(a.keywords || []).map((k) => `<span class="chip chip-copy" data-copy="${esc(k)}" title="点击复制">${esc(k)}</span>`).join("")}</div>
+          ${e.price ? `<span class="chip">$${esc(e.price)}</span>` : ""}${ehuntChips(e)}${kwChips(a.keywords)}</div>
         ${errText ? `<div class="err">${errText}</div>` : ""}
-        <div class="timing"><span data-tick="${esc(j.id)}">${esc(timeText(j))}</span>${j.status === "succeeded" && !j.reviewed_at ? ' <span class="pill pill-warn">待我处理</span>' : ""}</div>
+        <div class="timing"><span data-tick="${esc(j.id)}">${esc(timeText(j))}</span>${j.status === "succeeded" && !j.reviewed_at ? ' <span class="pill pill-warn">待我处理</span>' : ""}${S.keep.has(j.id) && j.reviewed_at ? ' <span class="pill pill-ok" title="已标记为已查看，刷新页面后移到“已完成”">✓ 已查看</span>' : ""}</div>
       </div>
       <div class="c-aud"><div class="label">目标人群</div><div class="aud">${audienceSummary(a) || '<span class="hint">—</span>'}</div>${audienceDetail(a)}</div>
       <div class="c-act actions">${sn.some((s) => s.kind !== "search_result") ? `<div class="meta" style="margin:0;justify-content:flex-end">
@@ -686,7 +734,9 @@ function friendlyErr(j) {
   return `${j.status === "queued" ? "上次尝试失败，将自动重试：" : ""}${esc(e)}`;
 }
 
-const actBtns = (j) => { const b = (act, t, cls = "btn-ghost") => `<button class="btn ${cls} btn-sm" data-act="${act}" data-id="${esc(j.id)}">${t}</button>`;
+const TIPS = { pause: "仅对排队中的任务生效；点“继续”后重新排队", cancel: "排队/暂停中：直接取消。运行中：在当前步骤完成后停下，已发出的请求仍会计费", resume: "重新加入队列" };
+const actBtns = (j) => { const b = (act, t, cls = "btn-ghost") => { const tip = act === "cancel" && j.status === "running" ? "会在当前步骤完成后停下，已发出的请求仍会计费" : TIPS[act];
+    return `<button class="btn ${cls} btn-sm" data-act="${act}" data-id="${esc(j.id)}"${tip ? ` title="${esc(tip)}" aria-label="${esc(t.replace(/^\S+\s/, "") + "：" + tip)}"` : ""}>${t}${tip ? '<span class="ib" aria-hidden="true">ⓘ</span>' : ""}</button>`; };
   switch (j.status) {
     case "queued": return b("pause", "⏸ 暂停") + b("cancel", "✕ 取消");
     case "running": return j.cancel_requested ? '<button class="btn btn-ghost btn-sm" disabled>停止中…</button>' : b("cancel", "■ 停止");
@@ -697,6 +747,8 @@ const actBtns = (j) => { const b = (act, t, cls = "btn-ghost") => `<button class
   } };
 const libBtn = (j) => inLib(j) ? `<button class="btn btn-lib-on btn-sm" data-act="lib" data-id="${esc(j.id)}" title="点击移出产品库"><span class="on-t">★ 已加入产品库</span><span class="off-t">移出产品库</span></button>`
   : `<button class="btn btn-lib btn-sm" data-act="lib" data-id="${esc(j.id)}">☆ 加入产品库</button>`;
+// 每个搜索词短语一个 chip（不拆词）；chip 之间放屏幕阅读器可读的“, ”分隔
+const kwChips = (ks) => (ks || []).map((k) => `<span class="chip chip-copy chip-kw" data-copy="${esc(k)}" title="${esc(k)}（点击复制）" role="button" tabindex="0">${esc(k)}</span>`).join('<span class="sr-only">, </span>');
 const renderLibCount = () => { $("libCount").textContent = S.lib.size; };
 function refreshDrawerActs() { const el = $("drawerActs"), j = drawerState && S.jobs.get(drawerState.id); if (el && j) el.innerHTML = libBtn(j) + `<button class="btn btn-danger-ghost btn-sm" data-act="del" data-id="${esc(j.id)}">🗑 删除</button>`; }
 const ehuntChips = (e) => { const m = (e.raw || {}).ehunt; if (!m) return "";
@@ -725,7 +777,7 @@ function openDetail(id) {
     <div class="summary">
       ${a.product_summary ? `<div class="kv"><b>产品</b>　${esc(a.product_summary)}</div>` : ""}
       ${a.target_audience ? `<div class="kv"><b>人群</b>　${esc(a.target_audience)}</div>` : ""}
-      ${(a.keywords || []).length ? `<div class="kv"><b>搜索词</b>　${a.keywords.map((k) => `<span class="chip chip-copy" data-copy="${esc(k)}" title="点击复制">${esc(k)}</span>`).join("")}</div>` : ""}
+      ${(a.keywords || []).length ? `<div class="kv"><b>搜索词</b>　${kwChips(a.keywords)}</div>` : ""}
       <div class="kv"><b>匹配</b>　<span class="pill kpill k-identical">同款 ${nI}</span> <span class="pill kpill k-similar">类似品 ${nS}</span></div></div>
     <div class="toolbar">
       <label class="sort">排序 <select id="sortSel" class="input input-sm">${Object.entries(SORTS).map(([k, [t]]) => `<option value="${k}"${k === sortKey ? " selected" : ""}>${t}</option>`).join("")}</select></label>
@@ -739,7 +791,6 @@ function openDetail(id) {
   refreshDrawerActs();
   renderSnaps();
   loadMatches(id);
-  if (j.status === "succeeded" && !j.reviewed_at) jobAction(id, "reviewed"); // 打开决策过程即视为已查看
   $("drawerMask").classList.remove("hidden"); $("drawer").classList.add("open"); $("drawer").setAttribute("aria-hidden", "false");
   $("drawerBody").scrollTop = 0;
 }
@@ -754,13 +805,15 @@ function renderSnaps() {
     return `<div class="snap k-${esc(s.kind)}">${u ? `<img src="${u}" data-path="${esc(s.image_path)}" data-zoom="${u}" data-cap="${esc(s.title)}" alt="" loading="lazy">` : '<div class="sk" style="aspect-ratio:16/10"></div>'}
       <div class="snap-b"><div class="snap-t">${esc(s.title)}</div>
         ${s.keyword ? `<div>搜索词 <span class="chip chip-copy" data-copy="${esc(s.keyword)}" title="点击复制">${esc(s.keyword)}</span></div>` : ""}
-        ${s.asin ? `<div class="facts"><span>ASIN <b>${esc(s.asin)}</b></span><span><b>$${esc(s.price)}</b></span>${mo != null ? `<span>月销 <b>${esc(mo)}</b></span>` : ""}<span>BSR <b>${esc(s.bsr ?? "-")}</b></span><span>评论 <b>${esc(s.review_count ?? "-")}</b></span>${s.rating ? `<span>★ <b>${esc(s.rating)}</b></span>` : ""}</div>` : ""}
-        ${s.similarity != null ? `<div>相似度 <b>${esc(s.similarity)}</b></div>` : ""}
+        ${s.asin ? `<div class="facts"><span>ASIN <b>${esc(s.asin)}</b></span><span><b>$${esc(s.price)}</b></span>${mo != null ? `<span title="${salesSrc(s, s._m) === "monthlySold" ? "亚马逊页面“过去一个月购买”" : "按 BSR 推算的估计值，仅供参考"}">月销 <b>${salesSrc(s, s._m) === "monthlySold" ? "" : "≈"}${esc(mo)}</b> <small class="muted">${salesSrc(s, s._m) === "monthlySold" ? "亚马逊月购" : "BSR 估算"}</small></span>` : ""}<span>BSR <b>${esc(s.bsr ?? "-")}</b></span><span>评论 <b>${esc(s.review_count ?? "-")}</b></span>${s.rating ? `<span>★ <b>${esc(s.rating)}</b></span>` : ""}</div>` : ""}
+        ${s.similarity != null ? `<div>相似度 <b>${esc(pct(s.similarity))}</b></div>` : ""}
         <div class="reason">${esc(s.similarity_reason)}</div>
         <div class="meta" style="margin-top:4px"><span class="pill kpill k-${esc(s.kind)}">${KIND[s.kind]}</span><span class="hint">${esc(IMG_SRC[s.image_source] || s.image_source)}</span><span class="spacer"></span><a href="${safeUrl(s.source_url)}" target="_blank" rel="noopener">来源 ↗</a></div>
       </div></div>`;
   }).join("") : '<p class="hint">无</p>'; });
 }
+const salesSrc = (...xs) => { for (const x of xs) { const r = (x || {}).raw || {}; if (r.sales_source) return r.sales_source; if (r.monthlySold > 0) return "monthlySold"; } return "bsr_estimate"; };
+const pct = (v) => { const n = Number(v); return isNaN(n) ? v : `${Math.round(n <= 1 ? n * 100 : n)}%`; };
 const num = (v) => (v == null || v === "" || isNaN(+v) ? null : +v);
 const by = (f, asc) => (x, y) => { const a = num(f(x)), b = num(f(y)); if (a == null && b == null) return 0; if (a == null) return 1; if (b == null) return -1; return asc ? a - b : b - a; };
 const SORTS = { sim: ["相似度 高→低", by((s) => s.similarity, false)], sales: ["月销 高→低", by((s) => monthly(s) ?? monthly(s._m), false)],
@@ -789,7 +842,7 @@ function exportJob(id) {
   downloadCsv(`etsy-${j.etsy_listing_id || e.listing_id || id.slice(0, 8)}-amazon.csv`,
     ["Etsy listing", "Etsy 标题", "类型", "ASIN", "亚马逊标题", "价格", "月销", "销量来源", "BSR", "评论数", "评分", "相似度", "判定理由", "搜索词", "链接"],
     rows.map((m) => [j.etsy_listing_id || e.listing_id, e.title, KIND[m.match_type || m.kind] || m.match_type, m.asin, m.title, m.price, monthly(m),
-      (m.raw || {}).sales_source === "monthlySold" ? "亚马逊过去一月购买" : monthly(m) != null ? "BSR 估算" : "", m.bsr, m.review_count, m.rating, m.similarity,
+      (m.raw || {}).sales_source === "monthlySold" ? "亚马逊过去一月购买" : monthly(m) != null ? "BSR 估算" : "", m.bsr, m.review_count, m.rating, m.similarity != null ? pct(m.similarity) : "",
       m.similarity_reason, m.keyword, m.url || m.source_url]));
 }
 function exportList() {
@@ -801,21 +854,25 @@ function exportList() {
       return [j.etsy_listing_id || e.listing_id, e.title, (STATUS[j.status] || [j.status])[0], a.product_summary, a.target_audience, a.keywords,
         cnt(j.id, "identical"), cnt(j.id, "similar"), e.price, j.created_at, j.etsy_url, j.error]; }));
 }
-function closeDrawer() { $("drawer").classList.remove("open"); $("drawer").setAttribute("aria-hidden", "true"); $("drawerMask").classList.add("hidden"); drawerState = null; }
+function closeDrawer() {
+  const j = drawerState && S.jobs.get(drawerState.id); // 关闭抽屉时才标记已查看；本次会话卡片位置不变
+  if (j && j.status === "succeeded" && !j.reviewed_at && !inLib(j)) { S.keep.add(j.id); jobAction(j.id, "reviewed"); }
+  $("drawer").classList.remove("open"); $("drawer").setAttribute("aria-hidden", "true"); $("drawerMask").classList.add("hidden"); drawerState = null; }
 
 document.addEventListener("click", (ev) => {
-  const t = ev.target.closest("[data-zoom],[data-detail],[data-tab],[data-cat],[data-act],[data-clear],[data-copy],[data-copyall],[data-export],[data-more],[data-dupe],[data-view],[data-bulk],[data-unlib],[data-lstage],[data-lmove],[data-lreason],[data-lbulk],[data-libgo]") || ev.target;
+  const t = ev.target.closest("[data-zoom],[data-detail],[data-tab],[data-cat],[data-act],[data-clear],[data-copy],[data-copyall],[data-export],[data-more],[data-dupe],[data-view],[data-bulk],[data-unlib],[data-lstage],[data-lmove],[data-lreason],[data-lbulk],[data-libgo],[data-reana]") || ev.target;
   if (t.dataset?.bulk) { if (t.dataset.bulk === "clear") { S.sel.clear(); return render(); } return bulk(t.dataset.bulk); }
   if (t.dataset?.unlib) { const r = [...S.lib.values()].find((x) => x.id === t.dataset.unlib); return r && removeLibItems([r]); }
   if (t.dataset?.lstage) { L.stage = t.dataset.lstage; L.reason = null; L.sel.clear(); return renderLibrary(); }
   if (t.dataset?.lreason) { L.reason = t.dataset.lreason === "all" || L.reason === t.dataset.lreason ? null : t.dataset.lreason; return renderLibrary(); }
+  if (t.dataset?.reana) { const r = libById(t.dataset.reana); return r && reanalyze(r); }
   if (t.dataset?.lmove) return moveStage([t.dataset.id], t.dataset.lmove);
   if (t.dataset?.lbulk) { if (t.dataset.lbulk === "clear") { L.sel.clear(); return renderLibrary(); }
     if (t.dataset.lbulk === "remove") return removeLibItems([...L.sel].map(libById).filter(Boolean), true);
     return moveStage([...L.sel], t.dataset.lbulk); }
   if (t.dataset?.libgo) { L.stage = t.dataset.libgo; L.sel.clear(); if (location.hash.startsWith("#/library")) renderLibrary(); return; }
   if (t.dataset?.copy) return copyText(t.dataset.copy);
-  if (t.dataset?.copyall && drawerState) return copyText((S.analyses.get(drawerState.id)?.keywords || []).join("\n"));
+  if (t.dataset?.copyall && drawerState) return copyText((S.analyses.get(drawerState.id)?.keywords || []).join(", "));
   if (t.dataset?.export) return t.dataset.export === "job" ? drawerState && exportJob(drawerState.id) : exportList();
   if (t.dataset?.more) { S.limit += PAGE; t.disabled = true; t.textContent = "加载中…"; return loadAll(); }
   if (t.dataset?.dupe && pending) { const { ok, bad, dupes } = pending, ids = new Set(dupes.map((d) => d.etsy_listing_id));
@@ -835,6 +892,7 @@ document.addEventListener("click", (ev) => {
   if (t.id === "drawerMask" || t.closest?.("#drawerClose")) closeDrawer();
 });
 document.addEventListener("keydown", (ev) => {
+  if ((ev.key === "Enter" || ev.key === " ") && ev.target.dataset?.copy) { ev.preventDefault(); return copyText(ev.target.dataset.copy); }
   if (ev.key !== "Escape") return;
   if (!$("modal").classList.contains("hidden")) return closeModal(false);
   if (!$("lightbox").classList.contains("hidden")) $("lightbox").classList.add("hidden"); else closeDrawer();
@@ -848,5 +906,6 @@ document.addEventListener("change", (ev) => { if (ev.target.id === "sortSel") { 
   if (t.dataset?.lselall) { libVisible().forEach((r) => t.checked ? L.sel.add(r.id) : L.sel.delete(r.id)); return renderLibrary(); }
   if (t.dataset?.selall) { const ids = [...document.querySelectorAll("[data-sel]")].map((x) => x.dataset.sel); ids.forEach((id) => t.checked ? S.sel.add(id) : S.sel.delete(id)); render(); } });
 $("libQ").addEventListener("input", () => { L.q = $("libQ").value; renderLibrary(); });
+$("qClear").onclick = () => { F.q = ""; $("q").value = ""; render(); $("q").focus(); };
 $("btnClear").onclick = () => { F.cat = "all"; F.q = ""; $("q").value = ""; render(); };
 boot();
