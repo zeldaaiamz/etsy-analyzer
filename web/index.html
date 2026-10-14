@@ -11,7 +11,7 @@
 <header class="topbar">
   <div class="brand"><span class="logo">◆</span> 选品雷达 <span class="brand-sub">Etsy → Amazon US</span></div>
   <nav id="nav" class="nav hidden"><a href="#/" data-nav="tasks">任务</a><a href="#/library" data-nav="library">产品库 <span id="libCount" class="nbadge">0</span></a></nav>
-  <div id="userBox" class="user hidden"><span id="demoBadge" class="pill pill-warn hidden">演示数据</span><span id="who" class="muted"></span><button id="btnLogout" class="btn btn-ghost btn-sm">退出</button></div>
+  <div id="userBox" class="user hidden"><span id="quotaMeter" class="qmeter hidden" title="EHunt 每日额度（每条新 listing 1 次；24 小时内重复的 listing 走缓存不耗额度）"></span><span id="demoBadge" class="pill pill-warn hidden">演示数据</span><span id="who" class="muted"></span><button id="btnLogout" class="btn btn-ghost btn-sm">退出</button></div>
 </header>
 
 <main class="container">
@@ -38,10 +38,10 @@
       <div class="composer-head">
         <div><h2>新建分析</h2><p class="muted">每行粘贴一个 Etsy 商品链接（支持 etsy.me 短链、m.etsy.com），系统会逐条识别产品、人群并搜索亚马逊同款与类似品</p></div>
       </div>
-      <textarea id="urls" class="input textarea" placeholder="https://www.etsy.com/listing/1234567890/...&#10;https://etsy.me/3AbCdEf"></textarea>
+      <div class="paste-wrap"><textarea id="urls" class="input textarea" placeholder="https://www.etsy.com/listing/1234567890/...&#10;https://etsy.me/3AbCdEf"></textarea><span id="pasteCount" class="paste-count">0 / 500</span></div>
       <div id="urlIssues" class="url-issues"></div>
       <div id="dupeBox"></div>
-      <div class="composer-foot"><span id="urlCount" class="muted">0 条有效链接 · 单次最多 50 条</span>
+      <div class="composer-foot"><span id="urlCount" class="muted">0 条有效链接 · 单次最多 500 条</span>
         <span class="spacer"></span>
         <button id="btnSubmit" class="btn btn-primary">开始分析 →</button></div>
       <div id="submitMsg" class="submit-msg" role="status" aria-live="polite"></div>

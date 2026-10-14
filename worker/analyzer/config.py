@@ -39,7 +39,7 @@ class Config:
     ehunt_cache_ttl: int = 86400
     keepamore_cache_ttl: int = 86400
     llm_cache_ttl: int = 86400
-    ehunt_min_remaining: int = 10  # EHunt 今日剩余低于此值时停止领取新任务
+    ehunt_min_remaining: int = 0  # EHunt 今日剩余 ≤ 此值时停止领取（0 = 用到额度耗尽）
     heartbeat_interval: float = 30.0
 
     @classmethod
@@ -75,6 +75,6 @@ class Config:
             ehunt_cache_ttl=int(e("EHUNT_CACHE_TTL_SECONDS", "86400")),
             keepamore_cache_ttl=int(e("KEEPAMORE_CACHE_TTL_SECONDS", "86400")),
             llm_cache_ttl=int(e("LLM_CACHE_TTL_SECONDS", "86400")),
-            ehunt_min_remaining=int(e("EHUNT_MIN_REMAINING", "10")),
+            ehunt_min_remaining=int(e("EHUNT_MIN_REMAINING", "0")),
             heartbeat_interval=float(e("HEARTBEAT_SECONDS", "30")),
         )

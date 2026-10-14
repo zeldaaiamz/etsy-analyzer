@@ -329,3 +329,18 @@ a{color:var(--primary);text-decoration:none}a:hover{text-decoration:underline}
 .pinfo{flex:1}.pacts{margin-top:auto;padding-top:6px}
 @media (max-width:760px){.rfilter{flex-wrap:nowrap;overflow-x:auto;padding-bottom:2px}.rfilter .fchip{flex:0 0 auto}}
 .lib-body{min-width:0}.rfilter .hint{white-space:nowrap;flex:0 0 auto}@media (max-width:760px){.lib-layout{grid-template-columns:minmax(0,1fr)}}
+
+/* EHunt 额度条 / 粘贴计数 */
+.qmeter{display:flex;align-items:center;gap:8px;font-size:12px;color:var(--text-2);padding:4px 10px;border:1px solid var(--border);border-radius:999px;white-space:nowrap}
+.qmeter .qm-bar{width:64px;height:6px;border-radius:3px;background:color-mix(in srgb,var(--text-3) 25%,transparent);overflow:hidden}
+.qmeter .qm-bar i{display:block;height:100%;background:var(--ok, #22c55e);border-radius:3px}
+.qmeter.qm-warn .qm-bar i{background:var(--warn)}.qmeter.qm-bad .qm-bar i{background:var(--bad)}
+.qmeter.qm-bad{color:var(--bad);border-color:color-mix(in srgb,var(--bad) 40%,transparent)}
+.qmeter b{color:var(--text)}
+.banner-sub{display:block;margin-top:2px;font-size:12px;opacity:.8}
+.paste-wrap{position:relative}
+.paste-count{position:absolute;right:12px;bottom:10px;font-size:12px;color:var(--text-3);background:var(--surface, transparent);padding:1px 6px;border-radius:6px;pointer-events:none;font-variant-numeric:tabular-nums}
+.paste-count.over{color:var(--bad);font-weight:600}
+@media (max-width:760px){.qmeter .qm-t,.qmeter .qm-bar{display:none}}
+@media (max-width:760px){.nav a{white-space:nowrap}.qmeter{padding:2px 8px;gap:4px}.qmeter .qm-u{display:none}.user{gap:var(--s2)}}
+@media (max-width:480px){#demoBadge{display:none}.brand-sub{display:none}}

@@ -4,7 +4,7 @@ import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
 const QS = new URLSearchParams(location.search);
 const DEMO = QS.has("demo");
 const BUCKET = "snapshots";
-const MAX_SUBMIT = 50, PAGE = 30, SIGN_TTL = 3600, OFFLINE_MS = 2 * 60 * 1000;
+const MAX_SUBMIT = 500, EHUNT_LIMIT = 200, PAGE = 30, SIGN_TTL = 3600, OFFLINE_MS = 2 * 60 * 1000;
 const $ = (id) => document.getElementById(id);
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const safeUrl = (u) => (/^https?:\/\//i.test(u || "") ? esc(u) : "#");
@@ -87,7 +87,11 @@ async function boot() {
       const fx = d.fixtures(), shift = Date.now() - new Date(fx.now || Date.now()).getTime();
       fx.jobs.forEach((j) => ["created_at", "queued_at", "started_at", "finished_at", "reviewed_at"].forEach((k) => { if (j[k]) j[k] = new Date(new Date(j[k]).getTime() + shift).toISOString(); }));
       if (QS.has("flash")) S.flash = new Set(fx.jobs.filter((j) => j.status === "queued" || j.status === "running").map((j) => j.id));
-      S.status = QS.has("quota") ? { ehunt_paused_until: nextUtcMidnight(), ehunt_remaining: 0, reason: "EHunt 今日额度已用完，明日（UTC）自动继续" } : { ehunt_remaining: 193 };
+      S.status = QS.has("quota") ? { ehunt_paused_until: nextUtcMidnight(), ehunt_remaining: 0, ehunt_used_today: 200, ehunt_daily_limit: 200, ehunt_quota_at: new Date().toISOString(), reason: "EHunt 今日额度已用完，额度刷新后自动继续" }
+        : { ehunt_remaining: Number(QS.get("rem") ?? 193), ehunt_used_today: 200 - Number(QS.get("rem") ?? 193), ehunt_daily_limit: 200, ehunt_quota_at: new Date().toISOString() };
+      if (QS.has("quota")) { const base = fx.jobs.find((j) => j.status === "queued") || fx.jobs[0];
+        for (let i = 0; i < (Number(QS.get("waiting")) || 5); i++) fx.jobs.unshift({ ...base, id: `demo-wait-${i}`, status: "queued", stage: null, started_at: null, finished_at: null, etsy_listing_id: 1800000000 + i,
+          etsy_url: `https://www.etsy.com/listing/${1800000000 + i}/w`, error: i === 0 ? "EHunt 今日额度已用完，额度刷新后自动继续" : null, created_at: new Date(Date.now() - i * 60e3).toISOString(), queued_at: new Date(Date.now() - i * 60e3).toISOString() }); }
       S.hb = [{ worker_id: "demo", last_seen: new Date(Date.now() - (QS.has("offline") ? 9 * 60e3 : 5e3)).toISOString() }];
       S.statusLoaded = true;
       S.usage = [{ provider: "ehunt", calls: 7, units: 7, cache_hits: 3 }, { provider: "keepamore", calls: 36, units: 270, cache_hits: 12 }, { provider: "deepseek", calls: 14, units: 41210, cache_hits: 0 }];
@@ -103,7 +107,8 @@ async function boot() {
       if (QS.has("confirm")) bulk(QS.get("confirm") || "delete");
       if (QS.has("submitted")) showSubmitResult({ ok: true, text: "已提交 3 条，已开始排队分析（新任务已高亮）" });
       if (QS.has("open")) { const first = [...S.analyses.keys()][Number(QS.get("open")) || 0]; first && openDetail(first); }
-      if (QS.has("paste")) { $("urls").value = QS.get("paste").split("|").join("\n"); onUrlsInput(); }
+      if (QS.has("paste")) { const pv = QS.get("paste"); $("urls").value = /^\d+$/.test(pv) ? Array.from({ length: Number(pv) }, (_, i) => `https://www.etsy.com/listing/${1900000000 + i}/item-${i}`).join("\n") : pv.split("|").join("\n"); onUrlsInput(); }
+      if (QS.has("submit")) $("btnSubmit").click();
     }, QS.has("skeleton") ? 1e9 : 300);
     return;
   }
@@ -158,6 +163,7 @@ function parseInput() {
 }
 function onUrlsInput() {
   const { ok, bad, dup } = parseInput(), short = ok.filter((r) => r.short).length;
+  const pc = $("pasteCount"); pc.textContent = `${ok.length} / ${MAX_SUBMIT}`; pc.classList.toggle("over", ok.length > MAX_SUBMIT);
   $("urlCount").innerHTML = `<b>${ok.length}</b> 条有效${short ? `（含 ${short} 条短链，将自动展开）` : ""}${bad.length ? ` · <span class="bad">${bad.length} 条无效</span>` : ""}${dup ? ` · 重复 ${dup} 条已合并` : ""}${ok.length > MAX_SUBMIT ? ` · <span class="bad">超过单次上限 ${MAX_SUBMIT} 条</span>` : ""}`;
   $("urlIssues").innerHTML = bad.length ? `<ul>${bad.slice(0, 8).map((b) => `<li><code>${esc(b.raw.length > 70 ? b.raw.slice(0, 70) + "…" : b.raw)}</code><span>${esc(b.reason)}</span></li>`).join("")}${bad.length > 8 ? `<li class="hint">…另有 ${bad.length - 8} 条</li>` : ""}</ul>` : "";
   $("dupeBox").innerHTML = ""; pending = null;
@@ -178,7 +184,7 @@ $("btnSubmit").onclick = async () => {
   if (DEMO) { // 演示：用示例任务模拟“已分析过”提示，不会提交
     const seen = new Set(); dupes = [...S.jobs.values()].filter((j) => ids.includes(Number(j.etsy_listing_id)) && j.status === "succeeded" && !seen.has(j.etsy_listing_id) && seen.add(j.etsy_listing_id));
     if (dupes.length) { pending = { ok, bad, dupes }; return renderDupes(); }
-    return showSubmitResult({ ok: true, text: "演示模式不会提交" });
+    return showSubmitResult({ ok: true, text: `演示模式不会提交。${quotaPlan(ok.length)}` });
   }
   setBusy(true, "检查重复…");
   if (ids.length) {
@@ -208,7 +214,7 @@ async function submitJobs(list, badN = 0) {
     const { data: rows, error: e2 } = await sb.from("jobs").insert(list.map((r) => ({ batch_id: batch.id, etsy_url: r.url, ...(r.id ? { etsy_listing_id: r.id } : {}) }))).select("id");
     if (e2) res = { ok: false, text: `提交失败：${e2.message}` };
     else {
-      res = { ok: true, text: `✓ 已提交 ${list.length} 条，已开始排队分析${badN ? `；忽略无效 ${badN} 条` : ""}` };
+      res = { ok: true, text: `✓ 已提交 ${list.length} 条，已开始排队分析${badN ? `；忽略无效 ${badN} 条` : ""}。${quotaPlan(list.length, list.length)}` };
       $("urls").value = ""; onUrlsInput();
       S.flash = new Set((rows || []).map((r) => r.id)); F.cat = "all"; F.q = ""; $("q").value = "";
       setTimeout(() => S.flash.clear(), 8000);
@@ -281,13 +287,46 @@ async function loadStatus() {
   S.status = st.data || null; S.hb = hb.data || []; S.usage = us.data || []; S.statusLoaded = !st.error && !hb.error;
   renderBanners();
 }
+// ---------- EHunt 每日额度 ----------
+const bjTime = (t) => new Date(t).toLocaleTimeString("zh-CN", { timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", hour12: false });
+function quota() {
+  const st = S.status || {}, limit = st.ehunt_daily_limit || EHUNT_LIMIT, now = Date.now(), pu = ts(st.ehunt_paused_until);
+  const exhausted = !!(pu && pu > now);
+  let used = st.ehunt_used_today ?? (st.ehunt_remaining != null ? limit - st.ehunt_remaining : null);
+  // 记录早于今天 UTC 0 点且未熔断 → 视为已刷新
+  const q = ts(st.ehunt_quota_at), mid = new Date(); mid.setUTCHours(0, 0, 0, 0);
+  if (!exhausted && q && q < mid.getTime()) used = 0;
+  if (exhausted) used = limit;
+  const remaining = used == null ? null : Math.max(0, limit - used);
+  return { limit, used, remaining, exhausted, resetAt: exhausted ? pu : (() => { const d = new Date(mid); d.setUTCDate(d.getUTCDate() + 1); return d.getTime(); })() };
+}
+// 提交 n 条时的排程说明（已排队的任务先占用今天额度；缓存命中不耗额度，所以是“约”）
+function quotaPlan(n, justAdded = 0) {
+  const { remaining, limit, resetAt } = quota(); if (remaining == null) return "";
+  const ahead = Math.max(0, [...S.jobs.values()].filter((j) => j.status === "queued" || j.status === "running").length - justAdded);
+  let today = Math.min(n, Math.max(0, remaining - ahead)), rest = n - today;
+  if (!rest) return "";
+  const tm = bjTime(resetAt);
+  if (rest <= limit) return `共 ${n} 条：约 ${today} 条今天分析，${rest} 条将在明天额度刷新后（约北京时间 ${tm}）自动分析`;
+  const more = rest - limit, days = Math.ceil(more / limit);
+  return `共 ${n} 条：约 ${today} 条今天分析，${limit} 条明天额度刷新后（约北京时间 ${tm}）自动分析，${days === 1 ? `其余 ${more} 条后天自动分析` : `其余 ${more} 条在之后 ${days} 天陆续自动分析（每天约 ${limit} 条）`}`;
+}
+function renderQuota() {
+  const el = $("quotaMeter"), q = quota();
+  if (q.used == null) return el.classList.add("hidden");
+  const pct = Math.min(100, Math.round(q.used / q.limit * 100));
+  el.className = `qmeter${q.exhausted ? " qm-bad" : pct >= 80 ? " qm-warn" : ""}`;
+  el.innerHTML = `<span class="qm-t">今日 EHunt 额度</span><span class="qm-bar"><i style="width:${pct}%"></i></span><span class="qm-n"><span class="qm-u">已用 </span><b>${q.used}</b> / ${q.limit}</span>`;
+}
 function renderBanners() {
   const out = [], now = Date.now();
   const last = Math.max(0, ...S.hb.map((h) => ts(h.last_seen) || 0));
   if (S.statusLoaded && (!last || now - last > OFFLINE_MS))
     out.push(`<div class="banner banner-bad"><b>分析服务离线</b>　${last ? `最后心跳 ${dur(now - last)} 前` : "暂无心跳"}；排队任务会保留，服务恢复后自动继续。</div>`);
   const pu = ts(S.status?.ehunt_paused_until);
-  if (pu && pu > now) out.push(`<div class="banner banner-warn"><b>EHunt 额度已用完/不足</b>　${esc(S.status.reason || "")}。排队任务将于 ${esc(new Date(pu).toLocaleString())} 后自动继续。</div>`);
+  if (pu && pu > now) { const n = [...S.jobs.values()].filter((j) => j.status === "queued").length, lim = S.status.ehunt_daily_limit || EHUNT_LIMIT;
+    out.push(`<div class="banner banner-warn"><b>今日额度已用完（${lim}/${lim}）</b>，剩余 ${n} 个任务将在额度刷新后（约 北京时间 ${esc(bjTime(pu))}）自动继续<span class="banner-sub">已缓存（24 小时内分析过）的商品不耗额度，会照常处理</span></div>`); }
+  renderQuota();
   $("banners").innerHTML = out.join("");
   const u = Object.fromEntries((S.usage || []).map((r) => [r.provider, r]));
   const part = (k, label, unit) => u[k] ? `${label} ${u[k][unit]}${unit === "units" && k === "deepseek" ? " tokens" : unit === "units" ? " units" : " 次"}${u[k].cache_hits ? `（缓存 ${u[k].cache_hits}）` : ""}` : "";
@@ -586,8 +625,8 @@ function render() {
       ${img ? `<img class="thumb" src="${img}" data-zoom="${img}" data-cap="${esc(e.title)}" alt="" loading="lazy">` : `<div class="thumb ${j.status === "running" || j.status === "queued" ? "sk" : ""}"></div>`}
       <div class="c-main">
         <a class="title" href="${safeUrl(j.etsy_url)}" target="_blank" rel="noopener">${esc(e.title || `Etsy #${j.etsy_listing_id || ""}`)}</a>
-        <div class="sub">${esc(a.product_summary || (j.status === "succeeded" || j.status === "failed" ? "" : j.status === "paused" ? "已暂停，点击继续后重新排队" : "等待分析…"))}</div>
-        <div class="meta">${pill(stText + (j.status === "running" && STAGE[j.stage] ? " · " + STAGE[j.stage] : "") + (j.cancel_requested && j.status === "running" ? " · 停止中" : ""), stCls)}${S.flash.has(j.id) ? '<span class="pill pill-new">新提交</span>' : ""}
+        <div class="sub">${esc(a.product_summary || (j.status === "succeeded" || j.status === "failed" ? "" : j.status === "paused" ? "已暂停，点击继续后重新排队" : j.status === "queued" && quota().exhausted ? "等待额度刷新" : "等待分析…"))}</div>
+        <div class="meta">${pill(stText + (j.status === "running" && STAGE[j.stage] ? " · " + STAGE[j.stage] : "") + (j.cancel_requested && j.status === "running" ? " · 停止中" : ""), stCls)}${j.status === "queued" && quota().exhausted ? '<span class="pill pill-warn">等待额度刷新</span>' : ""}${S.flash.has(j.id) ? '<span class="pill pill-new">新提交</span>' : ""}
           ${e.price ? `<span class="chip">$${esc(e.price)}</span>` : ""}${ehuntChips(e)}${(a.keywords || []).map((k) => `<span class="chip chip-copy" data-copy="${esc(k)}" title="点击复制">${esc(k)}</span>`).join("")}</div>
         ${errText ? `<div class="err">${errText}</div>` : ""}
         <div class="timing"><span data-tick="${esc(j.id)}">${esc(timeText(j))}</span>${j.status === "succeeded" && !j.reviewed_at ? ' <span class="pill pill-warn">待我处理</span>' : ""}${inLib(j) ? ' <span class="pill pill-lib">★ 已入库</span>' : ""}</div>
@@ -605,7 +644,7 @@ function friendlyErr(j) {
   if (j.status === "canceled") return esc(e);
   if (/商品不存在或已下架/.test(e)) return "商品不存在或已下架：请确认链接能在 Etsy 打开（未继续消耗亚马逊/AI 额度）";
   if (/短链无法展开/.test(e)) return esc(e);
-  if (/额度/.test(e) && j.status === "queued") return "EHunt 今日额度已用完，明日自动继续";
+  if (/额度/.test(e) && j.status === "queued") return "";
   return `${j.status === "queued" ? "上次尝试失败，将自动重试：" : ""}${esc(e)}`;
 }
 

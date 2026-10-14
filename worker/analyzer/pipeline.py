@@ -3,6 +3,7 @@ from dataclasses import asdict
 from .etsy_url import parse_listing_id, parse_slug, is_short, resolve_short
 from .errors import PermanentError, JobCanceled, is_retryable
 from .scoring import assess, classify
+from datetime import timedelta
 from .queue import _now, retry_delay, next_utc_midnight
 from .audience import audience_summary, review_count_text
 from .providers.mock import MockScreenshot
@@ -42,17 +43,42 @@ def _bump(store, name, before, after):
             log.warning("bump_usage failed", exc_info=True)
 
 
-def _check_ehunt_remaining(store, etsy, threshold):
+PROBE_RETRY = timedelta(hours=1)
+
+
+def _check_ehunt_remaining(store, etsy, threshold, before_calls=None):
+    """每次真实 EHunt 调用后写入最新额度（前端额度条）；剩余 ≤ 阈值则熔断到次日 UTC 0 点。
+    真实调用成功且仍有余量 → 清除已过期的熔断（自动恢复）。缓存命中不改状态。"""
     rem = getattr(etsy, "remaining", None)
     if rem is None or getattr(etsy, "name", "") != "ehunt":
         return
+    if before_calls is not None and getattr(etsy, "calls", 0) == before_calls:
+        return  # 本任务未发生真实调用（缓存命中/失败），状态不变
     try:
-        f = {"ehunt_remaining": rem}
-        if rem < threshold:
-            f.update(ehunt_paused_until=next_utc_midnight(), reason=f"EHunt 今日剩余 {rem} 低于阈值 {threshold}，明日（UTC）自动继续")
+        f = {"ehunt_remaining": rem, "ehunt_used_today": getattr(etsy, "used_today", None), "ehunt_quota_at": _now()}
+        if rem <= threshold:
+            f.update(ehunt_paused_until=next_utc_midnight(), reason=f"EHunt 今日额度已用完（剩余 {rem}），额度刷新后自动继续")
+        else:
+            f.update(ehunt_paused_until=None, reason=None)
         store.set_service_status(**f)
     except Exception:  # noqa: BLE001
         log.warning("set_service_status failed", exc_info=True)
+
+
+def breaker_until(store, now=None):
+    """429 熔断到何时：默认下一个 UTC 0 点（EHunt 文档未写重置时间）。
+    若上一次熔断已过期（= 这是过期后的首次探测）仍 429 → 说明实际重置更晚，只再等 1 小时后重探。"""
+    now = now or _now()
+    try:
+        pu = (store.get_service_status() or {}).get("ehunt_paused_until")
+    except Exception:  # noqa: BLE001
+        pu = None
+    if isinstance(pu, str):
+        from datetime import datetime
+        pu = datetime.fromisoformat(pu.replace("Z", "+00:00"))
+    if pu and pu <= now:
+        return now + PROBE_RETRY
+    return next_utc_midnight(now)
 
 
 def _get_listing(etsy, lid, slug):
@@ -94,7 +120,7 @@ def _snapshots(job, store, shot, pages, matches, limit):
 
 
 def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapshot_limit=0,
-                min_reviews=50, supplement_shop=False, ehunt_min_remaining=10):
+                min_reviews=50, supplement_shop=False, ehunt_min_remaining=0):
     jid = job["id"]
     shot = shot or MockScreenshot()
     trace = []
@@ -119,10 +145,11 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
         if not lid:
             raise PermanentError("无法从 URL 解析 Etsy listing id")
         step("fetch_etsy", status="running", etsy_listing_id=lid)
+        c0 = getattr(etsy, "calls", 0)
         try:
             prod = _get_listing(etsy, lid, parse_slug(url))
         finally:
-            _check_ehunt_remaining(store, etsy, ehunt_min_remaining)
+            _check_ehunt_remaining(store, etsy, ehunt_min_remaining, c0)
         reviews = etsy.get_reviews(prod, min_reviews=min_reviews, supplement_shop=supplement_shop)
         store.save_etsy_product(job, {**{k: v for k, v in asdict(prod).items()},
                                       "reviews": [asdict(r) for r in reviews]})
@@ -222,10 +249,11 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
     except Exception as e:  # noqa: BLE001
         attempts = job.get("attempts", 1)
         if getattr(e, "breaker", False):  # EHunt 429：全局熔断到次日（UTC），本任务回到队列且不计入尝试次数
-            until = next_utc_midnight()
+            until = breaker_until(store)
             log.warning("EHunt quota exhausted; circuit open until %s", until)
             try:
-                store.set_service_status(ehunt_paused_until=until, reason="EHunt 今日额度已用完，明日（UTC）自动继续")
+                store.set_service_status(ehunt_paused_until=until, ehunt_remaining=0, ehunt_quota_at=_now(),
+                                         reason="EHunt 今日额度已用完，额度刷新后自动继续")
             except Exception:  # noqa: BLE001
                 log.warning("set_service_status failed", exc_info=True)
             store.update_job(jid, status="queued", stage=None, error="EHunt 今日额度已用完，明日自动继续",

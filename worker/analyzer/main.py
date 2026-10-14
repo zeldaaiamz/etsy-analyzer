@@ -58,11 +58,10 @@ def run_loop(store, providers, cfg, once=False):
     shot = providers[3] if len(providers) > 3 else None
     while not _stop:
         job = None
-        if not ehunt_paused(store):
-            try:
-                job = store.claim_next_job(cfg.worker_id)
-            except Exception:  # noqa: BLE001 网络抖动
-                log.exception("claim failed")
+        try:  # 熔断判断在 claim_next_job 内：熔断中只领取 24h 缓存内的 listing（0 credit），过期自动恢复
+            job = store.claim_next_job(cfg.worker_id)
+        except Exception:  # noqa: BLE001 网络抖动
+            log.exception("claim failed")
         if job:
             log.info("processing %s %s", job["id"], job["etsy_url"])
             CURRENT["job"] = job["id"]

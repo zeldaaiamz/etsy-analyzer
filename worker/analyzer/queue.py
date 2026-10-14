@@ -43,10 +43,11 @@ class MemoryStore(Store):
     def claim_next_job(self, worker_id):
         with self.lock:  # 等价于 FOR UPDATE SKIP LOCKED
             pu = self.status.get("ehunt_paused_until")
-            if pu and pu > _now():
-                return None
+            paused = bool(pu and pu > _now())
             q = sorted((j for j in self.jobs.values()
-                        if j["status"] == "queued" and j["run_after"] <= _now() and not j.get("cancel_requested")),
+                        if j["status"] == "queued" and not j.get("cancel_requested")
+                        and (j["run_after"] <= _now() or (paused and "额度" in (j.get("error") or "")))
+                        and (not paused or self._cached(j))),
                        key=lambda j: j["created_at"])
             if not q:
                 return None
@@ -54,6 +55,13 @@ class MemoryStore(Store):
             j.update(status="running", locked_by=worker_id, attempts=j["attempts"] + 1,
                      started_at=_now(), finished_at=None, stage="fetch_etsy", error=None)
             return dict(j)
+
+    def _cached(self, j):
+        """熔断中只放行 24h 缓存内的 listing（0 credit），与 claim_next_job (010) 一致。"""
+        from .etsy_url import parse_listing_id
+        lid = j.get("etsy_listing_id") or parse_listing_id(j["etsy_url"])
+        v = self.kv.get(f"ehunt:listing:{lid}") if lid else None
+        return bool(v and v[0] > _now())
 
     def update_job(self, job_id, **f):
         with self.lock:

@@ -110,11 +110,11 @@ def test_low_remaining_stops_claiming():
     j1 = store.enqueue("https://www.etsy.com/listing/42/a")
     j2 = store.enqueue("https://www.etsy.com/listing/43/b")
     _, amazon, llm = mock_providers()
-    low = json.loads(json.dumps(GOOD)); low["quota"]["remaining_today"] = 5
+    low = json.loads(json.dumps(GOOD)); low["quota"]["remaining_today"] = 0
     with mock.patch.object(ehunt, "request_json", return_value=low):
         run_loop(store, (EHuntEtsy("k"), amazon, llm), Config(), once=True)
     assert store.jobs[j1]["status"] == "succeeded" and store.jobs[j2]["status"] == "queued"
-    assert store.status["ehunt_paused_until"] == next_utc_midnight() and store.status["ehunt_remaining"] == 5
+    assert store.status["ehunt_paused_until"] == next_utc_midnight() and store.status["ehunt_remaining"] == 0
 
 
 # ---- P1-4 错误分类 ----
