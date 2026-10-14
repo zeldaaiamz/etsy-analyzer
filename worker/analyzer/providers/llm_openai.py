@@ -13,12 +13,26 @@ MAP_PROMPT = """你在分析 Etsy 买家评论，找出“谁在买/买给谁/�
  "quotes": [{"idx": 评论序号, "quote": "逐字摘录该评论中的片段", "signal": "对应信号"}]}
 quotes 最多 4 条，必须逐字摘录。只输出 JSON。"""
 
-REDUCE_PROMPT = """你是亚马逊美国站选品专家。输入为 Etsy 商品信息，以及从买家评论中统计出的人群信号（已合并计数）。输出 JSON：
-{"product_summary": "中文一句话说明是什么产品", "category": "英文亚马逊类目路径",
- "target_audience": "中文目标人群（简洁，依据信号计数）",
- "keywords": ["3-6 个美国买家会在亚马逊搜索的英文关键词"],
+REDUCE_PROMPT = """你是亚马逊美国站选品专家。输入为 Etsy 商品信息（标题/标签/材质/描述/价格），以及从买家评论中统计出的人群信号（已合并计数，可能为空）。
+严格只输出一个 JSON 对象，不要 markdown、不要多余文字：
+{"product_summary": "中文一句话：这是什么产品（材质/形态/用途）",
+ "category": "英文亚马逊类目路径，如 Home & Kitchen > Wall Art",
+ "target_audience": "中文目标人群，简洁（≤40 字）",
+ "audience_basis": "reviews 或 listing_text",
+ "audience_confidence": "high | medium | low",
+ "audience_reasoning": "中文：依据什么得出人群；若无评论文本，必须明确写“无评论原文，仅依据标题/标签/描述推断”",
+ "keywords": ["3-5 个英文亚马逊搜索词，2-5 个单词，美国买家真实会搜的通用说法，不含品牌/店铺名/Etsy 专用词如 handmade custom listing，从最精确到较宽泛排序"],
  "keyword_reasoning": "中文：为什么选这些搜索词"}
-若没有评论信号，人群只能依据标题/标签/描述推断。只输出 JSON。"""
+规则：
+- 除 keywords 和 category 用英文外，其它字段一律用中文。
+- audience_signals 为空或 review_count=0 时：audience_basis=listing_text，audience_confidence 只能是 low 或 medium，不得声称“买家评论显示”。
+- 不要编造评论内容或销量数据。"""
+
+
+MATCH_PROMPT = """判断每个亚马逊候选商品与 Etsy 商品的关系。严格只输出 JSON：
+{"results": [{"i": 候选序号, "label": "同款 | 类似品 | 无关", "reason": "中文 ≤25 字"}]}
+定义：同款=同一种产品，形态/材质/用途/主要设计基本一致（可不同卖家）；类似品=同一品类、能满足同一需求的替代品；无关=品类或用途不同。
+必须覆盖每一个候选，宁严勿宽。"""
 
 
 class OpenAICompatLLM(LLMProvider):
@@ -57,5 +71,40 @@ class OpenAICompatLLM(LLMProvider):
                           "合并信号计数后归纳人群；引用已校验为原文") if reviews
                   else "无评论：LLM 仅依据标题/标签/描述推断（可信度较低）",
                   signals=signals or ev["signals"], evidence=quotes[:10] or ev["evidence"])
+        conf = j.get("audience_confidence") or "low"
+        if not reviews and conf == "high":
+            conf = "low"
+        ev["confidence"] = conf
+        if j.get("audience_reasoning"):
+            ev["llm_reasoning"] = j["audience_reasoning"]
+            if not reviews:
+                ev["method"] += f"（置信度 {conf}）：" + j["audience_reasoning"]
+        kws = [k.strip() for k in j.get("keywords", []) if isinstance(k, str) and k.strip()]
         return ProductAnalysis(j.get("product_summary", ""), j.get("category", ""), j.get("target_audience", ""),
-                               list(j.get("keywords", []))[:6], j.get("keyword_reasoning", ""), ev)
+                               kws[:5], j.get("keyword_reasoning", ""), ev)
+
+    def rank_similarity(self, p, items):
+        """一次调用批量判断所有候选：同款/类似品/无关 + 理由。失败时回退到标题词重叠。"""
+        if not items:
+            return items
+        cands = [{"i": k, "title": (it.title or "")[:200], "price": it.price} for k, it in enumerate(items[:40])]
+        try:
+            j = self._chat(MATCH_PROMPT, {"etsy": {"title": p.title, "tags": p.tags[:13], "materials": p.materials[:8],
+                                                   "price": p.price, "description": (p.description or "")[:600]},
+                                          "candidates": cands})
+        except Exception as e:  # noqa: BLE001
+            out = super().rank_similarity(p, items)
+            for it in out:
+                it.similarity_reason = f"[LLM 失败回退词重叠: {str(e)[:60]}] " + it.similarity_reason
+            return out
+        score = {"同款": 0.9, "类似品": 0.5, "无关": 0.0}
+        got = {}
+        for r in j.get("results", []):
+            if isinstance(r.get("i"), int):
+                got[r["i"]] = r
+        for k, it in enumerate(items):
+            r = got.get(k)
+            lab = (r or {}).get("label") if (r or {}).get("label") in score else "无关"
+            it.similarity = score[lab]
+            it.similarity_reason = f"LLM 判定{lab}：{(r or {}).get('reason', '未返回判定，按无关处理')}"
+        return sorted(items, key=lambda i: i.similarity or 0, reverse=True)

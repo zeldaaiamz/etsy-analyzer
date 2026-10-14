@@ -121,12 +121,12 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
         matches = classify(ranked)[:max_results]
         ni = sum(1 for m in matches if m.match_type == "identical")
         trace.append({"step": "match", "title": "匹配同款/类似",
-                      "input": {"候选数": len(items), "阈值": "相似度≥0.55 同款；≥0.2 类似品"},
+                      "input": {"候选数": len(items), "方法": "LLM 批量判定 同款/类似品/无关" if type(llm).__name__ == "OpenAICompatLLM" else "标题词重叠：≥0.55 同款；≥0.2 类似品"},
                       "output": {"同款": ni, "类似品": len(matches) - ni, "丢弃": len(items) - len(matches)},
                       "reasoning": "; ".join(f"{m.asin}:{m.similarity}({m.similarity_reason})" for m in matches[:5])})
 
         store.update_job(jid, stage="score")
-        a = assess(matches)
+        a = assess(matches, em)
         trace.append({"step": "assess", "title": "竞争与销量评估",
                       "input": {"匹配数": len(matches)},
                       "output": {"竞争": LEVEL[a.competition_level], "需求": LEVEL[a.demand_level], "机会分": a.opportunity_score},
@@ -134,7 +134,7 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
         trace.append({"step": "conclusion", "title": "结论",
                       "input": {"竞争": LEVEL[a.competition_level], "需求": LEVEL[a.demand_level]},
                       "output": {"结论": a.verdict, "机会分": a.opportunity_score},
-                      "reasoning": f"{audience_summary(ev, an.target_audience)}；{a.reasoning[1]}；{a.reasoning[2]}。"
+                      "reasoning": f"{audience_summary(ev, an.target_audience)}；{a.reasoning[1]}；{a.reasoning[2]}" + (f"；{a.reasoning[-1]}" if a.reasoning[-1].startswith("证据薄弱") else "") + "。"
                                    "注意：销量为 BSR 估算值。"})
 
         store.update_job(jid, stage="snapshots")

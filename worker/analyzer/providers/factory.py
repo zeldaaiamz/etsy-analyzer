@@ -23,7 +23,7 @@ def build_providers(cfg):
         raise NotImplementedError(f"{cfg.amazon_provider} provider 待实现（见 ARCHITECTURE.md 第 8 节）")
     else:
         amazon = MockAmazon()
-    if cfg.llm_provider == "openai_compat":
+    if cfg.llm_provider in ("openai_compat", "deepseek"):
         from .llm_openai import OpenAICompatLLM
         llm = OpenAICompatLLM(cfg.llm_base_url, cfg.llm_api_key, cfg.llm_model)
     else:

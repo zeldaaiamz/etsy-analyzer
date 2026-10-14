@@ -27,7 +27,7 @@ def classify(items):
     return out
 
 
-def assess(items) -> Assessment:
+def assess(items, etsy_metrics=None) -> Assessment:
     if not items:
         return Assessment("low", "low", 50, "亚马逊未找到相似产品：可能是蓝海，也可能无需求，需人工验证",
                           ["没有相似度达到阈值的亚马逊商品"])
@@ -51,4 +51,35 @@ def assess(items) -> Assessment:
         f"销量估算前 5 合计 ≈{top_sales}/月（BSR 推算）→ 需求 {demand}（>3000 high；>500 medium）",
         f"机会分 = 竞争分 {({'low': 40, 'medium': 20, 'high': 0})[comp]} + 需求分 {({'low': 10, 'medium': 35, 'high': 60})[demand]} = {min(100, score)}",
     ]
+    weak = evidence_weakness(items, etsy_metrics)
+    if weak:
+        score = min(score, 45)
+        reasoning.append("证据薄弱：" + "；".join(weak) + " → 机会分上限 45")
+        if verdict.startswith("需求不错"):
+            verdict = "证据不足：亚马逊需求信号尚可但 Etsy 端验证弱，仅建议小成本验证，暂不建议深入投入"
+        else:
+            verdict += "（证据薄弱）"
     return Assessment(comp, demand, min(100, score), verdict, reasoning)
+
+
+def evidence_weakness(items, m=None):
+    """返回证据薄弱的原因列表（空 = 证据充分）。"""
+    m = m or {}
+    w = []
+    sales, revs = m.get("sales_total"), m.get("reviews")
+    if sales is not None and _num(sales) < 10:
+        w.append(f"Etsy 总销量 {sales}")
+    if revs is not None and _num(revs) < 5:
+        w.append(f"Etsy 评论 {revs} 条")
+    if items and not any(i.match_type == "identical" for i in items) and len(items) < 3:
+        w.append(f"亚马逊仅 {len(items)} 个类似品、无同款")
+    if items and not any(i.est_monthly_sales for i in items):
+        w.append("匹配商品均无销量数据")
+    return w
+
+
+def _num(v):
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return 0
