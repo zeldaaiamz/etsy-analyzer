@@ -13,3 +13,4 @@ output/
 logs/
 *.log
 screenshots/
+deploy/.auto-sync-paused

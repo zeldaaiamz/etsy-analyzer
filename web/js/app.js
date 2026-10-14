@@ -9,6 +9,8 @@ const safeUrl = (u) => (/^https?:\/\//i.test(u || "") ? esc(u) : "#");
 const imgUrl = (u) => (/^(https?:\/\/|data:image\/)/i.test(u || "") ? esc(u) : "");
 const LISTING_RE = /^https?:\/\/(www\.)?etsy\.com\/([a-z]{2}(-[a-z]{2})?\/)?listing\/\d+/i;
 const LV = { low: "低", medium: "中", high: "高" };
+const HIDDEN_STEPS = new Set(["assess", "score", "conclusion"]);
+const monthly = (s) => s.monthly_sold ?? s.est_monthly_sales ?? (s.raw || {}).monthly_sold ?? null;
 const KIND = { identical: "同款", similar: "类似品", search_result: "搜索页" };
 const STATUS = { queued: ["处理中 · 排队中", "pill-info"], running: ["处理中 · 进行中", "pill-info pill-running"], succeeded: ["已完成", "pill-ok"], failed: ["异常", "pill-bad"], paused: ["已暂停", "pill-warn"], canceled: ["已取消", ""] };
 // 任务分类：待我处理 = 已完成但未查看；处理中 = queued+running
@@ -49,7 +51,7 @@ async function boot() {
       fx.jobs.forEach((j) => ["created_at", "queued_at", "started_at", "finished_at", "reviewed_at"].forEach((k) => { if (j[k]) j[k] = new Date(new Date(j[k]).getTime() + shift).toISOString(); }));
       ingest(fx);
       const q = new URLSearchParams(location.search);
-      if (q.has("open")) { const first = [...S.analyses.keys()][Number(q.get("open")) || 0]; first && openDetail(first); if (q.get("tab")) { drawerState.kind = q.get("tab"); renderSnaps(); } }
+      if (q.has("open")) { const first = [...S.analyses.keys()][Number(q.get("open")) || 0]; first && openDetail(first); }
     }, q0.has("skeleton") ? 1e9 : 500); // 模拟加载，可看到骨架屏
     return;
   }
@@ -165,8 +167,8 @@ function timeText(j) {
 
 // ---------- 渲染：列表 ----------
 const pill = (text, cls = "", dot = true) => `<span class="pill ${cls}">${dot ? '<span class="dot"></span>' : ""}${esc(text)}</span>`;
-const lvPill = (lv, invert) => { if (!lv) return ""; const good = invert ? lv === "high" : lv === "low"; const bad = invert ? lv === "low" : lv === "high"; return pill(LV[lv], good ? "pill-ok" : bad ? "pill-bad" : "pill-warn", false); };
-const scoreCls = (n) => (n >= 60 ? "s-hi" : n >= 35 ? "s-mid" : "s-lo");
+// const lvPill = (lv, invert) => { if (!lv) return ""; const good = invert ? lv === "high" : lv === "low"; const bad = invert ? lv === "low" : lv === "high"; return pill(LV[lv], good ? "pill-ok" : bad ? "pill-bad" : "pill-warn", false); };
+// const scoreCls = (n) => (n >= 60 ? "s-hi" : n >= 35 ? "s-mid" : "s-lo");
 
 function audienceSummary(a) {
   const ev = a.audience_evidence || {};
@@ -193,7 +195,7 @@ function skeleton() {
   return Array.from({ length: 3 }, () => `<div class="card row"><div class="sk" style="width:76px;height:76px;border-radius:10px"></div>
     <div><div class="sk sk-line" style="width:80%"></div><div class="sk sk-line" style="width:50%"></div></div>
     <div><div class="sk sk-line" style="width:90%"></div><div class="sk sk-line" style="width:60%"></div></div>
-    <div><div class="sk" style="width:46px;height:46px;border-radius:12px"></div></div><div></div></div>`).join("");
+    <div></div></div>`).join("");
 }
 function render() {
   const all = [...S.jobs.values()];
@@ -214,7 +216,6 @@ function render() {
     const cnt = (k) => sn.filter((s) => s.kind === k).length;
     const [stText, stCls] = STATUS[j.status] || [j.status, ""];
     const img = imgUrl(e.image_url);
-    const n = a.opportunity_score;
     return `<article class="card row">
       ${img ? `<img class="thumb" src="${img}" data-zoom="${img}" data-cap="${esc(e.title)}" alt="" loading="lazy">` : `<div class="thumb ${j.status === "running" || j.status === "queued" ? "sk" : ""}"></div>`}
       <div class="c-main">
@@ -226,11 +227,8 @@ function render() {
         <div class="timing"><span data-tick="${esc(j.id)}">${esc(timeText(j))}</span>${j.status === "succeeded" && !j.reviewed_at ? ' <span class="pill pill-warn">待我处理</span>' : ""}</div>
       </div>
       <div class="c-aud"><div class="label">目标人群</div><div class="aud">${audienceSummary(a) || '<span class="hint">—</span>'}</div>${audienceDetail(a)}</div>
-      <div class="c-score">${n != null ? `<div class="score"><div class="score-num ${scoreCls(n)}">${esc(n)}</div>
-        <div class="score-lv">竞争 ${lvPill(a.competition_level)}<br>需求 ${lvPill(a.demand_level, true)}</div></div>
-        <div class="verdict">${esc(a.verdict)}</div>` : ""}</div>
-      <div class="c-act actions">${sn.length ? `<div class="meta" style="margin:0;justify-content:flex-end">
-          <span class="pill kpill k-identical">同款 ${cnt("identical")}</span><span class="pill kpill k-similar">类似 ${cnt("similar")}</span><span class="pill kpill k-search_result">搜索 ${cnt("search_result")}</span></div>` : ""}
+      <div class="c-act actions">${sn.some((s) => s.kind !== "search_result") ? `<div class="meta" style="margin:0;justify-content:flex-end">
+          <span class="pill kpill k-identical">同款 ${cnt("identical")}</span><span class="pill kpill k-similar">类似 ${cnt("similar")}</span></div>` : ""}
         ${a.decision_trace ? `<button class="btn btn-ghost btn-sm" data-detail="${esc(j.id)}">决策过程 →</button>` : ""}
         ${actBtns(j)}</div>
     </article>`;
@@ -251,40 +249,46 @@ let drawerState = null;
 
 function openDetail(id) {
   const j = S.jobs.get(id), a = S.analyses.get(id) || {}, e = S.etsy.get(id) || {}, sn = S.snaps.get(id) || [];
-  const trace = a.decision_trace || [], last = trace[trace.length - 1] || {};
-  const steps = trace.map((s, i) => `<li class="step"><span class="num">${i + 1}</span><div class="step-card"><h4>${esc(s.title)}</h4>
-    <dl class="io"><dt>输入</dt><dd>${kv(s.input)}</dd><dt>输出</dt><dd>${kv(s.output)}</dd>
-    <dt>理由</dt><dd>${Array.isArray(s.reasoning) ? "<ul>" + s.reasoning.map((r) => `<li>${esc(r)}</li>`).join("") + "</ul>" : esc(s.reasoning)}</dd></dl></div></li>`).join("");
-  const kinds = ["identical", "similar", "search_result"].filter((k) => sn.some((s) => s.kind === k));
-  drawerState = { id, kind: kinds[0] };
+  const trace = a.decision_trace || [];
+  // 竞争/需求评估与由其得出的结论步骤不再展示（由用户根据匹配原始数据自行判断）
+  const shown = trace.filter((s) => !HIDDEN_STEPS.has(s.step) && !/竞争|需求|机会分/.test(s.title || ""));
+  const steps = shown.map((s, i) => `<li class="step"><span class="num">${i + 1}</span><div class="step-card"><h4>${esc(s.title)}</h4>
+    <dl class="io"><dt>输出</dt><dd>${kv(s.output)}</dd></dl>
+    <details class="step-more"><summary>查看输入与理由</summary><dl class="io"><dt>输入</dt><dd>${kv(s.input)}</dd>
+    <dt>理由</dt><dd>${Array.isArray(s.reasoning) ? "<ul>" + s.reasoning.map((r) => `<li>${esc(r)}</li>`).join("") + "</ul>" : esc(s.reasoning)}</dd></dl></details></div></li>`).join("");
+  const nI = sn.filter((s) => s.kind === "identical").length, nS = sn.filter((s) => s.kind === "similar").length;
+  drawerState = { id };
   $("drawerTitle").textContent = e.title || j.etsy_url;
   $("drawerBody").innerHTML = `
-    <div class="conclusion">${a.opportunity_score != null ? `<div class="score-num ${scoreCls(a.opportunity_score)}">${esc(a.opportunity_score)}</div>` : ""}
-      <div><div><b>${esc(a.verdict)}</b>　竞争 ${lvPill(a.competition_level)} 需求 ${lvPill(a.demand_level, true)}</div><div class="why">为什么：${esc(last.reasoning)}</div></div></div>
-    <h3>决策过程</h3><ol class="timeline">${steps}</ol>
-    <h3>亚马逊证据快照 <span class="hint">共 ${sn.length} 个</span></h3>
-    ${kinds.length ? `<div class="tabs" id="tabs">${kinds.map((k) => `<button class="tab" data-tab="${k}">${KIND[k]}<span class="n">${sn.filter((s) => s.kind === k).length}</span></button>`).join("")}</div><div id="snapGrid" class="grid"></div>` : '<p class="hint">无</p>'}
-    <p class="note">亚马逊不公开精确销量：有“过去一月购买”(monthlySold) 的商品用该值，其余为 BSR 推算的估计值（见结论中的逐项说明）；同款/类似品判定方法见“匹配同款/类似”步骤。</p>`;
+    <div class="summary">
+      ${a.product_summary ? `<div class="kv"><b>产品</b>　${esc(a.product_summary)}</div>` : ""}
+      ${a.target_audience ? `<div class="kv"><b>人群</b>　${esc(a.target_audience)}</div>` : ""}
+      ${(a.keywords || []).length ? `<div class="kv"><b>搜索词</b>　${a.keywords.map((k) => `<span class="chip">${esc(k)}</span>`).join("")}</div>` : ""}
+      <div class="kv"><b>匹配</b>　<span class="pill kpill k-identical">同款 ${nI}</span> <span class="pill kpill k-similar">类似品 ${nS}</span></div></div>
+    <h3>亚马逊同款 <span class="hint">${nI} 个</span></h3><div id="grid-identical" class="grid"></div>
+    <h3>亚马逊类似品 <span class="hint">${nS} 个</span></h3><div id="grid-similar" class="grid"></div>
+    <h3 id="traceHead">决策过程</h3><ol class="timeline">${steps}</ol>
+    <p class="note">亚马逊不公开精确销量：有“过去一月购买”(monthlySold) 的商品用该值，其余为 BSR 推算的估计值；同款/类似品判定方法见“匹配同款/类似”步骤。</p>`;
   renderSnaps();
   if (j.status === "succeeded" && !j.reviewed_at) jobAction(id, "reviewed"); // 打开决策过程即视为已查看
   $("drawerMask").classList.remove("hidden"); $("drawer").classList.add("open"); $("drawer").setAttribute("aria-hidden", "false");
   $("drawerBody").scrollTop = 0;
 }
 function renderSnaps() {
-  if (!drawerState || !$("snapGrid")) return;
-  document.querySelectorAll("#tabs .tab").forEach((t) => t.classList.toggle("active", t.dataset.tab === drawerState.kind));
-  const list = (S.snaps.get(drawerState.id) || []).filter((s) => s.kind === drawerState.kind);
-  $("snapGrid").innerHTML = list.map((s) => {
+  if (!drawerState) return;
+  ["identical", "similar"].forEach((k) => { const g = $("grid-" + k); if (!g) return;
+  const list = (S.snaps.get(drawerState.id) || []).filter((s) => s.kind === k);
+  g.innerHTML = list.length ? list.map((s) => {
     const u = imgUrl(S.signed.get(s.image_path));
     return `<div class="snap k-${esc(s.kind)}">${u ? `<img src="${u}" data-zoom="${u}" data-cap="${esc(s.title)}" alt="" loading="lazy">` : '<div class="sk" style="aspect-ratio:16/10"></div>'}
       <div class="snap-b"><div class="snap-t">${esc(s.title)}</div>
         ${s.keyword ? `<div>搜索词 <span class="chip">${esc(s.keyword)}</span></div>` : ""}
-        ${s.asin ? `<div class="facts"><span>ASIN <b>${esc(s.asin)}</b></span><span><b>$${esc(s.price)}</b></span><span>BSR <b>${esc(s.bsr ?? "-")}</b></span><span>评论 <b>${esc(s.review_count ?? "-")}</b></span>${s.rating ? `<span>★ <b>${esc(s.rating)}</b></span>` : ""}</div>` : ""}
+        ${s.asin ? `<div class="facts"><span>ASIN <b>${esc(s.asin)}</b></span><span><b>$${esc(s.price)}</b></span>${monthly(s) != null ? `<span>月销 <b>${esc(monthly(s))}</b></span>` : ""}<span>BSR <b>${esc(s.bsr ?? "-")}</b></span><span>评论 <b>${esc(s.review_count ?? "-")}</b></span>${s.rating ? `<span>★ <b>${esc(s.rating)}</b></span>` : ""}</div>` : ""}
         ${s.similarity != null ? `<div>相似度 <b>${esc(s.similarity)}</b></div>` : ""}
         <div class="reason">${esc(s.similarity_reason)}</div>
         <div class="meta" style="margin-top:4px"><span class="pill kpill k-${esc(s.kind)}">${KIND[s.kind]}</span><span class="hint">${esc(IMG_SRC[s.image_source] || s.image_source)}</span><span class="spacer"></span><a href="${safeUrl(s.source_url)}" target="_blank" rel="noopener">来源 ↗</a></div>
       </div></div>`;
-  }).join("");
+  }).join("") : '<p class="hint">无</p>'; });
 }
 function closeDrawer() { $("drawer").classList.remove("open"); $("drawer").setAttribute("aria-hidden", "true"); $("drawerMask").classList.add("hidden"); drawerState = null; }
 
@@ -295,7 +299,6 @@ document.addEventListener("click", (ev) => {
   if (t.dataset?.clear) { ev.preventDefault(); F.cat = "all"; F.q = ""; $("q").value = ""; return render(); }
   if (t.dataset?.zoom) { $("lbImg").src = t.dataset.zoom; $("lbCap").textContent = t.dataset.cap || ""; $("lightbox").classList.remove("hidden"); return; }
   if (t.dataset?.detail) return openDetail(t.dataset.detail);
-  if (t.dataset?.tab) { drawerState.kind = t.dataset.tab; return renderSnaps(); }
   if (t.closest?.("#lightbox")) $("lightbox").classList.add("hidden");
   if (t.id === "drawerMask" || t.closest?.("#drawerClose")) closeDrawer();
 });

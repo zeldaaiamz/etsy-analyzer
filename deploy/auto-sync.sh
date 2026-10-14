@@ -4,6 +4,8 @@
 # 安全：只 add 白名单路径；.env/日志/截图由 .gitignore 排除，另外提交前再扫一遍敏感文件名与密钥特征，命中则中止本轮。
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+# 暂停开关：存在 deploy/.auto-sync-paused 时不启动、不提交
+[ -f "$ROOT/deploy/.auto-sync-paused" ] && exit 0
 LOG="$ROOT/logs/auto-sync.log"; mkdir -p "$ROOT/logs"
 exec 8>"$ROOT/logs/auto-sync.lock"
 flock -n 8 || { echo "auto-sync already running"; exit 0; }
@@ -16,6 +18,7 @@ worker_hash() { find "$ROOT/worker/analyzer" "$ROOT/worker/requirements.txt" -ty
 LAST_WH="$(worker_hash)"
 
 cycle() {
+  [ -f "$ROOT/deploy/.auto-sync-paused" ] && { log "paused"; return; }
   local branch; branch="$(G rev-parse --abbrev-ref HEAD)"
   [ "$branch" = "main" ] || { log "skip: on branch $branch"; return; }
   if [ -n "$(G status --porcelain -- "${PATHS[@]}")" ]; then
