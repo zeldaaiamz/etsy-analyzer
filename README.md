@@ -36,3 +36,11 @@ python3 -m analyzer.main --demo https://www.etsy.com/listing/1234567890/x
    sudo systemctl daemon-reload && sudo systemctl enable --now etsy-analyzer-worker
    journalctl -u etsy-analyzer-worker -f
    ```
+
+## 当前 box（容器，无 systemd）的常驻方式
+本机 PID 1 是 tini，没有 systemd/cron，因此使用：
+- `deploy/run-worker.sh`：flock 单实例 + 崩溃 10 秒后自动重启，日志 `logs/worker.log`，PID 在 `logs/worker.pid`
+- `deploy/ensure-worker.sh`：幂等拉起；已挂在 `/etc/profile.d/etsy-analyzer-worker.sh` 与 `~/.bashrc`，box 重启后第一次开 shell 即自动启动
+- 停止：`pkill -f run-worker.sh; pkill -f analyzer.main`；查看：`pgrep -af analyzer.main; tail -f logs/worker.log`
+
+有 systemd 的主机请用 `deploy/etsy-analyzer-worker.service`（路径已指向本目录）。

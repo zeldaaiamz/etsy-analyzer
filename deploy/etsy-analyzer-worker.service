@@ -1,3 +1,4 @@
+# 适用于有 systemd 的 Linux 主机。当前 box 是容器（PID 1=tini，无 systemd），改用 deploy/run-worker.sh + ensure-worker.sh，见 README。
 # 安装：sudo cp deploy/etsy-analyzer-worker.service /etc/systemd/system/
 #       sudo systemctl daemon-reload && sudo systemctl enable --now etsy-analyzer-worker
 [Unit]
@@ -8,14 +9,15 @@ Wants=network-online.target
 [Service]
 Type=simple
 User=box
-WorkingDirectory=/opt/etsy-analyzer/worker
-EnvironmentFile=/opt/etsy-analyzer/worker/.env
-ExecStart=/opt/etsy-analyzer/venv/bin/python -m analyzer.main
+WorkingDirectory=/workspace/amazon/tools/etsy-analyzer/worker
+EnvironmentFile=/workspace/amazon/tools/etsy-analyzer/worker/.env
+ExecStart=/usr/bin/python3 -m analyzer.main
 Restart=always
 RestartSec=10
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
+ReadWritePaths=/workspace/amazon/tools/etsy-analyzer/logs
 PrivateTmp=true
 
 [Install]
