@@ -24,6 +24,7 @@ class Store:
     def bump_usage(self, provider, calls, units, hits=0): ...
     def cache_get_many(self, keys): return {}
     def cache_put(self, key, provider, payload, ttl): ...
+    def discard_exhausted_job(self, job_id, error): ...
 
 
 class MemoryStore(Store):
@@ -32,6 +33,20 @@ class MemoryStore(Store):
         self.jobs, self.etsy, self.analyses, self.matches = {}, {}, {}, []
         self.files, self.snapshots = {}, []
         self.status, self.heartbeats, self.usage, self.kv = {}, {}, {}, {}
+        self.library = set()  # (user_id, listing_id) 或 job_id
+
+    def discard_exhausted_job(self, job_id, error):
+        with self.lock:
+            j = self.jobs[job_id]
+            lid = j.get("etsy_listing_id") or (self.etsy.get(job_id) or {}).get("listing_id")
+            if job_id in self.library or (j["user_id"], str(lid)) in self.library:
+                j.update(status="failed", error=error, finished_at=_now(), locked_by=None)
+                return "failed"
+            del self.jobs[job_id]
+            self.etsy.pop(job_id, None); self.analyses.pop(job_id, None)
+            self.matches = [m for m in self.matches if m["job_id"] != job_id]
+            self.snapshots = [s for s in self.snapshots if s["job_id"] != job_id]
+            return "deleted"
 
     def enqueue(self, url, user_id="mock-user", batch_id="mock-batch"):
         jid = str(uuid.uuid4())
@@ -187,6 +202,17 @@ class SupabaseStore(Store):
         self._upsert("provider_cache", {"key": key, "provider": provider, "payload": payload,
                                         "created_at": _now().isoformat(),
                                         "expires_at": (_now() + timedelta(seconds=ttl)).isoformat()})
+
+
+    def discard_exhausted_job(self, job_id, error):
+        r = self._call("POST", "/rpc/discard_exhausted_job", {"p_job": job_id, "p_error": error}, prefer="") or {}
+        paths = r.get("paths") or []
+        if paths:
+            try:
+                request_json("DELETE", f"{self.storage}/object/{self.bucket}", self.h, None, {"prefixes": paths})
+            except Exception:  # noqa: BLE001  截图清理失败不影响任务删除
+                pass
+        return r.get("action")
 
 
 def retry_delay(attempts):

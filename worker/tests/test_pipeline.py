@@ -57,6 +57,28 @@ def test_retry_then_fail():
         store.jobs[jid]["run_after"] = _now()
         job = store.claim_next_job("t")
         process_job(job, store, Boom(), amazon, llm)
+    assert jid not in store.jobs  # 第 3 次失败后自动删除
+
+
+def test_retry_exhausted_library_job_marked_failed():
+    cfg = Config()
+    store = MemoryStore()
+    jid = store.enqueue("https://www.etsy.com/listing/1/x")
+    store.jobs[jid]["etsy_listing_id"] = "1"
+    store.library.add(("mock-user", "1"))
+    etsy, amazon, llm = build_providers(cfg)
+
+    class Boom:
+        def get_listing(self, _):
+            raise RuntimeError("UNEXPECTED_EOF_WHILE_READING")
+    from analyzer.pipeline import process_job
+    from analyzer.queue import _now
+    for i in range(3):
+        store.jobs[jid]["run_after"] = _now()
+        job = store.claim_next_job("t")
+        process_job(job, store, Boom(), amazon, llm)
+        if i < 2:
+            assert store.jobs[jid]["status"] == "queued"
     assert store.jobs[jid]["status"] == "failed" and store.jobs[jid]["attempts"] == 3
 
 

@@ -262,7 +262,15 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
         retry = is_retryable(e, attempts) and attempts < job.get("max_attempts", 3)
         log.log(logging.ERROR if retry else logging.WARNING, "job %s failed (%s): %s", jid,
                 "will retry" if retry else "permanent", e, exc_info=not isinstance(e, PermanentError))
-        if not retry:
+        if not retry and is_retryable(e, attempts) and attempts >= job.get("max_attempts", 3):
+            # 第 max_attempts 次仍失败：自动删除任务（产品库内的 listing 则标记 failed 保留）
+            try:
+                action = store.discard_exhausted_job(jid, str(e)[:1000])
+                log.warning("job %s exhausted %s attempts -> %s", jid, attempts, action)
+            except Exception:  # noqa: BLE001
+                log.warning("discard_exhausted_job failed; marking failed", exc_info=True)
+                store.update_job(jid, status="failed", error=str(e)[:1000], finished_at=_now(), locked_by=None)
+        elif not retry:
             store.update_job(jid, status="failed", error=str(e)[:1000], finished_at=_now(), locked_by=None)
         else:
             store.update_job(jid, status="queued", error=str(e)[:1000], locked_by=None,
