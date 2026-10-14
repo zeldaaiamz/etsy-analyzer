@@ -5,9 +5,11 @@ POST https://api.ehunt.ai/api/v1/items  header X-VIP-TOKEN，body {"search_key":
 """
 import logging
 import re
+from dataclasses import asdict
 from .base import EtsyProvider
 from ..models import EtsyProduct
 from ..http import request_json, HttpError
+from ..errors import PermanentError
 
 log = logging.getLogger("ehunt")
 URL = "https://api.ehunt.ai/api/v1/items"
@@ -17,7 +19,13 @@ METRICS = ("sales_weekly", "sales_total", "reviews", "reviews_weekly", "favorite
 
 
 class EHuntQuotaError(Exception):
-    """429：今日额度用尽，不可重试。"""
+    """429：今日额度用尽，不可重试。breaker=True 表示应全局熔断到次日。"""
+    def __init__(self, msg, breaker=False):
+        super().__init__(msg)
+        self.breaker = breaker
+
+
+NOT_FOUND = "商品不存在或已下架"
 
 
 def _num(v):
@@ -36,21 +44,38 @@ class EHuntEtsy(EtsyProvider):
     name = "ehunt"
     no_review_text = True
 
-    def __init__(self, api_key):
+    def __init__(self, api_key, cache=None, ttl=86400):
         if not api_key:
             raise ValueError("EHUNT_API_KEY 未配置")
-        self.key = api_key
-        self.calls, self.used_today, self.remaining = 0, None, None
+        self.key, self.cache, self.ttl = api_key, cache, ttl
+        self.calls, self.cache_hits, self.used_today, self.remaining = 0, 0, None, None
         self._totals = {}
 
     def get_listing(self, listing_id, slug=None):
+        ck = f"ehunt:listing:{listing_id}"
+        hit = self.cache.get(ck) if self.cache else None
+        if hit is not None:
+            self.cache_hits += 1
+            log.info("EHunt listing %s: cache hit (0 credit)", listing_id)
+            if hit.get("not_found"):
+                raise PermanentError(f"{NOT_FOUND}（EHunt 未返回 listing {listing_id}，24 小时内缓存结果）")
+            p = EtsyProduct(**hit)
+            p.raw = {**(p.raw or {}), "cache": True}
+            self._totals[listing_id] = ((p.raw or {}).get("ehunt") or {}).get("reviews")
+            return p
+        p = self._fetch(listing_id, slug)
+        if self.cache:
+            self.cache.put(ck, "ehunt", asdict(p), self.ttl)
+        return p
+
+    def _fetch(self, listing_id, slug=None):
         url = f"https://www.etsy.com/listing/{listing_id}" + (f"/{slug}" if slug else "")
         try:
             d = request_json("POST", URL, {"X-VIP-TOKEN": self.key, "User-Agent": UA, "Accept": "application/json"}, body={"search_key": url, "page_size": 1}, timeout=60)
         except HttpError as e:
             msg = str(e).replace(self.key, "***")
             if "HTTP 429" in msg:
-                raise EHuntQuotaError(f"EHunt 今日额度已用完或被限速（HTTP 429），请明天再试或更换 key：{msg[:200]}") from None
+                raise EHuntQuotaError(f"EHunt 今日额度已用完或被限速（HTTP 429），明日自动继续：{msg[:200]}", breaker=True) from None
             if "HTTP 401" in msg or "HTTP 403" in msg:
                 raise EHuntQuotaError(f"EHunt 拒绝访问（401/403：检查 EHUNT_API_KEY，或 Cloudflare 拦截）：{msg[:200]}") from None
             raise HttpError(msg) from None
@@ -59,13 +84,17 @@ class EHuntEtsy(EtsyProvider):
         self.used_today, self.remaining = q.get("used_today"), q.get("remaining_today")
         log.info("EHunt listing %s: used_today=%s remaining_today=%s", listing_id, self.used_today, self.remaining)
         if (d or {}).get("code") == 429:
-            raise EHuntQuotaError(f"EHunt 今日额度已用完：{d.get('message')}")
+            raise EHuntQuotaError(f"EHunt 今日额度已用完：{d.get('message')}", breaker=True)
         if (d or {}).get("code") != 200:
             raise HttpError(f"EHunt 错误 {d.get('code')}: {d.get('message')}")
         items = ((d.get("data") or {}).get("list")) or []
-        it = next((x for x in items if str(listing_id) in str(x.get("product_url", ""))), items[0] if items else None)
+        # 只接受 product_url 中 listing id 完全一致的条目；绝不回退到搜索第一条（会分析成别的商品）
+        pat = re.compile(rf"/listing/{int(listing_id)}(?!\d)")
+        it = next((x for x in items if pat.search(str(x.get("product_url", "")))), None)
         if not it:
-            raise HttpError(f"EHunt 未找到 listing {listing_id}")
+            if self.cache:
+                self.cache.put(f"ehunt:listing:{listing_id}", "ehunt", {"not_found": True}, self.ttl)
+            raise PermanentError(f"{NOT_FOUND}（EHunt 未返回 listing {listing_id}）")
         tags = [t.strip() for t in str(it.get("tags") or "").split(",") if t.strip()]
         metrics = {k: it.get(k) for k in METRICS}
         for k in ("sales_weekly", "sales_total", "reviews", "reviews_weekly", "favorites", "favorites_weekly"):

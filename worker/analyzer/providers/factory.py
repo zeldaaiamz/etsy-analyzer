@@ -1,13 +1,13 @@
 from .mock import MockEtsy, MockAmazon, MockLLM, MockScreenshot
 
 
-def build_providers(cfg):
+def build_providers(cfg, cache=None):
     if cfg.etsy_provider == "etsy_api":
         from .etsy_api import EtsyOpenAPI
         etsy = EtsyOpenAPI(cfg.etsy_api_key)
     elif cfg.etsy_provider == "ehunt":
         from .ehunt import EHuntEtsy
-        etsy = EHuntEtsy(cfg.ehunt_api_key)
+        etsy = EHuntEtsy(cfg.ehunt_api_key, cache=cache, ttl=cfg.ehunt_cache_ttl)
     else:
         etsy = MockEtsy()
     if cfg.amazon_provider == "rainforest":
@@ -18,14 +18,15 @@ def build_providers(cfg):
         amazon = KeepaAmazon(cfg.keepa_api_key, cfg.keepa_per_keyword)
     elif cfg.amazon_provider == "keepamore":
         from .keepamore import KeepamoreAmazon
-        amazon = KeepamoreAmazon(cfg.keepamore_api_key, cfg.keepamore_per_keyword)
+        amazon = KeepamoreAmazon(cfg.keepamore_api_key, cfg.keepamore_per_keyword, cache=cache, ttl=cfg.keepamore_cache_ttl)
     elif cfg.amazon_provider == "spapi":
         raise NotImplementedError(f"{cfg.amazon_provider} provider 待实现（见 ARCHITECTURE.md 第 8 节）")
     else:
         amazon = MockAmazon()
     if cfg.llm_provider in ("openai_compat", "deepseek"):
         from .llm_openai import OpenAICompatLLM
-        llm = OpenAICompatLLM(cfg.llm_base_url, cfg.llm_api_key, cfg.llm_model)
+        llm = OpenAICompatLLM(cfg.llm_base_url, cfg.llm_api_key, cfg.llm_model, cache=cache,
+                              ttl=getattr(cfg, "llm_cache_ttl", 86400))
     else:
         llm = MockLLM()
     return etsy, amazon, llm

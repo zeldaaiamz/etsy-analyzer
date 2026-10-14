@@ -2,6 +2,8 @@
 <html lang="zh-CN">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob: https:; connect-src 'self' https://*.supabase.co wss://*.supabase.co; font-src 'self'; object-src 'none'; base-uri 'self'; form-action 'self'">
+<meta name="referrer" content="strict-origin-when-cross-origin">
 <title>选品雷达 · Etsy → Amazon</title>
 <link rel="stylesheet" href="css/app.css">
 </head>
@@ -26,22 +28,27 @@
   <section id="app" class="hidden">
     <div class="card composer">
       <div class="composer-head">
-        <div><h2>新建分析</h2><p class="muted">每行粘贴一个 Etsy 商品链接，系统会逐条识别产品、人群并搜索亚马逊同款与类似品</p></div>
+        <div><h2>新建分析</h2><p class="muted">每行粘贴一个 Etsy 商品链接（支持 etsy.me 短链、m.etsy.com），系统会逐条识别产品、人群并搜索亚马逊同款与类似品</p></div>
       </div>
-      <textarea id="urls" class="input textarea" placeholder="https://www.etsy.com/listing/1234567890/..."></textarea>
-      <div class="composer-foot"><span id="urlCount" class="muted">0 条有效链接</span>
-        <span class="spacer"></span><span id="submitMsg" class="hint"></span>
+      <textarea id="urls" class="input textarea" placeholder="https://www.etsy.com/listing/1234567890/...&#10;https://etsy.me/3AbCdEf"></textarea>
+      <div id="urlIssues" class="url-issues"></div>
+      <div id="dupeBox"></div>
+      <div class="composer-foot"><span id="urlCount" class="muted">0 条有效链接 · 单次最多 50 条</span>
+        <span class="spacer"></span>
         <button id="btnSubmit" class="btn btn-primary">开始分析 →</button></div>
+      <div id="submitMsg" class="submit-msg" role="status" aria-live="polite"></div>
     </div>
 
-    <div class="section-head"><div><h2>我的任务</h2><p class="muted">待确认和异常任务优先显示</p></div><div id="avgDur" class="muted"></div></div>
+    <div id="banners"></div>
+    <div class="section-head"><div><h2>我的任务</h2><p class="muted">待确认和异常任务优先显示</p></div><div class="head-r"><div id="avgDur" class="muted"></div><div id="usage" class="usage"></div></div></div>
     <div class="filters">
       <div id="chips" class="fchips"></div>
       <span class="spacer"></span>
       <input id="q" class="input input-sm" type="search" placeholder="搜索 Etsy listing id / 标题 / ASIN">
-      <button id="btnClear" class="btn btn-ghost btn-sm">清除筛选</button>
+      <div class="fbtns"><button id="btnClear" class="btn btn-ghost btn-sm">清除筛选</button>
+      <button class="btn btn-ghost btn-sm" data-export="list" title="导出当前筛选结果">⇩ 导出 CSV</button></div>
     </div>
-    <p class="note pause-note">暂停后保留已保存的数据；重新启动会继续本任务。暂停生效前，已发出的请求仍可能计费。</p>
+    <p id="pauseNote" class="note pause-note hidden">“暂停”仅对排队中的任务生效，继续后重新排队；运行中的任务可点“停止”，会在当前步骤完成后停下（已发出的请求仍会计费）。</p>
     <div id="list" class="list"></div>
   </section>
 </main>
@@ -53,6 +60,8 @@
   <div class="drawer-head"><div id="drawerTitle" class="drawer-title"></div><button class="icon-btn" id="drawerClose" aria-label="关闭">✕</button></div>
   <div id="drawerBody" class="drawer-body"></div>
 </aside>
+<div id="toast" class="toast" role="status" aria-live="polite"></div>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.js" integrity="sha384-BWcjm9OdFth9TbhCxZPdm+gAOUMAzQy9nmTs12ioXdCcbVnJaPMn+fMUoQCLt60R" crossorigin="anonymous"></script>
 <script type="module" src="js/app.js"></script>
 </body>
 </html>

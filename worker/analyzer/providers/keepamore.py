@@ -21,17 +21,20 @@ BASE = "https://mcp.keepamore.com/api"
 class KeepamoreAmazon(AmazonProvider):
     name = "keepamore"
 
-    def __init__(self, api_key, per_keyword=10, stats_days=90, max_wait=300):
+    def __init__(self, api_key, per_keyword=10, stats_days=90, max_wait=300, cache=None, ttl=86400, on_wait=None):
         if not api_key:
             raise ValueError("KEEPAMORE_API_KEY 未配置")
         self.key, self.per_keyword, self.stats_days, self.max_wait = api_key, per_keyword, stats_days, max_wait
-        self.units_used, self.calls, self.remaining, self.warning = 0, 0, None, None
+        self.cache, self.ttl, self.on_wait = cache, ttl, on_wait
+        self.units_used, self.calls, self.cache_hits, self.remaining, self.warning = 0, 0, 0, None, None
 
     def reset_usage(self):
-        self.units_used, self.calls = 0, 0
+        self.units_used, self.calls, self.cache_hits = 0, 0, 0
 
     def usage_text(self):
         t = f"Keepamore 本任务 {self.calls} 次调用、消耗 {self.units_used} units"
+        if self.cache_hits:
+            t += f"、缓存命中 {self.cache_hits} 次"
         if self.remaining is not None:
             t += f"，资源包剩余 {self.remaining}"
         return t
@@ -47,6 +50,8 @@ class KeepamoreAmazon(AmazonProvider):
                 if "HTTP 429" in msg and waited < self.max_wait:  # 限速 20 次/分钟
                     time.sleep(15)
                     waited += 15
+                    if self.on_wait:
+                        self.on_wait()  # 心跳，避免长时间限速等待被当成卡死
                     continue
                 raise HttpError(msg) from None
             if (d or {}).get("code") != "0000":
@@ -65,14 +70,33 @@ class KeepamoreAmazon(AmazonProvider):
 
     def search(self, keyword, limit=10):
         n = min(limit, self.per_keyword)
-        d = self._get("/productsearch", country="us", term=keyword, stats=self.stats_days)
-        found = d.get("products") or []
-        asins = list(dict.fromkeys(p.get("asin") for p in found if p.get("asin")))[:n]
-        items = []
-        if asins:
-            pd = self._get("/product", country="us", asin=",".join(asins), stats=self.stats_days, rating=1, history="false")
-            items = [parse_product(p, keyword) for p in pd.get("products") or []]
-            for it in items:
-                it.provider = self.name
+        sk = f"km:search:{self.stats_days}:{keyword.strip().lower()}"
+        hit = self.cache.get(sk) if self.cache else None
+        if hit is not None:
+            self.cache_hits += 1
+            all_asins, total = hit.get("asins") or [], hit.get("total") or 0
+        else:
+            d = self._get("/productsearch", country="us", term=keyword, stats=self.stats_days)
+            found = d.get("products") or []
+            all_asins, total = list(dict.fromkeys(p.get("asin") for p in found if p.get("asin"))), len(found)
+            if self.cache:
+                self.cache.put(sk, "keepamore", {"asins": all_asins, "total": total}, self.ttl)
+        asins = all_asins[:n]
+        prods = {}
+        if asins and self.cache:
+            got = self.cache.get_many([f"km:product:{self.stats_days}:{a}" for a in asins])
+            prods = {k.rsplit(":", 1)[1]: v for k, v in got.items()}
+            self.cache_hits += len(prods)
+        missing = [a for a in asins if a not in prods]
+        if missing:
+            pd = self._get("/product", country="us", asin=",".join(missing), stats=self.stats_days, rating=1, history="false")
+            for p in pd.get("products") or []:
+                if p.get("asin"):
+                    prods[p["asin"]] = p
+                    if self.cache:
+                        self.cache.put(f"km:product:{self.stats_days}:{p['asin']}", "keepamore", p, self.ttl)
+        items = [parse_product(prods[a], keyword) for a in asins if a in prods]
+        for it in items:
+            it.provider = self.name
         return SearchPage(keyword=keyword, url=f"https://www.amazon.com/s?k={urllib.parse.quote_plus(keyword)}",
-                          total_results=len(found), items=items)
+                          total_results=total, items=items)

@@ -36,6 +36,11 @@ class Config:
     keepamore_api_key: str = ""
     keepamore_per_keyword: int = 10
     supplement_shop_reviews: bool = False
+    ehunt_cache_ttl: int = 86400
+    keepamore_cache_ttl: int = 86400
+    llm_cache_ttl: int = 86400
+    ehunt_min_remaining: int = 10  # EHunt 今日剩余低于此值时停止领取新任务
+    heartbeat_interval: float = 30.0
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -67,4 +72,9 @@ class Config:
             keepamore_api_key=e("KEEPAMORE_API_KEY", ""),
             keepamore_per_keyword=int(e("KEEPAMORE_RESULTS_PER_KEYWORD", "10")),
             supplement_shop_reviews=e("SUPPLEMENT_SHOP_REVIEWS", "false").lower() in ("1", "true", "yes"),
+            ehunt_cache_ttl=int(e("EHUNT_CACHE_TTL_SECONDS", "86400")),
+            keepamore_cache_ttl=int(e("KEEPAMORE_CACHE_TTL_SECONDS", "86400")),
+            llm_cache_ttl=int(e("LLM_CACHE_TTL_SECONDS", "86400")),
+            ehunt_min_remaining=int(e("EHUNT_MIN_REMAINING", "10")),
+            heartbeat_interval=float(e("HEARTBEAT_SECONDS", "30")),
         )

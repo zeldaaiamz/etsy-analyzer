@@ -1,6 +1,9 @@
 """OpenAI 兼容 Chat Completions（OpenAI/DeepSeek/通义/xAI 等通过 LLM_BASE_URL 切换）。
 评论多（≥50）时采用 map-reduce：每批 BATCH 条评论抽取信号与原文引用 → 合并计数 → 最终调用生成人群结论与搜索词。"""
+import hashlib
 import json
+import logging
+from dataclasses import asdict
 from .base import LLMProvider
 from ..models import ProductAnalysis
 from ..audience import infer_audience
@@ -34,12 +37,42 @@ MATCH_PROMPT = """判断每个亚马逊候选商品与 Etsy 商品的关系。�
 定义：同款=同一种产品，形态/材质/用途/主要设计基本一致（可不同卖家）；类似品=同一品类、能满足同一需求的替代品；无关=品类或用途不同。
 必须覆盖每一个候选，宁严勿宽。"""
 
+CACHE_VERSION = "v1"  # 改动解析逻辑时递增，配合 prompt 哈希使旧缓存失效
+log = logging.getLogger(__name__)
+
+
+def _h(*parts):
+    return hashlib.sha256("\x1f".join(str(x) for x in parts).encode()).hexdigest()[:16]
+
 
 class OpenAICompatLLM(LLMProvider):
-    def __init__(self, base_url, api_key, model):
+    def __init__(self, base_url, api_key, model, cache=None, ttl=86400):
         if not api_key:
             raise ValueError("LLM_API_KEY 未配置")
         self.url, self.key, self.model = base_url.rstrip("/"), api_key, model
+        self.cache, self.ttl = cache, ttl
+        self.calls, self.units_used, self.cache_hits = 0, 0, 0  # units = tokens
+
+    def analyze_cache_key(self, p, reviews):
+        return f"llm:identify:{p.listing_id}:{_h(CACHE_VERSION, self.model, MAP_PROMPT, REDUCE_PROMPT, BATCH, len(reviews))}"
+
+    def match_cache_key(self, p, items):
+        asins = sorted({it.asin for it in items[:40] if it.asin})
+        return f"llm:match:{p.listing_id}:{_h(CACHE_VERSION, self.model, MATCH_PROMPT)}:{_h(*asins)}"
+
+    def analyze_product(self, p, reviews):
+        ck = self.analyze_cache_key(p, reviews) if self.cache else None
+        hit = self.cache.get(ck) if ck else None
+        if hit:
+            self.cache_hits += 1
+            log.info("LLM identify %s: cache hit (0 call)", p.listing_id)
+            an = ProductAnalysis(**hit)
+            an.audience_evidence = {**(an.audience_evidence or {}), "llm_cache": True}
+            return an
+        an = self._analyze_product(p, reviews)
+        if ck and an.keywords:
+            self.cache.put(ck, "deepseek", asdict(an), self.ttl)
+        return an
 
     def _chat(self, system, user):
         d = request_json("POST", f"{self.url}/chat/completions", {"Authorization": f"Bearer {self.key}"},
@@ -47,9 +80,11 @@ class OpenAICompatLLM(LLMProvider):
                                "messages": [{"role": "system", "content": system},
                                             {"role": "user", "content": json.dumps(user, ensure_ascii=False)}]},
                          timeout=120)
+        self.calls += 1
+        self.units_used += int(((d or {}).get("usage") or {}).get("total_tokens") or 0)
         return json.loads(d["choices"][0]["message"]["content"])
 
-    def analyze_product(self, p, reviews):
+    def _analyze_product(self, p, reviews):
         merged, quotes = {}, []
         batches = [reviews[i:i + BATCH] for i in range(0, len(reviews), BATCH)]
         for b in batches:  # map
@@ -87,6 +122,17 @@ class OpenAICompatLLM(LLMProvider):
         """一次调用批量判断所有候选：同款/类似品/无关 + 理由。失败时回退到标题词重叠。"""
         if not items:
             return items
+        ck = self.match_cache_key(p, items) if self.cache else None
+        hit = self.cache.get(ck) if ck else None
+        if hit and isinstance(hit.get("by_asin"), dict):
+            self.cache_hits += 1
+            log.info("LLM match %s: cache hit (0 call)", p.listing_id)
+            by = hit["by_asin"]
+            for it in items:
+                r = by.get(it.asin) or {}
+                it.similarity = r.get("similarity", 0.0)
+                it.similarity_reason = r.get("reason", "LLM 判定无关：未返回判定，按无关处理")
+            return sorted(items, key=lambda i: i.similarity or 0, reverse=True)
         cands = [{"i": k, "title": (it.title or "")[:200], "price": it.price} for k, it in enumerate(items[:40])]
         try:
             j = self._chat(MATCH_PROMPT, {"etsy": {"title": p.title, "tags": p.tags[:13], "materials": p.materials[:8],
@@ -107,4 +153,7 @@ class OpenAICompatLLM(LLMProvider):
             lab = (r or {}).get("label") if (r or {}).get("label") in score else "无关"
             it.similarity = score[lab]
             it.similarity_reason = f"LLM 判定{lab}：{(r or {}).get('reason', '未返回判定，按无关处理')}"
+        if ck:
+            self.cache.put(ck, "deepseek", {"by_asin": {it.asin: {"similarity": it.similarity, "reason": it.similarity_reason}
+                                                        for it in items if it.asin}}, self.ttl)
         return sorted(items, key=lambda i: i.similarity or 0, reverse=True)

@@ -17,6 +17,13 @@ class Store:
     def save_amazon_matches(self, job, rows): ...
     def upload_image(self, path, data, content_type): ...
     def save_snapshots(self, job, rows): ...
+    def is_cancel_requested(self, job_id): return False
+    def get_service_status(self): return {}
+    def set_service_status(self, **f): ...
+    def heartbeat(self, worker_id, current_job=None, info=None): ...
+    def bump_usage(self, provider, calls, units, hits=0): ...
+    def cache_get_many(self, keys): return {}
+    def cache_put(self, key, provider, payload, ttl): ...
 
 
 class MemoryStore(Store):
@@ -24,6 +31,7 @@ class MemoryStore(Store):
         self.lock = threading.Lock()
         self.jobs, self.etsy, self.analyses, self.matches = {}, {}, {}, []
         self.files, self.snapshots = {}, []
+        self.status, self.heartbeats, self.usage, self.kv = {}, {}, {}, {}
 
     def enqueue(self, url, user_id="mock-user", batch_id="mock-batch"):
         jid = str(uuid.uuid4())
@@ -34,8 +42,11 @@ class MemoryStore(Store):
 
     def claim_next_job(self, worker_id):
         with self.lock:  # 等价于 FOR UPDATE SKIP LOCKED
+            pu = self.status.get("ehunt_paused_until")
+            if pu and pu > _now():
+                return None
             q = sorted((j for j in self.jobs.values()
-                        if j["status"] == "queued" and j["run_after"] <= _now()),
+                        if j["status"] == "queued" and j["run_after"] <= _now() and not j.get("cancel_requested")),
                        key=lambda j: j["created_at"])
             if not q:
                 return None
@@ -62,6 +73,28 @@ class MemoryStore(Store):
 
     def save_snapshots(self, job, rows):
         self.snapshots.extend(dict(r, job_id=job["id"]) for r in rows)
+
+    def is_cancel_requested(self, job_id):
+        return bool(self.jobs[job_id].get("cancel_requested"))
+
+    def get_service_status(self):
+        return dict(self.status)
+
+    def set_service_status(self, **f):
+        self.status.update(f)
+
+    def heartbeat(self, worker_id, current_job=None, info=None):
+        self.heartbeats[worker_id] = dict(last_seen=_now(), current_job=current_job, info=info)
+
+    def bump_usage(self, provider, calls, units, hits=0):
+        u = self.usage.setdefault(provider, [0, 0, 0])
+        u[0] += calls; u[1] += units; u[2] += hits
+
+    def cache_get_many(self, keys):
+        return {k: v[1] for k in keys if (v := self.kv.get(k)) and v[0] > _now()}
+
+    def cache_put(self, key, provider, payload, ttl):
+        self.kv[key] = (_now() + timedelta(seconds=ttl), payload)
 
 
 class SupabaseStore(Store):
@@ -113,6 +146,45 @@ class SupabaseStore(Store):
             self._call("POST", "/evidence_snapshots",
                        [{**{k: r.get(k) for k in keys}, "job_id": job["id"], "user_id": job["user_id"]} for r in rows])
 
+    def is_cancel_requested(self, job_id):
+        rows = self._call("GET", "/jobs", params={"id": f"eq.{job_id}", "select": "cancel_requested,status"}, prefer="")
+        return bool(rows and (rows[0].get("cancel_requested") or rows[0].get("status") == "canceled"))
+
+    def get_service_status(self):
+        rows = self._call("GET", "/service_status", params={"id": "eq.1", "select": "*"}, prefer="")
+        return rows[0] if rows else {}
+
+    def set_service_status(self, **f):
+        f = {k: (v.isoformat() if isinstance(v, datetime) else v) for k, v in f.items()}
+        self._call("PATCH", "/service_status", {**f, "updated_at": _now().isoformat()}, {"id": "eq.1"})
+
+    def heartbeat(self, worker_id, current_job=None, info=None):
+        self._upsert("worker_heartbeat", {"worker_id": worker_id, "last_seen": _now().isoformat(),
+                                          "current_job": current_job, "info": info or {}})
+
+    def bump_usage(self, provider, calls, units, hits=0):
+        self._call("POST", "/rpc/bump_usage", {"p_provider": provider, "p_calls": calls, "p_units": units, "p_hits": hits})
+
+    def cache_get_many(self, keys):
+        out = {}
+        for i in range(0, len(keys), 50):
+            part = keys[i:i + 50]
+            rows = self._call("GET", "/provider_cache", params={
+                "select": "key,payload", "key": "in.(" + ",".join('"' + k.replace('"', '') + '"' for k in part) + ")",
+                "expires_at": f"gt.{_now().isoformat()}"}, prefer="") or []
+            out.update({r["key"]: r["payload"] for r in rows})
+        return out
+
+    def cache_put(self, key, provider, payload, ttl):
+        self._upsert("provider_cache", {"key": key, "provider": provider, "payload": payload,
+                                        "created_at": _now().isoformat(),
+                                        "expires_at": (_now() + timedelta(seconds=ttl)).isoformat()})
+
 
 def retry_delay(attempts):
     return timedelta(seconds=min(600, 30 * 2 ** (attempts - 1)))
+
+
+def next_utc_midnight(now=None):
+    n = now or _now()
+    return (n + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)

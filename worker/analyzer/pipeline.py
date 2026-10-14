@@ -1,8 +1,9 @@
 import logging
 from dataclasses import asdict
-from .etsy_url import parse_listing_id, parse_slug
+from .etsy_url import parse_listing_id, parse_slug, is_short, resolve_short
+from .errors import PermanentError, JobCanceled, is_retryable
 from .scoring import assess, classify
-from .queue import _now, retry_delay
+from .queue import _now, retry_delay, next_utc_midnight
 from .audience import audience_summary, review_count_text
 from .providers.mock import MockScreenshot
 
@@ -27,8 +28,31 @@ def sales_source_note(matches):
     return f"销量来源（{len(matches)} 个匹配）：" + "；".join(parts) + "。"
 
 
-class PermanentError(Exception):
-    """不可重试的错误（如 URL 非法）。"""
+def _usage(p):
+    return (getattr(p, "calls", 0) or 0, getattr(p, "units_used", None), getattr(p, "cache_hits", 0) or 0)
+
+
+def _bump(store, name, before, after):
+    calls, hits = after[0] - before[0], after[2] - before[2]
+    units = (after[1] or 0) - (before[1] or 0) if after[1] is not None else calls
+    if calls or hits:
+        try:
+            store.bump_usage(name, calls, units, hits)
+        except Exception:  # noqa: BLE001
+            log.warning("bump_usage failed", exc_info=True)
+
+
+def _check_ehunt_remaining(store, etsy, threshold):
+    rem = getattr(etsy, "remaining", None)
+    if rem is None or getattr(etsy, "name", "") != "ehunt":
+        return
+    try:
+        f = {"ehunt_remaining": rem}
+        if rem < threshold:
+            f.update(ehunt_paused_until=next_utc_midnight(), reason=f"EHunt 今日剩余 {rem} 低于阈值 {threshold}，明日（UTC）自动继续")
+        store.set_service_status(**f)
+    except Exception:  # noqa: BLE001
+        log.warning("set_service_status failed", exc_info=True)
 
 
 def _get_listing(etsy, lid, slug):
@@ -70,21 +94,40 @@ def _snapshots(job, store, shot, pages, matches, limit):
 
 
 def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapshot_limit=0,
-                min_reviews=50, supplement_shop=False):
+                min_reviews=50, supplement_shop=False, ehunt_min_remaining=10):
     jid = job["id"]
     shot = shot or MockScreenshot()
     trace = []
+    u0 = {n: _usage(p) for n, p in (("ehunt", etsy), ("keepamore", amazon), ("deepseek", llm))}
+
+    def step(stage, **extra):
+        """阶段切换：先检查取消请求，再更新 stage + locked_at（心跳）。"""
+        if store.is_cancel_requested(jid):
+            raise JobCanceled()
+        store.update_job(jid, stage=stage, locked_at=_now(), **extra)
+
+    if hasattr(amazon, "on_wait"):
+        amazon.on_wait = lambda: store.update_job(jid, locked_at=_now())
     try:
-        lid = parse_listing_id(job["etsy_url"])
+        url = job["etsy_url"]
+        lid = parse_listing_id(url)
+        if not lid and is_short(url):
+            url = resolve_short(url) or ""
+            lid = parse_listing_id(url)
+            if not lid:
+                raise PermanentError("etsy.me 短链无法展开，请在浏览器打开后复制完整商品地址")
         if not lid:
             raise PermanentError("无法从 URL 解析 Etsy listing id")
-        store.update_job(jid, status="running", stage="fetch_etsy", etsy_listing_id=lid)  # 领取时已是 running，这里再确认一次
-        prod = _get_listing(etsy, lid, parse_slug(job["etsy_url"]))
+        step("fetch_etsy", status="running", etsy_listing_id=lid)
+        try:
+            prod = _get_listing(etsy, lid, parse_slug(url))
+        finally:
+            _check_ehunt_remaining(store, etsy, ehunt_min_remaining)
         reviews = etsy.get_reviews(prod, min_reviews=min_reviews, supplement_shop=supplement_shop)
         store.save_etsy_product(job, {**{k: v for k, v in asdict(prod).items()},
                                       "reviews": [asdict(r) for r in reviews]})
 
-        store.update_job(jid, stage="analyze")
+        step("analyze")
         an = llm.analyze_product(prod, reviews)
         ev = an.audience_evidence
         if getattr(etsy, "no_review_text", False):
@@ -98,6 +141,10 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
                         "好评如潮": em.get("is_raving"), "上架": em.get("release_time")}.items() if v not in (None, "")}
         if getattr(etsy, "remaining", None) is not None:
             etsy_metrics["EHunt 今日剩余额度"] = etsy.remaining
+        if (prod.raw or {}).get("cache"):
+            etsy_metrics["EHunt 缓存"] = "命中（24 小时内已查询，本次 0 credit）"
+        if ev.get("llm_cache"):
+            etsy_metrics["LLM 缓存"] = "命中（24 小时内已识别，本次 0 次调用）"
         trace.append({"step": "identify", "title": "识别产品",
                       "input": {"listing_id": lid, "标题": prod.title, "标签": prod.tags, "价格": prod.price, **etsy_metrics},
                       "output": {"产品": an.product_summary, "类目": an.category},
@@ -113,11 +160,14 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
                       "output": {"搜索词": an.keywords[:3]},
                       "reasoning": an.keyword_reasoning or "取最能代表产品的英文词组"})
 
-        store.update_job(jid, stage="search_amazon")
+        step("search_amazon")
         if hasattr(amazon, "reset_usage"):
             amazon.reset_usage()
+            u0["keepamore"] = _usage(amazon)
         pages, items, seen = [], [], set()
-        for kw in an.keywords[:3]:
+        for i, kw in enumerate(an.keywords[:3]):
+            if i:
+                step("search_amazon")  # 每个关键词之间也检查取消 + 心跳
             pg = amazon.search(kw, limit=max_results)
             pages.append(pg)
             for it in pg.items:
@@ -134,6 +184,7 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
                           f"；销量信号：{sum(1 for i in items if (i.raw or {}).get('sales_source') == 'monthlySold')} 个用亚马逊“过去一月购买”(monthlySold)，其余用 BSR 估算"
                           if hasattr(amazon, "usage_text") else "")})
 
+        step("match")
         ranked = llm.rank_similarity(prod, items)
         matches = classify(ranked)[:max_results]
         ni = sum(1 for m in matches if m.match_type == "identical")
@@ -142,7 +193,7 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
                       "output": {"同款": ni, "类似品": len(matches) - ni, "丢弃": len(items) - len(matches)},
                       "reasoning": "; ".join(f"{m.asin}:{m.similarity}({m.similarity_reason})" for m in matches[:5])})
 
-        store.update_job(jid, stage="score")
+        step("score")
         a = assess(matches, em)
         trace.append({"step": "assess", "title": "竞争与销量评估",
                       "input": {"匹配数": len(matches)},
@@ -153,7 +204,7 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
                       "output": {"结论": a.verdict, "机会分": a.opportunity_score},
                       "reasoning": f"{audience_summary(ev, an.target_audience)}；{a.reasoning[1]}；{a.reasoning[2]}" + (f"；{a.reasoning[-1]}" if a.reasoning[-1].startswith("证据薄弱") else "") + "。" + sales_source_note(matches)})
 
-        store.update_job(jid, stage="snapshots")
+        step("snapshots")
         _snapshots(job, store, shot, pages, matches, snapshot_limit)
         store.save_amazon_matches(job, [{k: v for k, v in asdict(i).items()} for i in matches])
         an_d = asdict(an)
@@ -163,12 +214,34 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
         store.save_analysis(job, {**an_d, **a_d, "llm_model": type(llm).__name__, "decision_trace": trace})
         store.update_job(jid, status="succeeded", stage="done", finished_at=_now(), locked_by=None)
         return True
+    except JobCanceled:
+        log.info("job %s canceled by user", jid)
+        store.update_job(jid, status="canceled", finished_at=_now(), locked_by=None,
+                         error="已按你的请求取消（取消前已发出的请求可能已计费）")
+        return False
     except Exception as e:  # noqa: BLE001
-        log.exception("job %s failed", jid)
-        permanent = isinstance(e, PermanentError) or type(e).__name__ == "EHuntQuotaError" or job.get("attempts", 1) >= job.get("max_attempts", 3)
-        if permanent:
+        attempts = job.get("attempts", 1)
+        if getattr(e, "breaker", False):  # EHunt 429：全局熔断到次日（UTC），本任务回到队列且不计入尝试次数
+            until = next_utc_midnight()
+            log.warning("EHunt quota exhausted; circuit open until %s", until)
+            try:
+                store.set_service_status(ehunt_paused_until=until, reason="EHunt 今日额度已用完，明日（UTC）自动继续")
+            except Exception:  # noqa: BLE001
+                log.warning("set_service_status failed", exc_info=True)
+            store.update_job(jid, status="queued", stage=None, error="EHunt 今日额度已用完，明日自动继续",
+                             locked_by=None, attempts=max(0, attempts - 1), run_after=until)
+            return False
+        retry = is_retryable(e, attempts) and attempts < job.get("max_attempts", 3)
+        log.log(logging.ERROR if retry else logging.WARNING, "job %s failed (%s): %s", jid,
+                "will retry" if retry else "permanent", e, exc_info=not isinstance(e, PermanentError))
+        if not retry:
             store.update_job(jid, status="failed", error=str(e)[:1000], finished_at=_now(), locked_by=None)
         else:
             store.update_job(jid, status="queued", error=str(e)[:1000], locked_by=None,
-                             run_after=_now() + retry_delay(job.get("attempts", 1)))
+                             run_after=_now() + retry_delay(attempts))
         return False
+    finally:
+        for n, p in (("ehunt", etsy), ("keepamore", amazon), ("deepseek", llm)):
+            if type(p).__module__.endswith(".mock"):
+                continue
+            _bump(store, n, u0[n], _usage(p))
