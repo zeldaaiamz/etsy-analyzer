@@ -6,8 +6,14 @@
 - GET /api/quota  0 units
 产品对象为 Keepa 格式，复用 keepa.parse_product（monthlySold=亚马逊“过去一月购买”）。
 """
+import http.client
 import logging
+import re
+import socket
+import ssl
+import threading
 import time
+import urllib.error
 import urllib.parse
 from .base import AmazonProvider
 from .keepa import parse_product
@@ -16,6 +22,28 @@ from ..http import request_json, HttpError
 
 log = logging.getLogger("keepamore")
 BASE = "https://mcp.keepamore.com/api"
+RETRY_BACKOFF = (2, 5, 10)  # 瞬时网络错误/5xx 原地重试间隔（秒），共 1+3 次
+MIN_INTERVAL = 3.0  # 20 次/分钟 → 每次请求间隔 ≥3s（重试也计入）
+_rl_lock, _rl_last = threading.Lock(), [0.0]
+
+
+def _throttle():
+    with _rl_lock:
+        wait = _rl_last[0] + MIN_INTERVAL - time.monotonic()
+        if wait > 0:
+            time.sleep(wait)
+        _rl_last[0] = time.monotonic()
+
+
+def is_transient(e):
+    """可安全重试的瞬时错误：SSL EOF、连接重置/中断、超时、HTTP 5xx。4xx（含 429 另行处理）不算。"""
+    if isinstance(e, HttpError):
+        m = re.search(r"HTTP (\d{3})", str(e))
+        return bool(m and 500 <= int(m.group(1)) < 600)
+    if isinstance(e, urllib.error.URLError) and not isinstance(e, urllib.error.HTTPError):
+        return is_transient(e.reason) if isinstance(e.reason, BaseException) else True
+    return isinstance(e, (ssl.SSLError, ConnectionError, TimeoutError, socket.timeout, EOFError,
+                          http.client.IncompleteRead, http.client.RemoteDisconnected))
 
 
 class KeepamoreAmazon(AmazonProvider):
@@ -40,12 +68,14 @@ class KeepamoreAmazon(AmazonProvider):
         return t
 
     def _get(self, path, **params):
+        """只用于幂等 GET。失败的请求没有返回 metadata.unitsConsumed，本地不记账；重试成功才按响应计费。"""
         url = f"{BASE}{path}?{urllib.parse.urlencode(params)}"
-        waited = 0
+        waited, tries = 0, 0
         while True:
             try:
+                _throttle()
                 d = request_json("GET", url, {"X-API-Key": self.key}, timeout=180)
-            except HttpError as e:
+            except Exception as e:  # noqa: BLE001
                 msg = str(e).replace(self.key, "***")
                 if "HTTP 429" in msg and waited < self.max_wait:  # 限速 20 次/分钟
                     time.sleep(15)
@@ -53,7 +83,18 @@ class KeepamoreAmazon(AmazonProvider):
                     if self.on_wait:
                         self.on_wait()  # 心跳，避免长时间限速等待被当成卡死
                     continue
-                raise HttpError(msg) from None
+                if is_transient(e) and tries < len(RETRY_BACKOFF):
+                    delay = RETRY_BACKOFF[tries]
+                    tries += 1
+                    log.warning("Keepamore %s transient error (%s: %s), retry %d/%d in %ss", path,
+                                type(e).__name__, msg[:200], tries, len(RETRY_BACKOFF), delay)
+                    time.sleep(delay)
+                    if self.on_wait:
+                        self.on_wait()
+                    continue
+                if isinstance(e, HttpError):
+                    raise HttpError(msg) from None
+                raise
             if (d or {}).get("code") != "0000":
                 raise HttpError(f"Keepamore {path} 错误 {d.get('code')}: {d.get('msg')}")
             m = d.get("metadata") or {}
