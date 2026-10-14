@@ -108,8 +108,9 @@ class SupabaseStore(Store):
     def save_snapshots(self, job, rows):
         self._call("DELETE", "/evidence_snapshots", params={"job_id": f"eq.{job['id']}"})
         if rows:
+            keys = sorted({k for r in rows for k in r})  # PostgREST 批量插入要求每行键一致
             self._call("POST", "/evidence_snapshots",
-                       [{**r, "job_id": job["id"], "user_id": job["user_id"]} for r in rows])
+                       [{**{k: r.get(k) for k in keys}, "job_id": job["id"], "user_id": job["user_id"]} for r in rows])
 
 
 def retry_delay(attempts):
