@@ -635,7 +635,7 @@ const STAGE_NAME = Object.fromEntries(STAGES.map(([k, n]) => [k, n]));
 const REASONS = [["roi_low", "ROI 太低"], ["cost_high", "成本太高"], ["ip_risk", "侵权风险"], ["competition", "竞争太激烈"], ["demand_low", "市场需求太小"],
   ["seasonal", "季节性太强"], ["logistics", "物流难做（易碎/超大/超重）"], ["compliance", "认证合规问题"], ["supply", "供应链难找"], ["other", "其他"]];
 const REASON_NAME = Object.fromEntries(REASONS);
-const L = { kwEdit: null, asinOn: new Set(), ocr: new Map(), scr: new Map(), man: new Map(), vel: false, velData: null, velBusy: false, stage: "all", q: "", reason: null, sel: new Set(), items: [], total: 0, counts: null, reasons: {}, limit: LPAGE, loaded: false, loading: false, selAll: false };
+const L = { kwOpen: new Set(), kwEdit: null, asinOn: new Set(), ocr: new Map(), scr: new Map(), man: new Map(), vel: false, velData: null, velBusy: false, stage: "all", q: "", reason: null, sel: new Set(), items: [], total: 0, counts: null, reasons: {}, limit: LPAGE, loaded: false, loading: false, selAll: false };
 const stageOf = (r) => r.stage || "candidate";
 const libById = (id) => (DEMO ? [...S.lib.values()] : L.items).find((x) => x.id === id);
 const libMatch = (r, q) => !q || [r.title, r.etsy_listing_id, r.product_summary, r.target_audience, r.shop_name, r.stage_note, ...(r.keywords || [])]
@@ -767,7 +767,7 @@ function libCard(r) {
       <div class="pbadges">${L.vel ? velocityBadge(velOf(r), esc) : ""}${L.stage === "all" ? `<span class="pb pb-st st-${st}">${esc(STAGE_NAME[st])}</span>` : ""}${!r.job_id ? `<span class="pb pb-del" title="分析任务已删除，仅保留加入时的快照">${S.libPending.has(Number(r.etsy_listing_id)) ? "重新分析中…" : "分析已删除"}</span>` : ""}</div></div>
     <div class="pinfo"><a class="ptitle" href="${url}" target="_blank" rel="noopener" title="${esc(r.title)}">${esc(r.title || `Etsy #${r.etsy_listing_id}`)}</a>
       <div class="pprice">${r.price != null ? `$${esc(Number(r.price).toFixed(2))}` : '<span class="muted">—</span>'}</div>
-      ${amzBlock(r, { esc, editing: L.kwEdit === r.id, asinOn: L.asinOn.has(r.id) })}
+      ${amzBlock(r, { esc, editing: L.kwEdit === r.id, asinOn: L.asinOn.has(r.id), open: L.kwOpen.has(r.id) })}
       <div class="pline muted" title="加入产品库时的匹配数量">加入时：同款 ${ic ?? "—"} · 类似 ${sc ?? "—"} · ${esc(new Date(r.added_at).toLocaleDateString(undefined, { month: "numeric", day: "numeric" }))}</div>
       ${st === "rejected" ? `<div class="rchips">${(r.reject_reasons || []).map((k) => `<span class="rchip">${esc(REASON_NAME[k] || k)}</span>`).join("")}</div>
         ${r.stage_note ? `<div class="pline pnote" title="${esc(r.stage_note)}">“${esc(r.stage_note)}”</div>` : ""}` : ""}
@@ -1168,9 +1168,10 @@ function closeDrawer() {
   $("drawer").classList.remove("open"); $("drawer").setAttribute("aria-hidden", "true"); $("drawerMask").classList.add("hidden"); drawerState = null; }
 
 document.addEventListener("click", (ev) => {
-  const t = ev.target.closest("[data-amz],[data-akwedit],[data-akwcancel],[data-akwsave],[data-akwadd],[data-akwdel],[data-zoom],[data-detail],[data-tab],[data-cat],[data-act],[data-clear],[data-copy],[data-copyall],[data-export],[data-more],[data-dupe],[data-view],[data-bulk],[data-unlib],[data-lstage],[data-lmove],[data-lreason],[data-lbulk],[data-libgo],[data-reana],[data-lmore],[data-lexp],[data-lvel],[data-msave],[data-oconf]") || ev.target;
+  const t = ev.target.closest("[data-amz],[data-akwtog],[data-akwedit],[data-akwcancel],[data-akwsave],[data-akwadd],[data-akwdel],[data-zoom],[data-detail],[data-tab],[data-cat],[data-act],[data-clear],[data-copy],[data-copyall],[data-export],[data-more],[data-dupe],[data-view],[data-bulk],[data-unlib],[data-lstage],[data-lmove],[data-lreason],[data-lbulk],[data-libgo],[data-reana],[data-lmore],[data-lexp],[data-lvel],[data-msave],[data-oconf]") || ev.target;
   if (t.dataset?.amz) return amzOpen(t.dataset.amz); // 同步调用 window.open，前面不能有 await
-  if (t.dataset?.akwedit) { L.kwEdit = t.dataset.akwedit; return renderLibrary(); }
+  if (t.dataset?.akwtog) { const k = t.dataset.akwtog; L.kwOpen.has(k) ? L.kwOpen.delete(k) : L.kwOpen.add(k); return renderLibrary(); }
+  if (t.dataset?.akwedit) { L.kwEdit = t.dataset.akwedit; L.kwOpen.add(t.dataset.akwedit); return renderLibrary(); }
   if (t.dataset?.akwcancel) { L.kwEdit = null; return renderLibrary(); }
   if (t.dataset?.akwsave) return saveKeywords(t.dataset.akwsave);
   if (t.dataset?.akwadd) return addKwRow(t);

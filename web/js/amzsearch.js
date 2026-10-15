@@ -34,7 +34,7 @@ export function applyEdit(old, rows) {
   if (out.length > MAX_KW) throw new Error(`最多 ${MAX_KW} 个关键词`);
   return out;
 }
-export function amzBlock(r, { esc, editing = false, asinOn = false }) {
+export function amzBlock(r, { esc, editing = false, asinOn = false, open = false }) {
   const kws = kwList(r), id = esc(r.id);
   const chips = kws.length ? kws.map((k) => `<span class="akw" title="${esc(k.basis || "")}">${dirTag(k.direction, esc)}<span class="akw-k">${esc(k.keyword)}</span><em class="akw-s s-${esc(k.source)}">${esc(SRC_NAME[k.source] || k.source)}</em></span>`).join("")
     : '<span class="hint">关键词未生成</span>';
@@ -43,7 +43,13 @@ export function amzBlock(r, { esc, editing = false, asinOn = false }) {
     <div class="row"><button class="btn btn-ghost btn-sm" data-akwadd="${id}"${kws.length >= MAX_KW ? " disabled" : ""}>＋ 添加</button><span class="spacer"></span>
     <button class="btn btn-ghost btn-sm" data-akwcancel="${id}">取消</button><button class="btn btn-primary btn-sm" data-akwsave="${id}">保存</button></div></div>`;
   const show = canShowAmz(r.stage), asin = /^[A-Z0-9]{10}$/.test(r.competitor_asin || "") ? r.competitor_asin : null;
-  return `<div class="amz"><div class="akws">${chips}${show || kws.length ? `<button class="btn btn-link btn-sm akw-ed" data-akwedit="${id}" title="编辑搜索词">✎</button>` : ""}</div>
+  const d1 = kws.find((k) => Number(k.direction) === 1) || kws[0];
+  const edit = `<button class="btn btn-link btn-sm akw-ed" data-akwedit="${id}" title="编辑搜索词">✎</button>`;
+  const head = kws.length ? `<div class="akw-head"><button class="akw-tog" data-akwtog="${id}" aria-expanded="${open}">关键词 (${kws.length}) ${open ? "▴" : "▾"}</button>${edit}</div>`
+    : `<div class="akw-head"><span class="hint">关键词未生成</span>${show ? edit : ""}</div>`;
+  const body = !kws.length ? "" : open ? `<div class="akws">${chips}</div>`
+    : `<div class="akw-sum" title="${esc(d1.keyword)}">${dirTag(d1.direction, esc)}<span class="akw-k">${esc(d1.keyword)}</span></div>`;
+  return `<div class="amz">${head}${body}
     ${show ? `<div class="amz-acts"><span class="amz-wrap" title="${kws.length ? `在亚马逊美国站打开 ${kws.length + (asin && asinOn ? 1 : 0)} 个新标签页` : "关键词未生成"}">
       <button class="btn btn-amz btn-sm" data-amz="${id}"${kws.length ? "" : " disabled"}>🔍 一键亚马逊搜索${kws.length ? ` (${kws.length})` : ""}</button></span>
       ${asin ? `<label class="amz-asin" title="同时打开竞品商品页 amazon.com/dp/${esc(asin)}"><input type="checkbox" data-amzasin="${id}"${asinOn ? " checked" : ""}> 竞品 ${esc(asin)}</label>` : ""}</div>` : ""}</div>`;

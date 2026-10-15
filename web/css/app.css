@@ -470,3 +470,15 @@ a{color:var(--primary);text-decoration:none}a:hover{text-decoration:underline}
 .akw-dir{height:26px;font-size:11px;max-width:74px;flex:0 0 auto}
 .akws .akw{flex-wrap:wrap}
 .amz-edit .akw-row{flex-wrap:wrap;row-gap:2px;padding-bottom:3px;border-bottom:1px dotted #e3e3e3}.amz-edit .akw-row .akw-in{order:3;flex:1 1 100%}.amz-edit .akw-dir{max-width:none;flex:1 1 auto}
+/* PM-001 折叠 + 马卡龙配色 */
+.akw-head{display:flex;align-items:center;gap:4px}
+.akw-tog{background:none;border:0;padding:1px 0;font-size:12px;color:var(--text-2);cursor:pointer;font-weight:600}
+.akw-tog:hover{color:#5a4b8a}
+.akw-sum{display:flex;align-items:center;gap:4px;font-size:12px;min-width:0}.akw-sum .akw-k{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.btn-amz{background:#cdeedd;color:#1f3b2f;border:1px solid #b2e2c8;border-radius:999px;font-weight:600;transition:background .15s,box-shadow .15s,transform .15s}
+.btn-amz:hover:not(:disabled){background:#bfe8d2;box-shadow:0 2px 6px rgba(120,190,155,.35);transform:translateY(-1px)}
+.btn-amz:active:not(:disabled){transform:none;box-shadow:none}
+.btn-amz:disabled{background:#e6e6e6;color:#9a9a9a;border-color:#d6d6d6;box-shadow:none;transform:none}
+.akw-d{color:#3b3346}
+.akw-d.d1{background:#ffd6d9;color:#7a2a33}.akw-d.d2{background:#d7e9ff;color:#1e4a7a}.akw-d.d3{background:#e6dcff;color:#4b2f86}
+.akw-d.d4{background:#ffe5cc;color:#7a4510}.akw-d.d5{background:#d3f2ea;color:#1b5e50}
