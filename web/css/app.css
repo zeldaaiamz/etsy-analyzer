@@ -418,3 +418,7 @@ a{color:var(--primary);text-decoration:none}a:hover{text-decoration:underline}
 .sc-img:has(img.on) .sc-ph{display:none}
 @media (max-width:480px){.topbar{padding:0 var(--s3)}.topbar .brand{font-size:0;gap:0}.topbar .brand .logo{font-size:13px}#nav a{padding-left:8px;padding-right:8px}}
 .sc-tag.sc-kept{background:var(--ok)}
+.nbadge.nb-loading{opacity:.55;animation:nbp 1.2s ease-in-out infinite}
+.nbadge.nb-stale{opacity:.8}
+@keyframes nbp{50%{opacity:.25}}
+.lib-sk{padding:var(--s3)}

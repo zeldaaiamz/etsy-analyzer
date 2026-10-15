@@ -120,7 +120,7 @@ async function boot() {
           if (a) fx.analyses.push({ ...a, job_id: id }); if (e) fx.etsy.push({ ...e, job_id: id });
           fx.snaps.push(...fx.snaps.filter((x) => x.job_id === b.id).map((x) => ({ ...x, job_id: id }))); }
         S.limit = 1e6; }
-      ingest(fx);
+      ingest(fx); renderLibrary();
       if (QS.has("perf")) window.__perf = { S, render, renderLibrary, ingest, fx };
       if (QS.has("sel")) { [...S.jobs.values()].filter((j) => j.status !== "running").slice(0, Number(QS.get("sel")) || 3).forEach((j) => S.sel.add(j.id)); render(); }
       if (QS.has("libstage")) { L.stage = QS.get("libstage"); renderLibrary(); }
@@ -147,7 +147,8 @@ async function boot() {
     if (uid && uid === currentUser) return; // TOKEN_REFRESHED 等：同一用户不重建
     teardown();
     currentUser = uid;
-    if (uid) { showApp(session.user.email); setTimeout(() => { loadAll(); loadStatus(); subscribe(); }, 0); }
+    S.libCount = null; S.libCountFresh = false; L.loaded = false;
+    if (uid) { S.libCount = readLibCount(); showApp(session.user.email); renderLibCount(); setTimeout(() => { loadLibCount(); loadAll(); loadStatus(); subscribe(); }, 0); }
     else { S.jobs = new Map(); S.loaded = false; S.signed.clear(); closeDrawer();
       $("login").classList.remove("hidden"); $("app").classList.add("hidden"); $("libraryView").classList.add("hidden"); $("nav").classList.add("hidden"); $("userBox").classList.add("hidden"); }
   });
@@ -309,7 +310,7 @@ async function loadAll() {
         const dj = drawerState && old.get(drawerState.id); if (dj && !S.jobs.has(dj.id) && inLib(dj)) S.jobs.set(dj.id, dj); // 从产品库打开的抽屉
         const keep = new Set(S.jobs.keys());
         [S.analyses, S.etsy, S.counts, S.asins, S.snaps].forEach((m) => [...m.keys()].forEach((k) => keep.has(k) || (drawerState?.id === k) || m.delete(k)));
-        S.hasMore = !!data.has_more; S.libCount = data.lib_count ?? S.libCount;
+        S.hasMore = !!data.has_more; setLibCount(data.lib_count);
         return afterLoad();
       }
       if (error && !/task_list|PGRST202|function/i.test(error.message || "")) throw error;
@@ -325,7 +326,7 @@ function afterLoad() {
 }
 async function loadAllLegacy() {
   const lb = await sb.from("product_library").select("etsy_listing_id");
-  const libIds = (lb.data || []).map((r) => Number(r.etsy_listing_id)); S.libCount = libIds.length;
+  const libIds = (lb.data || []).map((r) => Number(r.etsy_listing_id)); setLibCount(libIds.length);
   let j = S.noView ? { error: true } : await sb.from("task_jobs").select("*").order("created_at", { ascending: false }).limit(S.limit + 1);
   if (j.error) { S.noView = true; let q = sb.from("jobs").select("*");
     if (libIds.length) q = q.or(`etsy_listing_id.is.null,etsy_listing_id.not.in.(${libIds.join(",")})`);
@@ -357,7 +358,7 @@ async function flushDirty() {
   const got = new Set((data.jobs || []).map((r) => r.id));
   ingestRows(data.jobs || []);
   ids.forEach((id) => { if (!got.has(id) && S.jobs.has(id) && !(drawerState?.id === id && inLib(S.jobs.get(id)))) { S.jobs.delete(id); S.sel.delete(id); } }); // 已入库/已删除
-  S.libCount = data.lib_count ?? S.libCount;
+  setLibCount(data.lib_count);
   if (drawerState && ids.includes(drawerState.id) && !S.full.has(drawerState.id)) await loadDetail(drawerState.id).then(() => drawerState && renderSnaps());
   render();
   if (dirty.size) touch([...dirty][0]);
@@ -397,7 +398,7 @@ async function loadStatus() {
   const day = new Date().toISOString().slice(0, 10);
   const [st, hb, us] = await Promise.all([
     sb.from("service_status").select("*").eq("id", 1).maybeSingle(),
-    sb.from("worker_heartbeat").select("worker_id,last_seen,current_job"),
+    sb.from("worker_heartbeat").select("worker_id,last_seen,current_job").order("last_seen", { ascending: false }).limit(20),
     sb.from("provider_usage_daily").select("*").eq("day", day),
   ]);
   S.status = st.data || null; S.hb = hb.data || []; S.usage = us.data || []; S.statusLoaded = !st.error && !hb.error;
@@ -436,7 +437,8 @@ function renderQuota() {
 }
 function renderBanners() {
   const out = [], now = Date.now();
-  const last = Math.max(0, ...S.hb.map((h) => ts(h.last_seen) || 0));
+  // 取最新的心跳：多台 worker / 遗留的旧 worker 行并存时，只要任一 worker 近期有心跳即视为在线
+  const last = S.hb.reduce((m, h) => Math.max(m, ts(h.last_seen) || 0), 0);
   if (S.statusLoaded && (!last || now - last > OFFLINE_MS))
     out.push(`<div class="banner banner-bad"><b>分析服务离线</b>　${last ? `最后心跳 ${dur(now - last)} 前` : "暂无心跳"}；排队任务会保留，服务恢复后自动继续。</div>`);
   const pu = ts(S.status?.ehunt_paused_until);
@@ -720,17 +722,17 @@ async function loadLibrary(more = false) {
   if (seq !== libSeq) return; L.loading = false;
   if (error || !data) { toast(`产品库加载失败：${error?.message || ""}`, "bad"); return; }
   L.items = data.items || []; L.total = data.total || 0; L.counts = data.counts || {}; L.reasons = data.reasons || {}; L.loaded = true;
-  S.lib = new Map(L.items.map((r) => [Number(r.etsy_listing_id), r])); S.libCount = L.counts.all ?? S.libCount;
+  S.lib = new Map(L.items.map((r) => [Number(r.etsy_listing_id), r])); setLibCount(L.counts.all);
   S.libPending = new Set((data.pending || []).map(Number));
   renderLibrary();
 }
 const libReload = () => { L.limit = LPAGE; L.sel.clear(); return loadLibrary(); };
 function renderLibrary() {
   const all = [...S.lib.values()], cnt = !DEMO && L.counts ? L.counts : Object.fromEntries(STAGES.map(([k]) => [k, all.filter((r) => stageOf(r) === k).length]));
-  const totalAll = !DEMO && L.counts ? L.counts.all || 0 : all.length;
+  const ready = libReady(), totalAll = !DEMO && L.counts ? L.counts.all || 0 : all.length, known = ready ? totalAll : (DEMO ? readLibCount() : S.libCount);
   [...L.sel].forEach((id) => { const r = libById(id); if (!r || (L.stage !== "all" && stageOf(r) !== L.stage)) L.sel.delete(id); });
-  $("libCount").textContent = totalAll; $("libHeadN").textContent = totalAll ? `${totalAll} 个` : "";
-  $("libSide").innerHTML = `<div class="side-t">阶段</div><button class="side-i${L.stage === "all" ? " on" : ""} st-all" role="tab" data-lstage="all"><span class="side-ic">▦</span>全部<span class="side-n">${totalAll}</span></button>` + STAGES.map(([k, n, ic]) => `<button class="side-i${L.stage === k ? " on" : ""} st-${k}" role="tab" data-lstage="${k}"><span class="side-ic">${ic}</span>${n}<span class="side-n">${cnt[k]}</span></button>`).join("");
+  renderLibCount(); $("libHeadN").textContent = known ? `${known} 个` : ready ? "" : "加载中…";
+  $("libSide").innerHTML = `<div class="side-t">阶段</div><button class="side-i${L.stage === "all" ? " on" : ""} st-all" role="tab" data-lstage="all"><span class="side-ic">▦</span>全部<span class="side-n">${ready ? totalAll : known ?? "…"}</span></button>` + STAGES.map(([k, n, ic]) => `<button class="side-i${L.stage === k ? " on" : ""} st-${k}" role="tab" data-lstage="${k}"><span class="side-ic">${ic}</span>${n}<span class="side-n">${ready ? cnt[k] ?? 0 : "…"}</span></button>`).join("");
   const vis = libVisible(), n = L.sel.size, allOn = vis.length && vis.every((r) => L.sel.has(r.id));
   let bar = "";
   if (L.stage === "rejected") { const rc = DEMO ? {} : { ...L.reasons }; if (DEMO) all.filter((r) => stageOf(r) === "rejected").forEach((r) => (r.reject_reasons || []).forEach((k) => (rc[k] = (rc[k] || 0) + 1)));
@@ -743,8 +745,9 @@ function renderLibrary() {
       : `<span class="hint">勾选卡片可批量${L.stage === "candidate" ? "移到进行中 / 不考虑" : L.stage === "all" ? "移动阶段 / 移出" : "移回备选"}</span>`}</div>` : "";
   $("libBar").innerHTML = bar;
   const libMore = !DEMO && L.total > vis.length ? `<button class="btn btn-ghost load-more lib-more" data-lmore="1">加载更多（已显示 ${vis.length} / ${L.total}）</button>` : "";
-  if (vis.length) return patchList($("libGrid"), vis.map((r) => ({ key: r.id, html: libCard(r) })), libMore);
-  if (!DEMO && !L.loaded) return setHtml($("libGrid"), '<div class="card empty lib-empty"><div class="spin"></div><p class="muted">加载中…</p></div>');
+  if (!ready) $("libBar").innerHTML = "";
+  if (vis.length && ready) return patchList($("libGrid"), vis.map((r) => ({ key: r.id, html: libCard(r) })), libMore);
+  if (!ready) return setHtml($("libGrid"), libSkeleton());
   $("libGrid").innerHTML = `<div class="card empty lib-empty"><div class="ico">★</div><h3>${totalAll ? (L.q || L.reason ? "没有匹配的产品" : `「${L.stage === "all" ? "全部" : STAGE_NAME[L.stage]}」里还没有产品`) : "产品库还是空的"}</h3>
     <p class="muted">${totalAll ? (L.stage === "candidate" || L.stage === "all" ? "在任务中点“☆ 加入产品库”会进入备选" : "在备选中选择产品移到这里") : "在已完成任务上点“☆ 加入产品库”，或勾选多个任务批量加入"}</p></div>`;
 }
@@ -796,6 +799,11 @@ function audienceDetail(a) {
     <div class="kv"><b>规则</b>　至少 ${esc(ev.min_reviews ?? 50)} 条，不足则全部${ev.shop_supplement_enabled ? "；允许同店补充" : "；未使用同店补充"}</div>
     <div class="kv"><b>方法</b>　${esc(ev.method)}</div>
     <div class="kv">${sig || "无明显信号"}</div>${quotes}</div></details>`;
+}
+function libSkeleton() {
+  return Array.from({ length: 8 }, () => `<div class="card lib-sk" aria-hidden="true"><div class="sk" style="height:150px;border-radius:10px"></div>
+    <div class="sk sk-line" style="width:85%;margin-top:12px"></div><div class="sk sk-line" style="width:55%"></div>
+    <div style="display:flex;gap:8px;margin-top:12px"><div class="sk" style="height:26px;width:70px"></div><div class="sk" style="height:26px;width:70px"></div></div></div>`).join("") + '<span class="sr-only">产品库加载中…</span>';
 }
 function skeleton() {
   return Array.from({ length: 3 }, () => `<div class="card row"><div class="sk" style="width:76px;height:76px;border-radius:10px"></div>
@@ -895,7 +903,20 @@ const libBtn = (j) => inLib(j) ? `<button class="btn btn-lib-on btn-sm" data-act
   : `<button class="btn btn-lib btn-sm" data-act="lib" data-id="${esc(j.id)}">☆ 加入产品库</button>`;
 // 每个搜索词短语一个 chip（不拆词）；chip 之间放屏幕阅读器可读的“, ”分隔
 const kwChips = (ks) => (ks || []).map((k) => `<span class="chip chip-copy chip-kw" data-copy="${esc(k)}" title="${esc(k)}（点击复制）" role="button" tabindex="0">${esc(k)}</span>`).join('<span class="sr-only">, </span>');
-const renderLibCount = () => { $("libCount").textContent = DEMO ? S.lib.size : S.libCount ?? (L.loaded ? L.total : 0); };
+// 产品库数量：未加载时显示上次缓存值（按用户存 localStorage），无缓存则显示加载占位而不是 0
+const LC_KEY = () => `libCount:${currentUser || "demo"}`;
+const readLibCount = () => { try { const v = localStorage.getItem(LC_KEY()); return v == null ? null : Number(v); } catch { return null; } };
+function setLibCount(n) { if (n == null || !Number.isFinite(Number(n))) return; S.libCount = Number(n); S.libCountFresh = true; try { localStorage.setItem(LC_KEY(), String(S.libCount)); } catch {} }
+const libReady = () => (DEMO ? S.loaded : L.loaded);
+const renderLibCount = () => { const el = $("libCount"), n = DEMO ? (S.loaded ? S.lib.size : readLibCount()) : S.libCount ?? (L.loaded ? L.total : null);
+  if (DEMO && S.loaded) setLibCount(n);
+  el.classList.toggle("nb-loading", n == null); el.classList.toggle("nb-stale", n != null && !(DEMO ? S.loaded : S.libCountFresh));
+  el.textContent = n == null ? "…" : n; el.title = n == null ? "加载中" : !(DEMO ? S.loaded : S.libCountFresh) ? "上次的数量，正在刷新" : ""; };
+async function loadLibCount() { // 轻量 head 计数，与 task_list 并行，让徽标尽快更新
+  if (!sb || !currentUser) return; const uid = currentUser;
+  const { count, error } = await sb.from("product_library").select("etsy_listing_id", { count: "exact", head: true });
+  if (!error && uid === currentUser && count != null) { setLibCount(count); renderLibCount(); if (!L.loaded) renderLibrary(); }
+}
 function refreshDrawerActs() { const el = $("drawerActs"), j = drawerState && S.jobs.get(drawerState.id); if (el && j) el.innerHTML = libBtn(j) + `<button class="btn btn-danger-ghost btn-sm" data-act="del" data-id="${esc(j.id)}">🗑 删除</button>`; }
 const ehuntChips = (e) => { const m = (e.raw || {}).ehunt; if (!m) return "";
   return [["周销量", m.sales_weekly], ["总销量", m.sales_total], ["收藏", m.favorites], ["周收藏", m.favorites_weekly], ["评论", m.reviews]]
