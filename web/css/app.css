@@ -484,3 +484,4 @@ a{color:var(--primary);text-decoration:none}a:hover{text-decoration:underline}
 .akw-d.d4{background:#ffe5cc;color:#7a4510}.akw-d.d5{background:#d3f2ea;color:#1b5e50}
 .rfilter .spacer{flex:1}.rfilter [data-ldelrej]{margin-left:auto}
 .delrej-l{display:flex;flex-direction:column;gap:4px;margin-top:8px;font-size:13px}.delrej-l .input{max-width:140px}
+.sc-tabs{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.sc-tabs .spacer{flex:1}
