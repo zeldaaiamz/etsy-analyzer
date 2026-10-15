@@ -5,12 +5,14 @@
 #   - 由 ensure-worker.sh 在每次开 shell 时（含重启后第一次）拉起
 set -u
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+[ -f "$ROOT/deploy/.worker-disabled-on-box" ] && { echo "worker disabled on box (runs on ECS)"; exit 0; }
 LOG="$ROOT/logs/worker.log"; mkdir -p "$ROOT/logs"
 exec 9>"$ROOT/logs/worker.lock"
 flock -n 9 || { echo "worker already running"; exit 0; }
 echo $$ > "$ROOT/logs/worker.pid"
 cd "$ROOT/worker"
 while true; do
+  [ -f "$ROOT/deploy/.worker-disabled-on-box" ] && { echo "$(date '+%F %T') [supervisor] disabled flag present, exiting" >> "$LOG"; exit 0; }
   set -a; . ./.env; set +a
   echo "$(date '+%F %T') [supervisor] starting worker" >> "$LOG"
   python3 -m analyzer.main >> "$LOG" 2>&1
