@@ -120,6 +120,26 @@ def run_workers(store, make_providers, cfg, n=None, once=False, stop_evt=None):
     return ids
 
 
+def review_ocr_loop(cfg, stop_evt, interval=20.0):
+    """后台线程：处理 review_ocr_jobs（019）队列。REVIEW_OCR_ENABLED=0 关闭；缺 pytesseract 时自动跳过。"""
+    from . import review_ocr
+    while not stop_evt.is_set():
+        try:
+            while not stop_evt.is_set() and review_ocr.run_once(cfg):
+                pass
+        except Exception:
+            log.warning("review OCR loop error", exc_info=True)
+        stop_evt.wait(interval)
+
+
+def review_ocr_enabled():
+    import importlib.util
+    import os
+    if os.environ.get("REVIEW_OCR_ENABLED", "1").strip() in ("0", "false", "no", ""):
+        return False
+    return importlib.util.find_spec("pytesseract") is not None
+
+
 def main(argv=None):
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     ap = argparse.ArgumentParser()
@@ -144,6 +164,9 @@ def main(argv=None):
     first = make()
     stop_evt = threading.Event()
     threading.Thread(target=heartbeat_loop, args=(store, cfg, first[0], stop_evt, ids), daemon=True).start()
+    if review_ocr_enabled():
+        threading.Thread(target=review_ocr_loop, args=(cfg, stop_evt), daemon=True).start()
+        log.info("review OCR loop enabled")
     log.info("worker %s polling every %ss with %d thread(s)", cfg.worker_id, cfg.poll_interval, len(ids))
     pool = iter([first])
     try:

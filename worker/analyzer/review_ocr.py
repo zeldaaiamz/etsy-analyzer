@@ -4,7 +4,7 @@ Etsy 评论弹窗每页 8 条，日期在评论人名字旁：'Sally Oct 13, 202
 - extract(texts) → (日期列表（按评论人+日期跨截图去重，新→旧）, 总数)
 - run_once(cfg)：领取 review_ocr_jobs 一条 → 下载私有截图 → OCR → 回写 extracted_dates（status=done/failed）。
   用户在前端核对后才通过 confirm_review_dates 写入 listing_reviews(source='screenshot')。
-默认不在主循环启用（REVIEW_OCR_ENABLED=1 时由 main 调用 / 或 `python -m analyzer.review_ocr`），依赖见 ARCHITECTURE.md。
+main 中作为后台线程运行（已安装 pytesseract 时默认启用，REVIEW_OCR_ENABLED=0 关闭；也可 `python -m analyzer.review_ocr` 单次处理），依赖见 ARCHITECTURE.md。
 """
 import datetime as dt
 import logging

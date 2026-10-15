@@ -1,3 +1,5 @@
 # 运行时仅依赖标准库（HTTP 用 urllib）。以下为可选：
 python-dotenv>=1.0   # 可选：自动加载 .env
 pytest>=8            # 测试
+pytesseract>=0.3   # 可选：评论截图 OCR（另需 apt tesseract-ocr tesseract-ocr-chi-sim）
+pillow>=10        # 可选：同上

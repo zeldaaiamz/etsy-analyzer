@@ -35,6 +35,12 @@ def run(store, etsy, clock, api):
     return rq.call_count, amazon.n + llm.n
 
 
+def confirm(store, clock, *a):
+    """screen_confirm 用 queue._now 设置 run_after，必须与 run() 使用同一模拟时钟（否则真实时间晚于 T0 后任务永远不到期）。"""
+    with mock.patch.object(queue, "_now", clock):
+        return store.screen_confirm(*a)
+
+
 def setup(n, prescreen=True):
     store = MemoryStore()
     ids = [store.enqueue(f"https://www.etsy.com/listing/{100 + i}/x", prescreen=prescreen) for i in range(n)]
@@ -65,7 +71,7 @@ def test_confirm_analyzes_kept_without_refetch_and_rejected_stop():
     clock = Clock(T0)
     run(store, etsy, clock, ok)
     store.kv.clear()                                   # 缓存过期也不得重新取数
-    assert store.screen_confirm(ids[:2], ids[2:3]) == {"kept": 2, "rejected": 1}
+    assert confirm(store, clock, ids[:2], ids[2:3]) == {"kept": 2, "rejected": 1}
     calls, expensive = run(store, etsy, clock, AssertionError("no EHunt call in analyze stage"))
     assert calls == 0 and expensive > 0
     assert [store.jobs[i]["status"] for i in ids] == ["succeeded", "succeeded", "canceled", "screening"]
@@ -73,7 +79,7 @@ def test_confirm_analyzes_kept_without_refetch_and_rejected_stop():
     assert set(store.analyses) == set(ids[:2])
     assert {s["job_id"] for s in store.snapshots} <= set(ids[:2])
     # 已确认的再次确认无效；排除的不会被领取
-    assert store.screen_confirm(ids[:3]) == {"kept": 0, "rejected": 0}
+    assert confirm(store, clock, ids[:3]) == {"kept": 0, "rejected": 0}
     assert run(store, etsy, clock, AssertionError("x")) == (0, 0)
 
 
@@ -88,7 +94,7 @@ def test_quota_exhausted_fetch_waits_but_kept_jobs_still_analyze():
     assert calls == 3
     assert [store.jobs[i]["status"] for i in ids] == ["screening"] * 3 + ["queued"]
     assert store.status["ehunt_paused_until"] == MID
-    store.screen_confirm(ids[:3])
+    confirm(store, clock, ids[:3])
     calls, expensive = run(store, etsy, clock, AssertionError("paused"))   # 熔断中：已确认的照常分析
     assert calls == 0 and expensive > 0
     assert [store.jobs[i]["status"] for i in ids] == ["succeeded"] * 3 + ["queued"]
