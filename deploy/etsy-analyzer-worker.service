@@ -1,6 +1,5 @@
-# 适用于有 systemd 的 Linux 主机。当前 box 是容器（PID 1=tini，无 systemd），改用 deploy/run-worker.sh + ensure-worker.sh，见 README。
-# 安装：sudo cp deploy/etsy-analyzer-worker.service /etc/systemd/system/
-#       sudo systemctl daemon-reload && sudo systemctl enable --now etsy-analyzer-worker
+# 生产：阿里云 ECS /etc/systemd/system/etsy-analyzer-worker.service（代码在 /opt/etsy-analyzer，见 ARCHITECTURE.md §15）
+# 安装：cp 到 /etc/systemd/system/ && systemctl daemon-reload && systemctl enable --now etsy-analyzer-worker
 [Unit]
 Description=Etsy->Amazon analyzer worker (polls Supabase job queue)
 After=network-online.target
@@ -8,17 +7,23 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=box
-WorkingDirectory=/workspace/amazon/tools/etsy-analyzer/worker
-EnvironmentFile=/workspace/amazon/tools/etsy-analyzer/worker/.env
-ExecStart=/usr/bin/python3 -m analyzer.main
+WorkingDirectory=/opt/etsy-analyzer/worker
+EnvironmentFile=/opt/etsy-analyzer/worker/.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/opt/etsy-analyzer/.venv/bin/python -m analyzer.main
 Restart=always
 RestartSec=10
+TimeoutStopSec=300
+MemoryHigh=350M
+MemoryMax=500M
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/workspace/amazon/tools/etsy-analyzer/logs
+ReadWritePaths=/opt/etsy-analyzer/logs /opt/etsy-analyzer/worker
 PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=etsy-analyzer-worker
 
 [Install]
 WantedBy=multi-user.target
