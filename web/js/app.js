@@ -797,6 +797,25 @@ async function saveKeywords(id) {
     if (error) return toast(`保存失败：${error.message}`, "bad"); next = data; }
   r.amazon_keywords = next; L.kwEdit = null; renderLibrary(); toast(`已保存 ${next.length} 个搜索词`, "ok");
 }
+// 一键删除全部「不考虑」：二次确认（输入数量），服务端 delete_rejected_library()（022）；语义同“移出产品库”：只删产品库条目，不删任务/分析
+async function deleteAllRejected() {
+  const all = [...S.lib.values()], n = !DEMO && L.counts ? L.counts.rejected || 0 : all.filter((r) => stageOf(r) === "rejected").length;
+  if (!n) return;
+  const ok = await confirmDialog({ title: `删除全部「不考虑」（${n} 个）`, danger: true, ok: `永久删除 ${n} 个`,
+    body: `<p>将永久删除 <b>${n}</b> 个「不考虑」的产品，无法撤销（每日备份可恢复）。确定删除？</p>
+      <p class="hint">只删除产品库条目（阶段、原因、备注、搜索词）；分析任务与结果保留，对应任务会回到“我的任务”。</p>
+      <label class="delrej-l"><span>请输入数量 <b>${n}</b> 以确认：</span><input id="delRejN" class="input" inputmode="numeric" autocomplete="off" placeholder="${n}"></label><p id="delRejErr" class="rj-err"></p>`,
+    validate: () => { const ok = $("delRejN").value.trim() === String(n); $("delRejErr").textContent = ok ? "" : `请输入 ${n}`; return ok; } });
+  if (!ok) return;
+  let deleted = n;
+  if (!DEMO) { const { data, error } = await sb.rpc("delete_rejected_library");
+    if (error) { toast(`删除失败：${error.message}`, "bad"); return loadLibrary(); }
+    deleted = data ?? 0; }
+  else all.filter((r) => stageOf(r) === "rejected").forEach((r) => S.lib.delete(Number(r.etsy_listing_id)));
+  L.sel.clear(); L.selAll = false; L.reason = null;
+  toast(`已删除 ${deleted} 个`, "ok");
+  if (!DEMO) { await loadLibrary(); loadAll(); } else renderLibrary();
+}
 function libAllBulk() {
   const sel = [...L.sel].map(libById).filter(Boolean), c = sel.filter((r) => stageOf(r) === "candidate").length, o = sel.length - c;
   return `${c ? `<button class="btn btn-primary btn-sm" data-lbulk="active">▶ 进行中 (${c})</button><button class="btn btn-danger-ghost btn-sm" data-lbulk="rejected">✕ 不考虑 (${c})</button>` : ""}${o ? `<button class="btn btn-ghost btn-sm" data-lbulk="candidate">↩ 移回备选 (${o})</button>` : ""}`;
@@ -880,7 +899,8 @@ function renderLibrary() {
   const vis = libVisible(), n = L.sel.size, allOn = vis.length && vis.every((r) => L.sel.has(r.id));
   let bar = "";
   if (L.stage === "rejected") { const rc = DEMO ? {} : { ...L.reasons }; if (DEMO) all.filter((r) => stageOf(r) === "rejected").forEach((r) => (r.reject_reasons || []).forEach((k) => (rc[k] = (rc[k] || 0) + 1)));
-    bar += `<div class="rfilter"><span class="hint">按原因：</span><button class="fchip${!L.reason ? " active" : ""}" data-lreason="all">全部</button>${REASONS.filter(([k]) => rc[k]).map(([k, v]) => `<button class="fchip${L.reason === k ? " active" : ""}" data-lreason="${k}">${esc(v)} <span class="n">${rc[k]}</span></button>`).join("")}</div>`; }
+    bar += `<div class="rfilter"><span class="hint">按原因：</span><button class="fchip${!L.reason ? " active" : ""}" data-lreason="all">全部</button>${REASONS.filter(([k]) => rc[k]).map(([k, v]) => `<button class="fchip${L.reason === k ? " active" : ""}" data-lreason="${k}">${esc(v)} <span class="n">${rc[k]}</span></button>`).join("")}
+      ${cnt.rejected ? `<span class="spacer"></span><button class="btn btn-danger-ghost btn-sm" data-ldelrej="1" title="永久删除「不考虑」里的全部产品（不受原因筛选影响）">🗑 删除全部不考虑 (${cnt.rejected})</button>` : ""}</div>`; }
   bar += vis.length ? `<div class="lbulk${n ? " on" : ""}"><label class="selall"><input type="checkbox" data-lselall="1"${allOn ? " checked" : ""}> 全选 ${vis.length} 个</label>
     ${n ? `<span class="bulk-n">已选 <b>${n}</b></span><span class="spacer"></span>${L.stage === "all" ? libAllBulk() : L.stage === "candidate"
       ? `<button class="btn btn-primary btn-sm" data-lbulk="active">▶ 进行中 (${n})</button><button class="btn btn-danger-ghost btn-sm" data-lbulk="rejected">✕ 不考虑 (${n})</button>`
@@ -1168,7 +1188,7 @@ function closeDrawer() {
   $("drawer").classList.remove("open"); $("drawer").setAttribute("aria-hidden", "true"); $("drawerMask").classList.add("hidden"); drawerState = null; }
 
 document.addEventListener("click", (ev) => {
-  const t = ev.target.closest("[data-amz],[data-akwtog],[data-akwedit],[data-akwcancel],[data-akwsave],[data-akwadd],[data-akwdel],[data-zoom],[data-detail],[data-tab],[data-cat],[data-act],[data-clear],[data-copy],[data-copyall],[data-export],[data-more],[data-dupe],[data-view],[data-bulk],[data-unlib],[data-lstage],[data-lmove],[data-lreason],[data-lbulk],[data-libgo],[data-reana],[data-lmore],[data-lexp],[data-lvel],[data-msave],[data-oconf]") || ev.target;
+  const t = ev.target.closest("[data-amz],[data-akwtog],[data-akwedit],[data-akwcancel],[data-akwsave],[data-akwadd],[data-akwdel],[data-zoom],[data-detail],[data-tab],[data-cat],[data-act],[data-clear],[data-copy],[data-copyall],[data-export],[data-more],[data-dupe],[data-view],[data-bulk],[data-unlib],[data-lstage],[data-lmove],[data-lreason],[data-lbulk],[data-libgo],[data-reana],[data-lmore],[data-lexp],[data-ldelrej],[data-lvel],[data-msave],[data-oconf]") || ev.target;
   if (t.dataset?.amz) return amzOpen(t.dataset.amz); // 同步调用 window.open，前面不能有 await
   if (t.dataset?.akwtog) { const k = t.dataset.akwtog; L.kwOpen.has(k) ? L.kwOpen.delete(k) : L.kwOpen.add(k); return renderLibrary(); }
   if (t.dataset?.akwedit) { L.kwEdit = t.dataset.akwedit; L.kwOpen.add(t.dataset.akwedit); return renderLibrary(); }
@@ -1180,6 +1200,7 @@ document.addEventListener("click", (ev) => {
   if (t.dataset?.unlib) { const r = [...S.lib.values()].find((x) => x.id === t.dataset.unlib); return r && removeLibItems([r]); }
   if (t.dataset?.lstage) { L.stage = t.dataset.lstage; L.reason = null; L.sel.clear(); L.selAll = false; if (!DEMO) { L.items = []; L.loaded = false; renderLibrary(); return libReload(); } return renderLibrary(); }
   if (t.dataset?.lreason) { L.reason = t.dataset.lreason === "all" || L.reason === t.dataset.lreason ? null : t.dataset.lreason; return DEMO ? renderLibrary() : libReload(); }
+  if (t.dataset?.ldelrej) return deleteAllRejected();
   if (t.dataset?.lexp) return libExport(t.dataset.lexp);
   if (!t.closest?.(".xmenu")) document.querySelectorAll(".xmenu[open]").forEach((d) => d.removeAttribute("open"));
   if (t.dataset?.lmore) { L.limit += LPAGE; t.disabled = true; t.textContent = "加载中…"; return loadLibrary(true); }
