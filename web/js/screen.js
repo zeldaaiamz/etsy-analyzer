@@ -159,7 +159,7 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
       return;
     }
     V.items.forEach(fill);
-    if (shot === "excluded") [1, 4, 7, 9, 12, 53, 58, 61].forEach((k) => { V.items[k].status = "canceled"; V.items[k].screen_state = "rejected"; });
+    if (shot === "excluded") [1, 4, 7, 9, 12, 53, 58, 61].forEach((k) => { const it = V.items[k]; if (it) { it.status = "canceled"; it.screen_state = "rejected"; } });
     if (shot === "rejected" || shot === "confirm" || shot === "bottom") [1, 4, 7, 9, 12, 53, 58].forEach((k) => V.rej.add(V.items[k].id));
     render();
     if (shot === "confirm") setTimeout(() => confirm("0"), 600);
