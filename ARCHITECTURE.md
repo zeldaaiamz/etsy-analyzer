@@ -8,7 +8,7 @@
 |---|---|---|
 | 前端 | GitHub Pages 静态站（HTML + 原生 JS + supabase-js） | 登录、提交链接、实时结果表 |
 | 数据/鉴权 | Supabase（Postgres + Auth + RLS + Realtime） | 存储、任务队列、权限隔离、推送更新 |
-| Worker | 本机 Linux（Python，systemd 常驻） | **主动轮询**队列，调用外部 API，写回结果。无入站端口 |
+| Worker | 阿里云 ECS 47.98.137.124（Python venv，systemd `etsy-analyzer-worker` 常驻，见 §15） | **主动轮询**队列，调用外部 API，写回结果。无入站端口 |
 | 数据源 Provider（可插拔） | Etsy Open API v3；Amazon：Rainforest / Keepa / SP-API；LLM：OpenAI 兼容接口 | 外部数据与分析 |
 
 本机不可公网访问，因此不使用 webhook / Edge Function 回调本机；worker 只做出站 HTTPS 请求（Supabase REST + 各 API）。
@@ -133,3 +133,13 @@ stateDiagram-v2
 - 筛选页 `#/screen[/<batch_id>]`（web/js/screen.js）：screen_list() 读数据，每 50 条一批，大图 + 标题 + 价格，✕ 排除 / 撤销。一批的数据和图片都加载完就能确认；每批有自己的“分析剩余数据”按钮，底部另有一个覆盖全部已加载批次。
 - screen_confirm(keep, reject)：保留的 → screen_state='kept' 重新排队；worker 从**库里**读已存的 EHunt 数据（0 次 EHunt 调用，熔断中也放行），继续 DeepSeek → Keepamore → 截图。排除的 → status='canceled'、screen_state='rejected'，之后不再产生任何调用。它们不进任务列表（task_jobs 只放行 kept 的预筛选任务），在筛选页“已排除”标签里可以 screen_restore() 恢复。
 - 兼容：旧版 claim_next_job 跳过预筛选任务；新 worker 在 v2 不存在时自动回退旧版。演示：`?demo=1&screen=300#/screen`（`&sshot=loading|rejected|confirm|bottom`）。
+
+## 15. 部署：Worker 运行在阿里云 ECS（2026-10-15 起）
+- 主机：47.98.137.124（Ubuntu 26.04，2 vCPU / 1.6 GB + 1 GB swapfile），同机还有 `/opt/keyword-battle-worker`、`/opt/voc-worker`（PM2 管理的 node 进程），互不影响。
+- 代码：`/opt/etsy-analyzer`（GitHub `main` 的 git clone，公开仓库直接 HTTPS 拉取）；venv `/opt/etsy-analyzer/.venv`（运行时只用标准库 + python-dotenv，无浏览器 / Pillow）。
+- 配置：`/opt/etsy-analyzer/worker/.env`（chmod 600，不在 git 中；与 box 相同，但 `WORKER_ID=ecs-hz-worker`、`WORKER_CONCURRENCY=2`）。
+- 服务：`/etc/systemd/system/etsy-analyzer-worker.service`，`Restart=always`、开机自启、`MemoryHigh=350M / MemoryMax=500M`，日志进 journald（`journalctl -u etsy-analyzer-worker -f`，journald 自动轮转）。
+- 心跳：`worker_heartbeat.worker_id` 为 `ecs-hz-worker` / `ecs-hz-worker-2`。
+- box 上的 worker 已停用：`deploy/.worker-disabled-on-box`（不入 git）存在时，`ensure-worker.sh`（/etc/profile.d 与 ~/.bashrc 钩子）和 `run-worker.sh` 都不会再启动 worker，保证全局只有一个 worker 消费队列。若要回切到 box：先 `systemctl disable --now etsy-analyzer-worker`，再删除该标记并运行 `deploy/ensure-worker.sh`。
+- 更新流程：box 上的 `deploy/auto-sync.sh` 仍负责提交并推送 web/ 等改动（GitHub Pages）；检测到 `worker/` 代码变化且已推送后，自动调用 `deploy/deploy-server.sh`（经 paramiko 在 ECS 上 `git fetch && git reset --hard <origin/main>`，requirements 变化时重装依赖，然后 `systemctl restart`）。手动：`deploy/deploy-server.sh`；查看状态：`deploy/deploy-server.sh --status`。SSH 密钥 `/home/box/.ssh/aliyun_user.pem`（`ECS_HOST/ECS_USER/ECS_KEY` 可覆盖）。
+- 每日备份循环（`etsy-analyzer-backup/scripts/backup-loop.sh`）仍留在 box 上。

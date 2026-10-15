@@ -14,3 +14,4 @@ logs/
 *.log
 screenshots/
 deploy/.auto-sync-paused
+deploy/.worker-disabled-on-box
