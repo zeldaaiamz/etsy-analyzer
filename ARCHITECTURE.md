@@ -143,3 +143,15 @@ stateDiagram-v2
 - box 上的 worker 已停用：`deploy/.worker-disabled-on-box`（不入 git）存在时，`ensure-worker.sh`（/etc/profile.d 与 ~/.bashrc 钩子）和 `run-worker.sh` 都不会再启动 worker，保证全局只有一个 worker 消费队列。若要回切到 box：先 `systemctl disable --now etsy-analyzer-worker`，再删除该标记并运行 `deploy/ensure-worker.sh`。
 - 更新流程：box 上的 `deploy/auto-sync.sh` 仍负责提交并推送 web/ 等改动（GitHub Pages）；检测到 `worker/` 代码变化且已推送后，自动调用 `deploy/deploy-server.sh`（经 paramiko 在 ECS 上 `git fetch && git reset --hard <origin/main>`，requirements 变化时重装依赖，然后 `systemctl restart`）。手动：`deploy/deploy-server.sh`；查看状态：`deploy/deploy-server.sh --status`。SSH 密钥 `/home/box/.ssh/aliyun_user.pem`（`ECS_HOST/ECS_USER/ECS_KEY` 可覆盖）。
 - 每日备份循环（`etsy-analyzer-backup/scripts/backup-loop.sh`）仍留在 box 上。
+
+## 按评论速度排序（velocity 分支，预览）
+- 产品库工具栏「按评论速度排序」：**只在点击时**取评论日期并计算（`web/js/velocity.js`），再点恢复原顺序；点击前不计算。
+- 规格（近 6 个月，新→旧）：①连续性 = 有评论的月份数 0-6（主排序）②6 月新增 + 月均（次排序）③趋势 近 3 月 vs 前 3 月 ④新鲜度 距最近评论天数，>30 天标「停滞?」。卡片徽标悬停看明细；仅用于同类产品对比。
+- 数据适配器：`loadReviewDates(sb, ids)` → Map<listing_id, 日期[]>，读 `listing_reviews`（019）。来源：`etsy_page`（真实浏览器抓取 Etsy 商品页，抓取端另行实现）、`screenshot`（用户上传截图 OCR，核对后写入）。EHunt 只有评论总数/周新增，不提供评论日期。
+- 抓取状态 `listing_scrape_status`（ok/failed/pending）。failed 的商品：工具栏右上「⚠ 无法抓取 N」+ 侧栏「无法抓取」分区，可
+  1. **上传评论截图**（多张，私有 bucket `review-shots`，路径 `<uid>/<listing>/…`，仅本人）→ `queue_review_ocr` 入队 → worker 本地 tesseract 识别日期（`Oct 13, 2026` / `2026年10月13日`）与总评论数、跨截图去重 → 前端显示识别结果供核对修改 → `confirm_review_dates` 写入 `listing_reviews(source='screenshot')`，排序中带「截图」标记；
+  2. **手动填写（备用）**：近 6 月每月评论数 + 最近评论日期 → `save_manual_velocity`（`listing_review_manual`，source='manual'），带「手动」标记。
+  抓取失败且两者都没有、或未抓取的，显示「无评论日期数据」并排在最后。
+- 迁移 `019_listing_reviews.sql` **未应用**；未应用时前端静默（无抓取状态 → 不显示无法抓取）。
+- Worker OCR：`worker/analyzer/review_ocr.py`（`python -m analyzer.review_ocr` 处理队列；未接入主循环、未部署）。服务器依赖（未安装）：`apt install tesseract-ocr tesseract-ocr-chi-sim`，`pip install pytesseract pillow`。测试：`tests/test_review_ocr.py`。
+- 演示：`?demo=1#/library`（示例评论日期、两个抓取失败条目：一个已手动填写，另一个可上传截图模拟识别；一个未抓取）。

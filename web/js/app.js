@@ -1,4 +1,5 @@
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
+import { computeVelocity, computeManualVelocity, cmpVelocity, velocityBadge, loadReviewDates, demoReviewDates, loadScrapeInfo } from "./velocity.js";
 import { createScreen } from "./screen.js?v=f838aed4";
 
 // ?demo=1：纯前端示例数据，不登录、不连 Supabase，仅用于预览界面（&offline=1 / &quota=1 预览横幅）
@@ -112,6 +113,9 @@ async function boot() {
       if (QS.has("q")) { F.q = QS.get("q"); $("q").value = F.q; }
       const { libraryFixtures } = await import("./demo-library.js");
       S.lib = new Map(libraryFixtures(fx).map((r) => [Number(r.etsy_listing_id), r]));
+      [...S.lib.keys()].forEach((id) => L.scr.set(id, [1488800014, 1488800016].includes(id) ? "failed" : id === 1488800015 ? "pending" : "ok")); // 演示：两个抓取失败，其中一个已手动填写
+      if (QS.get("ocr") === "review") L.ocr.set(1488800014, { id: "demo", status: "done", extracted_dates: DEMO_OCR(), total_reviews: 214 });
+      L.man.set(1488800016, { listing_id: 1488800016, month_counts: [3, 2, 2, 1, 1, 0], latest_review_date: new Date(Date.now() - 9 * 864e5).toISOString().slice(0, 10) });
       if (QS.has("failed")) fx.jobs.push({ ...fx.jobs.find((j) => j.status === "failed"), id: "demo-failed-2", etsy_url: "https://www.etsy.com/listing/1700000009/y", etsy_listing_id: 1700000009, error: "亚马逊搜索超时（Keepamore 504）" });
       if (QS.has("many")) { const n = Number(QS.get("many")) || 300, base = fx.jobs.slice(), sts = ["succeeded", "succeeded", "queued", "running", "failed", "succeeded"];
         for (let i = 0; i < n - base.length; i++) { const b = base[i % base.length], id = `demo-many-${i}`, st = sts[i % sts.length];
@@ -626,12 +630,82 @@ const STAGE_NAME = Object.fromEntries(STAGES.map(([k, n]) => [k, n]));
 const REASONS = [["roi_low", "ROI 太低"], ["cost_high", "成本太高"], ["ip_risk", "侵权风险"], ["competition", "竞争太激烈"], ["demand_low", "市场需求太小"],
   ["seasonal", "季节性太强"], ["logistics", "物流难做（易碎/超大/超重）"], ["compliance", "认证合规问题"], ["supply", "供应链难找"], ["other", "其他"]];
 const REASON_NAME = Object.fromEntries(REASONS);
-const L = { stage: "all", q: "", reason: null, sel: new Set(), items: [], total: 0, counts: null, reasons: {}, limit: LPAGE, loaded: false, loading: false, selAll: false };
+const L = { ocr: new Map(), scr: new Map(), man: new Map(), vel: false, velData: null, velBusy: false, stage: "all", q: "", reason: null, sel: new Set(), items: [], total: 0, counts: null, reasons: {}, limit: LPAGE, loaded: false, loading: false, selAll: false };
 const stageOf = (r) => r.stage || "candidate";
 const libById = (id) => (DEMO ? [...S.lib.values()] : L.items).find((x) => x.id === id);
 const libMatch = (r, q) => !q || [r.title, r.etsy_listing_id, r.product_summary, r.target_audience, r.shop_name, r.stage_note, ...(r.keywords || [])]
   .some((v) => String(v ?? "").toLowerCase().includes(q));
-function libVisible() {
+function libVisible() { const v = libVisible0(); if (!L.vel || !L.velData) return v;
+  return v.map((r, i) => [r, i]).sort(([a, i], [b, j]) => cmpVelocity(velOf(a), velOf(b)) || i - j).map(([r]) => r); }
+const velOf = (r) => L.velData?.get(Number(r.etsy_listing_id));
+async function toggleVelocity() { // 只在点击时取数 + 计算；再点恢复原顺序
+  if (L.vel) { L.vel = false; return renderLibrary(); }
+  L.velBusy = true; renderLibrary();
+  try { const ids = libVisible0().map((r) => Number(r.etsy_listing_id)), now = Date.now();
+    const dates = DEMO ? demoReviewDates(ids, now) : await loadReviewDates(sb, ids);
+    if (DEMO) L.scr.forEach((v, id) => v === "pending" && dates.delete(id)); // 演示：尚未抓取
+    L.velData = new Map(ids.map((id) => [id, velFor(id, dates, now)])); L.vel = true;
+  } catch (e) { toast(`评论数据加载失败：${e.message}`, "bad"); }
+  L.velBusy = false; renderLibrary();
+}
+const isFailed = (r) => L.scr.get(Number(r.etsy_listing_id)) === "failed";
+const failedItems = () => (DEMO ? [...S.lib.values()] : L.items).filter(isFailed);
+async function refreshScrape() { if (DEMO) return; try { const x = await loadScrapeInfo(sb, L.items.map((r) => Number(r.etsy_listing_id))); L.scr = x.st; L.man = x.man; L.ocr = x.ocr; } catch { /* 019 未应用时静默 */ } }
+// 抓取失败：已确认的截图日期优先，其次手动填写，都没有 → null（排最后）
+function velFor(id, dates, now) {
+  if (L.scr.get(id) !== "failed") return computeVelocity(dates.get(id), now);
+  const o = L.ocr.get(id), sd = o?.status === "confirmed" ? o.confirmed_dates : DEMO ? null : dates.get(id);
+  if (sd?.length) return { ...computeVelocity(sd, now), shot: true };
+  return computeManualVelocity(L.man.get(id), now);
+}
+function ocrBlock(r) {
+  const id = Number(r.etsy_listing_id), o = L.ocr.get(id);
+  const up = `<label class="btn btn-ghost btn-sm upl">⇪ 上传评论截图<input type="file" accept="image/*" multiple hidden data-oup="${id}"></label>`;
+  if (!o) return `<div class="ocr">${up}<span class="hint">Etsy 评论弹窗截图，可多张（每页 8 条）</span></div>`;
+  if (o.status === "queued" || o.status === "processing") return `<div class="ocr"><span class="spin"></span> 正在识别 ${o.n || ""} 张截图…</div>`;
+  if (o.status === "failed") return `<div class="ocr"><span class="bad-t">识别失败：${esc(o.ocr_error || "")}</span>${up}</div>`;
+  if (o.status === "confirmed") return `<div class="ocr ok-t">✓ 已确认 ${o.confirmed_dates.length} 个评论日期（截图）${up}</div>`;
+  return `<div class="ocr rev"><div class="manf-t">识别结果：${o.extracted_dates.length} 个日期${o.total_reviews != null ? ` · 总评论 ${o.total_reviews}` : ""} — 请核对（每行一个 YYYY-MM-DD，可增删改）</div>
+    ${o.ocr_error ? `<div class="hint">${esc(o.ocr_error)}</div>` : ""}<textarea class="input textarea ocr-ta" data-ota="${id}" rows="5">${esc(o.extracted_dates.join("\n"))}</textarea>
+    <div class="row"><button class="btn btn-primary btn-sm" data-oconf="${id}">确认并计入排序</button>${up}</div></div>`;
+}
+async function uploadShots(id, files) {
+  files = [...files].filter((f) => f.type.startsWith("image/")).slice(0, 20); if (!files.length) return;
+  if (DEMO) { L.ocr.set(id, { status: "processing", n: files.length }); renderLibrary();
+    return setTimeout(() => { L.ocr.set(id, { id: "demo", status: "done", extracted_dates: DEMO_OCR(), total_reviews: 214 }); renderLibrary(); }, 1200); }
+  const uid = currentUser, paths = [];
+  for (const [i, f] of files.entries()) { const path = `${uid}/${id}/${Date.now()}-${i}.${(f.name.split(".").pop() || "png").toLowerCase()}`;
+    const { error } = await sb.storage.from("review-shots").upload(path, f, { contentType: f.type }); if (error) return toast(`上传失败：${error.message}`, "bad"); paths.push(path); }
+  const { data, error } = await sb.rpc("queue_review_ocr", { p_listing: id, p_paths: paths });
+  if (error || !data) return toast(`提交识别失败：${error?.message || ""}`, "bad");
+  L.ocr.set(id, { id: data, status: "queued", n: paths.length }); renderLibrary(); toast("已上传，服务器识别中（本地 OCR）", "ok");
+}
+async function confirmShots(id) {
+  const o = L.ocr.get(id), raw = document.querySelector(`[data-ota="${id}"]`).value.split(/[\s,，]+/).filter(Boolean);
+  const today = new Date().toISOString().slice(0, 10), bad = raw.filter((d) => !/^\d{4}-\d{2}-\d{2}$/.test(d) || isNaN(new Date(d)) || d > today);
+  if (bad.length) return toast(`日期格式不对或晚于今天：${bad.slice(0, 3).join("、")}`, "bad");
+  if (!DEMO) { const { error } = await sb.rpc("confirm_review_dates", { p_job: o.id, p_dates: raw }); if (error) return toast(error.message, "bad"); }
+  L.ocr.set(id, { ...o, status: "confirmed", confirmed_dates: raw.sort().reverse() });
+  if (L.vel) L.velData.set(id, velFor(id, new Map(), Date.now())); toast(`已确认 ${raw.length} 个日期，计入排序`, "ok"); renderLibrary();
+}
+const DEMO_OCR = () => [3, 11, 11, 26, 40, 58, 71, 95, 120, 150].map((d) => new Date(Date.now() - d * 864e5).toISOString().slice(0, 10));
+function manualForm(r) {
+  const id = Number(r.etsy_listing_id), m = L.man.get(id), c = m?.month_counts || [];
+  return `<div class="manf" data-mf="${id}"><div class="manf-t">手动填写评论速度${m ? ' <span class="pb pb-man">已填</span>' : ""}</div>
+    <div class="manf-m">${["近1月", "2月", "3月", "4月", "5月", "6月"].map((t, i) => `<label><span>${t}</span><input class="input input-sm" type="number" min="0" step="1" data-mc="${i}" value="${c[i] ?? ""}"></label>`).join("")}</div>
+    <label class="manf-d">最近一条评论 <input class="input input-sm" type="date" data-ml="1" value="${m?.latest_review_date || ""}"></label>
+    <button class="btn btn-primary btn-sm" data-msave="${id}">保存</button></div>`;
+}
+async function saveManual(id) {
+  const f = document.querySelector(`[data-mf="${id}"]`), counts = [...f.querySelectorAll("[data-mc]")].map((x) => Math.max(0, parseInt(x.value, 10) || 0)), latest = f.querySelector("[data-ml]").value || null;
+  if (latest && new Date(latest) > new Date()) return toast("最近评论日期不能晚于今天", "bad");
+  if (!DEMO) { const { data, error } = await sb.rpc("save_manual_velocity", { p_listing: id, p_counts: counts, p_latest: latest });
+    if (error || !data) return toast(`保存失败：${error?.message || "无权限"}`, "bad"); }
+  L.man.set(id, { listing_id: id, month_counts: counts, latest_review_date: latest });
+  if (L.vel) L.velData.set(id, computeManualVelocity(L.man.get(id))); toast("已保存（手动）", "ok"); renderLibrary();
+}
+function libVisible0() {
+  if (L.stage === "failed") return failedItems();
   if (!DEMO) return L.items;
   const q = L.q.trim().toLowerCase();
   return [...S.lib.values()].filter((r) => (L.stage === "all" || stageOf(r) === L.stage) && libMatch(r, q) && (L.stage !== "rejected" || !L.reason || (r.reject_reasons || []).includes(L.reason)))
@@ -685,14 +759,14 @@ function libCard(r) {
   return `<article class="pcard${on ? " sel" : ""}">
     <div class="pimg">${img ? `<img src="${imgUrl(etsyThumb(r.image_url, "300x300"))}" width="300" height="300" decoding="async" data-zoom="${img}" data-cap="${esc(r.title)}" alt="" loading="lazy">` : '<div class="pimg-empty">◆</div>'}
       <label class="psel" title="选择"><input type="checkbox" data-lsel="${esc(r.id)}"${on ? " checked" : ""}></label>
-      <div class="pbadges">${L.stage === "all" ? `<span class="pb pb-st st-${st}">${esc(STAGE_NAME[st])}</span>` : ""}${!r.job_id ? `<span class="pb pb-del" title="分析任务已删除，仅保留加入时的快照">${S.libPending.has(Number(r.etsy_listing_id)) ? "重新分析中…" : "分析已删除"}</span>` : ""}</div></div>
+      <div class="pbadges">${L.vel ? velocityBadge(velOf(r), esc) : ""}${L.stage === "all" ? `<span class="pb pb-st st-${st}">${esc(STAGE_NAME[st])}</span>` : ""}${!r.job_id ? `<span class="pb pb-del" title="分析任务已删除，仅保留加入时的快照">${S.libPending.has(Number(r.etsy_listing_id)) ? "重新分析中…" : "分析已删除"}</span>` : ""}</div></div>
     <div class="pinfo"><a class="ptitle" href="${url}" target="_blank" rel="noopener" title="${esc(r.title)}">${esc(r.title || `Etsy #${r.etsy_listing_id}`)}</a>
       <div class="pprice">${r.price != null ? `$${esc(Number(r.price).toFixed(2))}` : '<span class="muted">—</span>'}</div>
       ${r.keywords?.length ? `<div class="pline pkw" title="${esc(r.keywords.join(", "))}">${esc(r.keywords.slice(0, 3).join(", "))}</div>` : ""}
       <div class="pline muted" title="加入产品库时的匹配数量">加入时：同款 ${ic ?? "—"} · 类似 ${sc ?? "—"} · ${esc(new Date(r.added_at).toLocaleDateString(undefined, { month: "numeric", day: "numeric" }))}</div>
       ${st === "rejected" ? `<div class="rchips">${(r.reject_reasons || []).map((k) => `<span class="rchip">${esc(REASON_NAME[k] || k)}</span>`).join("")}</div>
         ${r.stage_note ? `<div class="pline pnote" title="${esc(r.stage_note)}">“${esc(r.stage_note)}”</div>` : ""}` : ""}
-      <div class="pacts">${acts}</div>
+      ${L.stage === "failed" ? ocrBlock(r) + `<details class="mand"${L.man.has(Number(r.etsy_listing_id)) ? " open" : ""}><summary>手动填写（备用）</summary>${manualForm(r)}</details>` : `<div class="pacts">${acts}</div>`}
       <div class="pacts2">${r.job_id && (!job || job.status === "succeeded") ? `<button class="btn btn-link btn-sm" data-detail="${esc(r.job_id)}">查看分析 →</button>`
         : S.libPending.has(Number(r.etsy_listing_id)) ? '<span class="hint">重新分析中…</span>' : `<button class="btn btn-link btn-sm" data-reana="${esc(r.id)}" title="为这个商品提交新的分析（24 小时内的数据走缓存，几乎不耗额度）">↻ 重新分析</button>`}
         <span class="spacer"></span><button class="btn btn-link btn-sm muted" data-unlib="${esc(r.id)}">移出产品库</button></div></div></article>`;
@@ -724,7 +798,7 @@ async function libExportItems() {
   if (libSelAllRemote()) {
     const out = [], P = 500;
     for (let off = 0; off < L.total + P; off += P) {
-      const { data, error } = await sb.rpc("library_page", { p_stage: L.stage, p_q: L.q.trim() || null, p_reason: L.stage === "rejected" ? L.reason : null, p_limit: P, p_offset: off });
+      const { data, error } = await sb.rpc("library_page", { p_stage: L.stage === "failed" ? "all" : L.stage, p_q: L.q.trim() || null, p_reason: L.stage === "rejected" ? L.reason : null, p_limit: P, p_offset: off });
       if (error || !data) throw new Error(error?.message || "加载失败");
       out.push(...(data.items || [])); if ((data.items || []).length < P) break;
     }
@@ -761,10 +835,10 @@ async function loadLibrary(more = false) {
   if (DEMO) return renderLibrary();
   if (!sb || !currentUser) return;
   const seq = ++libSeq; L.loading = true;
-  const { data, error } = await sb.rpc("library_page", { p_stage: L.stage, p_q: L.q.trim() || null, p_reason: L.stage === "rejected" ? L.reason : null, p_limit: L.limit, p_offset: 0 });
+  const { data, error } = await sb.rpc("library_page", { p_stage: L.stage === "failed" ? "all" : L.stage, p_q: L.q.trim() || null, p_reason: L.stage === "rejected" ? L.reason : null, p_limit: L.limit, p_offset: 0 });
   if (seq !== libSeq) return; L.loading = false;
   if (error || !data) { toast(`产品库加载失败：${error?.message || ""}`, "bad"); return; }
-  L.items = data.items || []; L.total = data.total || 0; L.counts = data.counts || {}; L.reasons = data.reasons || {}; L.loaded = true;
+  L.items = data.items || []; await refreshScrape(); L.total = data.total || 0; L.counts = data.counts || {}; L.reasons = data.reasons || {}; L.loaded = true;
   S.lib = new Map(L.items.map((r) => [Number(r.etsy_listing_id), r])); setLibCount(L.counts.all);
   S.libPending = new Set((data.pending || []).map(Number));
   renderLibrary();
@@ -775,7 +849,8 @@ function renderLibrary() {
   const ready = libReady(), totalAll = !DEMO && L.counts ? L.counts.all || 0 : all.length, known = ready ? totalAll : (DEMO ? readLibCount() : S.libCount);
   [...L.sel].forEach((id) => { const r = libById(id); if (!r || (L.stage !== "all" && stageOf(r) !== L.stage)) L.sel.delete(id); });
   renderLibCount(); $("libHeadN").textContent = known ? `${known} 个` : ready ? "" : "加载中…";
-  $("libSide").innerHTML = `<div class="side-t">阶段</div><button class="side-i${L.stage === "all" ? " on" : ""} st-all" role="tab" data-lstage="all"><span class="side-ic">▦</span>全部<span class="side-n">${ready ? totalAll : known ?? "…"}</span></button>` + STAGES.map(([k, n, ic]) => `<button class="side-i${L.stage === k ? " on" : ""} st-${k}" role="tab" data-lstage="${k}"><span class="side-ic">${ic}</span>${n}<span class="side-n">${ready ? cnt[k] ?? 0 : "…"}</span></button>`).join("");
+  $("libSide").innerHTML = `<div class="side-t">阶段</div><button class="side-i${L.stage === "all" ? " on" : ""} st-all" role="tab" data-lstage="all"><span class="side-ic">▦</span>全部<span class="side-n">${ready ? totalAll : known ?? "…"}</span></button>` + STAGES.map(([k, n, ic]) => `<button class="side-i${L.stage === k ? " on" : ""} st-${k}" role="tab" data-lstage="${k}"><span class="side-ic">${ic}</span>${n}<span class="side-n">${ready ? cnt[k] ?? 0 : "…"}</span></button>`).join("") + `<div class="side-t">评论数据</div><button class="side-i${L.stage === "failed" ? " on" : ""} st-failed" role="tab" data-lstage="failed"><span class="side-ic">⚠</span>无法抓取<span class="side-n">${failedItems().length}</span></button>`;
+  const nf = failedItems().length;
   const vis = libVisible(), n = L.sel.size, allOn = vis.length && vis.every((r) => L.sel.has(r.id));
   let bar = "";
   if (L.stage === "rejected") { const rc = DEMO ? {} : { ...L.reasons }; if (DEMO) all.filter((r) => stageOf(r) === "rejected").forEach((r) => (r.reject_reasons || []).forEach((k) => (rc[k] = (rc[k] || 0) + 1)));
@@ -786,6 +861,8 @@ function renderLibrary() {
       : `<button class="btn btn-ghost btn-sm" data-lbulk="candidate">↩ 移回备选 (${n})</button>`}
       ${libExportMenu()}<button class="btn btn-ghost btn-sm" data-lbulk="remove">移出产品库</button><button class="btn btn-ghost btn-sm" data-lbulk="clear">取消选择</button>`
       : `<span class="hint">勾选卡片可批量${L.stage === "candidate" ? "移到进行中 / 不考虑" : L.stage === "all" ? "移动阶段 / 移出" : "移回备选"}</span>`}</div>` : "";
+  if (L.stage === "failed") bar = `<div class="lvel"><span class="hint">这些商品的 Etsy 评论抓取失败。上传评论弹窗截图（服务器本地 OCR 识别日期，核对后计入排序，带「截图」标记）；或手动填写近 6 月每月评论数 + 最近评论日期（「手动」）。都没有的排在最后。</span></div>`;
+  else if (vis.length) bar += `<div class="lvel"><button class="btn btn-sm ${L.vel ? "btn-primary" : "btn-ghost"}" data-lvel="1"${L.velBusy ? " disabled" : ""}>${L.velBusy ? "计算中…" : L.vel ? "✓ 按评论速度排序（点击恢复原顺序）" : "按评论速度排序"}</button>${L.vel ? '<span class="hint">连续月数 → 6 月新增；悬停徽标看明细；仅用于同类产品对比</span>' : ""}<span class="spacer"></span>${nf ? `<button class="scr-warn" data-lstage="failed" title="查看并手动填写">⚠ 无法抓取 <b>${nf}</b></button>` : ""}</div>`;
   $("libBar").innerHTML = bar;
   const libMore = !DEMO && L.total > vis.length ? `<button class="btn btn-ghost load-more lib-more" data-lmore="1">加载更多（已显示 ${vis.length} / ${L.total}）</button>` : "";
   if (!ready) $("libBar").innerHTML = "";
@@ -1065,7 +1142,7 @@ function closeDrawer() {
   $("drawer").classList.remove("open"); $("drawer").setAttribute("aria-hidden", "true"); $("drawerMask").classList.add("hidden"); drawerState = null; }
 
 document.addEventListener("click", (ev) => {
-  const t = ev.target.closest("[data-zoom],[data-detail],[data-tab],[data-cat],[data-act],[data-clear],[data-copy],[data-copyall],[data-export],[data-more],[data-dupe],[data-view],[data-bulk],[data-unlib],[data-lstage],[data-lmove],[data-lreason],[data-lbulk],[data-libgo],[data-reana],[data-lmore],[data-lexp]") || ev.target;
+  const t = ev.target.closest("[data-zoom],[data-detail],[data-tab],[data-cat],[data-act],[data-clear],[data-copy],[data-copyall],[data-export],[data-more],[data-dupe],[data-view],[data-bulk],[data-unlib],[data-lstage],[data-lmove],[data-lreason],[data-lbulk],[data-libgo],[data-reana],[data-lmore],[data-lexp],[data-lvel],[data-msave],[data-oconf]") || ev.target;
   if (t.dataset?.bulk) { if (t.dataset.bulk === "clear") { S.sel.clear(); return render(); } return bulk(t.dataset.bulk); }
   if (t.dataset?.unlib) { const r = [...S.lib.values()].find((x) => x.id === t.dataset.unlib); return r && removeLibItems([r]); }
   if (t.dataset?.lstage) { L.stage = t.dataset.lstage; L.reason = null; L.sel.clear(); L.selAll = false; if (!DEMO) { L.items = []; L.loaded = false; renderLibrary(); return libReload(); } return renderLibrary(); }
@@ -1095,6 +1172,9 @@ document.addEventListener("click", (ev) => {
   if (t.dataset?.act) return jobAction(t.dataset.id, t.dataset.act);
   if (t.dataset?.clear) { ev.preventDefault(); F.cat = "all"; F.q = ""; $("q").value = ""; return render(); }
   if (t.dataset?.zoom) { $("lbImg").src = t.dataset.zoom; $("lbCap").textContent = t.dataset.cap || ""; $("lightbox").classList.remove("hidden"); return; }
+  if (t.dataset?.lvel) return toggleVelocity();
+  if (t.dataset?.oconf) return confirmShots(Number(t.dataset.oconf));
+  if (t.dataset?.msave) return saveManual(Number(t.dataset.msave));
   if (t.dataset?.detail) return openDetail(t.dataset.detail);
   if (t.closest?.("#lightbox")) $("lightbox").classList.add("hidden");
   if (t.id === "drawerMask" || t.closest?.("#drawerClose")) closeDrawer();
@@ -1107,7 +1187,7 @@ document.addEventListener("keydown", (ev) => {
 });
 
 $("q").addEventListener("input", () => { F.q = $("q").value; render(); });
-document.addEventListener("change", (ev) => { if (ev.target.id === "sortSel") { sortKey = ev.target.value; renderSnaps(); }
+document.addEventListener("change", (ev) => { if (ev.target.dataset?.oup) { uploadShots(Number(ev.target.dataset.oup), ev.target.files); ev.target.value = ""; return; } if (ev.target.id === "sortSel") { sortKey = ev.target.value; renderSnaps(); }
   const t = ev.target;
   if (t.dataset?.sel) { t.checked ? S.sel.add(t.dataset.sel) : S.sel.delete(t.dataset.sel); render(); }
   if (t.dataset?.lsel) { if (!t.checked) L.selAll = false; t.checked ? L.sel.add(t.dataset.lsel) : L.sel.delete(t.dataset.lsel); return renderLibrary(); }
