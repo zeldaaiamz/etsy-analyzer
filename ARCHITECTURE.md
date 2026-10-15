@@ -156,3 +156,12 @@ stateDiagram-v2
 - Worker OCR：`worker/analyzer/review_ocr.py`作为 worker 主进程的后台线程每 20s 处理队列（已安装 pytesseract 时默认启用，`REVIEW_OCR_ENABLED=0` 关闭；也可 `python -m analyzer.review_ocr`）。ECS 已安装依赖：`apt install tesseract-ocr tesseract-ocr-chi-sim`，`pip install pytesseract pillow`。测试：`tests/test_review_ocr.py`。
 - 演示：`?demo=1#/library`（示例评论日期、两个抓取失败条目：一个已手动填写，另一个可上传截图模拟识别；一个未抓取）。
 - 浏览器抓取结果入库：box 上 `tools/save_reviews.py`（见文件头用法；`--list-library` 列出产品库 listing）。
+
+## 一键亚马逊搜索（PM-001，迁移 020）
+- `analyses.keyword_items` / `product_library.amazon_keywords`：`[{keyword, source, basis}]`，source ∈ title/image/review/original-title/manual，≤5 个，去重（约束 `valid_amazon_keywords`）；恰好 1 个 original-title（原标题逐字片段，≤4 词）。
+- 生成：DeepSeek 分析（REDUCE_PROMPT 的 `amazon_keywords` 字段）→ `analyzer/amazon_keywords.build()` 校验/去重/兜底；`add_to_library` 入库时复制，人工编辑过（`keywords_edited_at`）的不覆盖。DeepSeek 不能看图：只用流水线已有的图片描述（`raw.image_description` 等，目前没有）。
+- 编辑：RPC `update_library_keywords(p_item, p_keywords)`，新增词强制 manual。`library_page` 多返回 `amazon_keywords`、`competitor_asin`（关联任务里相似度最高的同款 ASIN）。
+- 前端 `web/js/amzsearch.js`：仅 candidate/active 显示按钮；点击时同步 `window.open` 每词一个 `amazon.com/s?k=`，返回 null 计为被拦截并提示；竞品 ASIN 勾选默认关。测试 `node --test web/tests/`。
+- 回填：`tools/backfill_amazon_keywords.py [--dry-run] [--rebuild]`。
+- 五个方向（021）：每个词带 `direction` 1-5（D1 精准词 必有且唯一 / D2 同场景相似品 / D3 产品文案（必须逐字出现在标题或豆包读出的 text_on_product 里，品牌词丢弃）/ D4 人群礼物词 / D5 细分场景词）。`build()` 输出 D1 → 每方向 1 个 → 同方向补满 ≤5。旧的 original-title 槽位取消。
+- 豆包视觉（`providers/doubao_vision.py`）：Ark `https://ark.cn-beijing.volces.com/api/v3/chat/completions`，模型 `DOUBAO_VISION_MODEL`（默认 doubao-seed-2-1-turbo-260628，本账号唯一已开通的；vision-pro / seed-1-6-vision 不可用）。`DOUBAO_VISION_ENABLED=1` + `ARK_API_KEY` 才启用；`DOUBAO_VISION_MODE=always`（默认，读 D3 文案）| `unclear`（仅标题不清楚时）。主图取 EHunt 已有 image_url。任何失败 → None，回退仅标题，不影响分析。约 1.5k tokens/张，约 ¥0.006/产品。

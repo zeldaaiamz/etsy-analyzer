@@ -8,6 +8,7 @@ from datetime import timedelta
 from .queue import _now, retry_delay, next_utc_midnight
 from .audience import audience_summary, review_count_text
 from .providers.mock import MockScreenshot
+from .amazon_keywords import build as build_keywords
 
 log = logging.getLogger("pipeline")
 LEVEL = {"low": "低", "medium": "中", "high": "高"}
@@ -219,6 +220,8 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
 
         step("analyze")
         an = llm.analyze_product(prod, reviews)
+        if not getattr(an, "keyword_items", None):  # 旧缓存/旧 provider：用纯字符串关键词兜底（来源 title + 原标题短语）
+            an.keyword_items = build_keywords([], prod.title, fallback=an.keywords)
         ev = an.audience_evidence
         if getattr(etsy, "no_review_text", False):
             ev["no_text_provider"] = "EHunt"
@@ -247,7 +250,8 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
                       "reasoning": ev.get("method", "")})
         trace.append({"step": "keywords", "title": "生成搜索词",
                       "input": {"标签": prod.tags, "人群": an.target_audience},
-                      "output": {"搜索词": an.keywords[:3]},
+                      "output": {"搜索词": an.keywords[:3],
+                                 "一键亚马逊搜索词": [f"D{k.get('direction', '?')} {k['keyword']}（{k['source']}）" for k in an.keyword_items]},
                       "reasoning": an.keyword_reasoning or "取最能代表产品的英文词组"})
 
         step("search_amazon")

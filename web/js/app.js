@@ -1,5 +1,6 @@
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
 import { computeVelocity, computeManualVelocity, cmpVelocity, velocityBadge, loadReviewDates, demoReviewDates, loadScrapeInfo } from "./velocity.js";
+import { amzBlock, amzUrls, openAll, applyEdit, kwList, MAX_KW, DIR_SELECT_HTML } from "./amzsearch.js";
 import { createScreen } from "./screen.js?v=f838aed4";
 
 // ?demo=1：纯前端示例数据，不登录、不连 Supabase，仅用于预览界面（&offline=1 / &quota=1 预览横幅）
@@ -112,7 +113,11 @@ async function boot() {
       fx.snaps.forEach((s, i) => { if (s.asin) { const ms = i % 3 !== 2; s.raw = { ...(s.raw || {}), sales_source: ms ? "monthlySold" : "bsr_estimate" }; s.monthly_sold = ms ? [300, 1000, 50, 200][i % 4] : null; s.est_monthly_sales = ms ? s.monthly_sold : 120 + (s.bsr % 400); } });
       if (QS.has("q")) { F.q = QS.get("q"); $("q").value = F.q; }
       const { libraryFixtures } = await import("./demo-library.js");
-      S.lib = new Map(libraryFixtures(fx).map((r) => [Number(r.etsy_listing_id), r]));
+      let libItems = libraryFixtures(fx);
+      if (QS.has("fixture")) { try { // 本地预览：真实产品库快照（web/preview-fixture.json，不入 git）+ 一个无关键词的演示条目
+        const real = await (await fetch(`./${QS.get("fixture") || "preview-fixture"}.json`)).json();
+        libItems = [...real, ...libItems.filter((r) => !(r.amazon_keywords || []).length)]; } catch { /* 无快照文件时用演示数据 */ } }
+      S.lib = new Map(libItems.map((r) => [Number(r.etsy_listing_id), r]));
       [...S.lib.keys()].forEach((id) => L.scr.set(id, [1488800014, 1488800016].includes(id) ? "failed" : id === 1488800015 ? "pending" : "ok")); // 演示：两个抓取失败，其中一个已手动填写
       if (QS.get("ocr") === "review") L.ocr.set(1488800014, { id: "demo", status: "done", extracted_dates: DEMO_OCR(), total_reviews: 214 });
       L.man.set(1488800016, { listing_id: 1488800016, month_counts: [3, 2, 2, 1, 1, 0], latest_review_date: new Date(Date.now() - 9 * 864e5).toISOString().slice(0, 10) });
@@ -630,7 +635,7 @@ const STAGE_NAME = Object.fromEntries(STAGES.map(([k, n]) => [k, n]));
 const REASONS = [["roi_low", "ROI 太低"], ["cost_high", "成本太高"], ["ip_risk", "侵权风险"], ["competition", "竞争太激烈"], ["demand_low", "市场需求太小"],
   ["seasonal", "季节性太强"], ["logistics", "物流难做（易碎/超大/超重）"], ["compliance", "认证合规问题"], ["supply", "供应链难找"], ["other", "其他"]];
 const REASON_NAME = Object.fromEntries(REASONS);
-const L = { ocr: new Map(), scr: new Map(), man: new Map(), vel: false, velData: null, velBusy: false, stage: "all", q: "", reason: null, sel: new Set(), items: [], total: 0, counts: null, reasons: {}, limit: LPAGE, loaded: false, loading: false, selAll: false };
+const L = { kwOpen: new Set(), kwEdit: null, asinOn: new Set(), ocr: new Map(), scr: new Map(), man: new Map(), vel: false, velData: null, velBusy: false, stage: "all", q: "", reason: null, sel: new Set(), items: [], total: 0, counts: null, reasons: {}, limit: LPAGE, loaded: false, loading: false, selAll: false };
 const stageOf = (r) => r.stage || "candidate";
 const libById = (id) => (DEMO ? [...S.lib.values()] : L.items).find((x) => x.id === id);
 const libMatch = (r, q) => !q || [r.title, r.etsy_listing_id, r.product_summary, r.target_audience, r.shop_name, r.stage_note, ...(r.keywords || [])]
@@ -762,7 +767,7 @@ function libCard(r) {
       <div class="pbadges">${L.vel ? velocityBadge(velOf(r), esc) : ""}${L.stage === "all" ? `<span class="pb pb-st st-${st}">${esc(STAGE_NAME[st])}</span>` : ""}${!r.job_id ? `<span class="pb pb-del" title="分析任务已删除，仅保留加入时的快照">${S.libPending.has(Number(r.etsy_listing_id)) ? "重新分析中…" : "分析已删除"}</span>` : ""}</div></div>
     <div class="pinfo"><a class="ptitle" href="${url}" target="_blank" rel="noopener" title="${esc(r.title)}">${esc(r.title || `Etsy #${r.etsy_listing_id}`)}</a>
       <div class="pprice">${r.price != null ? `$${esc(Number(r.price).toFixed(2))}` : '<span class="muted">—</span>'}</div>
-      ${r.keywords?.length ? `<div class="pline pkw" title="${esc(r.keywords.join(", "))}">${esc(r.keywords.slice(0, 3).join(", "))}</div>` : ""}
+      ${amzBlock(r, { esc, editing: L.kwEdit === r.id, asinOn: L.asinOn.has(r.id), open: L.kwOpen.has(r.id) })}
       <div class="pline muted" title="加入产品库时的匹配数量">加入时：同款 ${ic ?? "—"} · 类似 ${sc ?? "—"} · ${esc(new Date(r.added_at).toLocaleDateString(undefined, { month: "numeric", day: "numeric" }))}</div>
       ${st === "rejected" ? `<div class="rchips">${(r.reject_reasons || []).map((k) => `<span class="rchip">${esc(REASON_NAME[k] || k)}</span>`).join("")}</div>
         ${r.stage_note ? `<div class="pline pnote" title="${esc(r.stage_note)}">“${esc(r.stage_note)}”</div>` : ""}` : ""}
@@ -770,6 +775,27 @@ function libCard(r) {
       <div class="pacts2">${r.job_id && (!job || job.status === "succeeded") ? `<button class="btn btn-link btn-sm" data-detail="${esc(r.job_id)}">查看分析 →</button>`
         : S.libPending.has(Number(r.etsy_listing_id)) ? '<span class="hint">重新分析中…</span>' : `<button class="btn btn-link btn-sm" data-reana="${esc(r.id)}" title="为这个商品提交新的分析（24 小时内的数据走缓存，几乎不耗额度）">↻ 重新分析</button>`}
         <span class="spacer"></span><button class="btn btn-link btn-sm muted" data-unlib="${esc(r.id)}">移出产品库</button></div></div></article>`;
+}
+// ---------- PM-001 一键亚马逊搜索 ----------
+function amzOpen(id) {
+  const r = libById(id); if (!r || !kwList(r).length) return;
+  const urls = amzUrls(r, L.asinOn.has(r.id)), blocked = openAll(urls);
+  if (blocked) toast(`浏览器拦截了 ${blocked}/${urls.length} 个新标签页：请在地址栏右侧点“允许本站弹出窗口”，然后再点一次`, "bad", null, 8000);
+  else toast(`已在亚马逊美国站打开 ${urls.length} 个新标签页`, "ok");
+}
+const syncKwAdd = () => document.querySelectorAll(".amz-edit").forEach((b) => { const n = b.querySelectorAll("[data-akwin]").length, a = b.querySelector("[data-akwadd]"); if (a) a.disabled = n >= MAX_KW; });
+function addKwRow(btn) {
+  const box = btn.closest(".amz-edit"); if (box.querySelectorAll("[data-akwin]").length >= MAX_KW) return;
+  const row = document.createElement("div"); row.className = "akw-row";
+  row.innerHTML = DIR_SELECT_HTML + '<input class="input akw-in" maxlength="80" placeholder="例如 church note" data-akwin><em class="akw-s s-manual">手动</em><button class="btn btn-link btn-sm" data-akwdel title="删除">✕</button>';
+  btn.closest(".row").before(row); row.querySelector("input").focus(); syncKwAdd();
+}
+async function saveKeywords(id) {
+  const r = libById(id), box = document.querySelector(`[data-amzbox="${CSS.escape(id)}"]`); if (!r || !box) return;
+  let next; try { next = applyEdit(kwList(r), [...box.querySelectorAll(".akw-row")].map((row) => ({ keyword: row.querySelector("[data-akwin]").value, direction: row.querySelector("[data-akwdir]")?.value }))); } catch (e) { return toast(e.message, "bad"); }
+  if (!DEMO) { const { data, error } = await sb.rpc("update_library_keywords", { p_item: id, p_keywords: next });
+    if (error) return toast(`保存失败：${error.message}`, "bad"); next = data; }
+  r.amazon_keywords = next; L.kwEdit = null; renderLibrary(); toast(`已保存 ${next.length} 个搜索词`, "ok");
 }
 function libAllBulk() {
   const sel = [...L.sel].map(libById).filter(Boolean), c = sel.filter((r) => stageOf(r) === "candidate").length, o = sel.length - c;
@@ -1142,7 +1168,14 @@ function closeDrawer() {
   $("drawer").classList.remove("open"); $("drawer").setAttribute("aria-hidden", "true"); $("drawerMask").classList.add("hidden"); drawerState = null; }
 
 document.addEventListener("click", (ev) => {
-  const t = ev.target.closest("[data-zoom],[data-detail],[data-tab],[data-cat],[data-act],[data-clear],[data-copy],[data-copyall],[data-export],[data-more],[data-dupe],[data-view],[data-bulk],[data-unlib],[data-lstage],[data-lmove],[data-lreason],[data-lbulk],[data-libgo],[data-reana],[data-lmore],[data-lexp],[data-lvel],[data-msave],[data-oconf]") || ev.target;
+  const t = ev.target.closest("[data-amz],[data-akwtog],[data-akwedit],[data-akwcancel],[data-akwsave],[data-akwadd],[data-akwdel],[data-zoom],[data-detail],[data-tab],[data-cat],[data-act],[data-clear],[data-copy],[data-copyall],[data-export],[data-more],[data-dupe],[data-view],[data-bulk],[data-unlib],[data-lstage],[data-lmove],[data-lreason],[data-lbulk],[data-libgo],[data-reana],[data-lmore],[data-lexp],[data-lvel],[data-msave],[data-oconf]") || ev.target;
+  if (t.dataset?.amz) return amzOpen(t.dataset.amz); // 同步调用 window.open，前面不能有 await
+  if (t.dataset?.akwtog) { const k = t.dataset.akwtog; L.kwOpen.has(k) ? L.kwOpen.delete(k) : L.kwOpen.add(k); return renderLibrary(); }
+  if (t.dataset?.akwedit) { L.kwEdit = t.dataset.akwedit; L.kwOpen.add(t.dataset.akwedit); return renderLibrary(); }
+  if (t.dataset?.akwcancel) { L.kwEdit = null; return renderLibrary(); }
+  if (t.dataset?.akwsave) return saveKeywords(t.dataset.akwsave);
+  if (t.dataset?.akwadd) return addKwRow(t);
+  if (t.dataset?.akwdel !== undefined && t.closest?.(".akw-row")) { t.closest(".akw-row").remove(); syncKwAdd(); return; }
   if (t.dataset?.bulk) { if (t.dataset.bulk === "clear") { S.sel.clear(); return render(); } return bulk(t.dataset.bulk); }
   if (t.dataset?.unlib) { const r = [...S.lib.values()].find((x) => x.id === t.dataset.unlib); return r && removeLibItems([r]); }
   if (t.dataset?.lstage) { L.stage = t.dataset.lstage; L.reason = null; L.sel.clear(); L.selAll = false; if (!DEMO) { L.items = []; L.loaded = false; renderLibrary(); return libReload(); } return renderLibrary(); }
@@ -1190,6 +1223,7 @@ $("q").addEventListener("input", () => { F.q = $("q").value; render(); });
 document.addEventListener("change", (ev) => { if (ev.target.dataset?.oup) { uploadShots(Number(ev.target.dataset.oup), ev.target.files); ev.target.value = ""; return; } if (ev.target.id === "sortSel") { sortKey = ev.target.value; renderSnaps(); }
   const t = ev.target;
   if (t.dataset?.sel) { t.checked ? S.sel.add(t.dataset.sel) : S.sel.delete(t.dataset.sel); render(); }
+  if (t.dataset?.amzasin) { t.checked ? L.asinOn.add(t.dataset.amzasin) : L.asinOn.delete(t.dataset.amzasin); return renderLibrary(); }
   if (t.dataset?.lsel) { if (!t.checked) L.selAll = false; t.checked ? L.sel.add(t.dataset.lsel) : L.sel.delete(t.dataset.lsel); return renderLibrary(); }
   if (t.dataset?.lselall) { L.selAll = t.checked; libVisible().forEach((r) => t.checked ? L.sel.add(r.id) : L.sel.delete(r.id)); return renderLibrary(); }
   if (t.dataset?.selall) { const ids = [...document.querySelectorAll("[data-sel]")].map((x) => x.dataset.sel); ids.forEach((id) => t.checked ? S.sel.add(id) : S.sel.delete(id)); render(); } });

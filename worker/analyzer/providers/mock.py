@@ -1,6 +1,7 @@
 """Mock 实现：确定性假数据，不访问网络。结构与真实 provider 一致，便于前端演示。"""
 import hashlib
 import html
+from ..amazon_keywords import build as build_keywords
 from .base import EtsyProvider, AmazonProvider, LLMProvider, ScreenshotProvider
 from ..models import EtsyProduct, ProductAnalysis, AmazonItem, Review, SearchPage
 from ..scoring import estimate_monthly_sales_from_bsr
@@ -78,7 +79,7 @@ class MockLLM(LLMProvider):
         return ProductAnalysis(product_summary=f"[mock] {p.title}", category="Home & Kitchen > Seasonal Decor",
                                target_audience=audience, keywords=kws,
                                keyword_reasoning="mock：直接取 Etsy tags 前 3 个作为亚马逊搜索词",
-                               audience_evidence=ev)
+                               audience_evidence=ev, keyword_items=build_keywords([{"keyword": k, "direction": 1 if i == 0 else 2, "source": "title", "basis": "mock：Etsy tags"} for i, k in enumerate(kws)], p.title, fallback=kws))
 
 
 COLORS = {"identical": "#c0392b", "similar": "#d68910", "search_result": "#2471a3"}
