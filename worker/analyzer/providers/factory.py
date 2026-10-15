@@ -25,8 +25,14 @@ def build_providers(cfg, cache=None):
         amazon = MockAmazon()
     if cfg.llm_provider in ("openai_compat", "deepseek"):
         from .llm_openai import OpenAICompatLLM
+        import os
+        from .doubao_vision import from_env
+        try:
+            vision = from_env(os.environ)
+        except Exception:  # noqa: BLE001
+            vision = None
         llm = OpenAICompatLLM(cfg.llm_base_url, cfg.llm_api_key, cfg.llm_model, cache=cache,
-                              ttl=getattr(cfg, "llm_cache_ttl", 86400))
+                              ttl=getattr(cfg, "llm_cache_ttl", 86400), vision=vision)
     else:
         llm = MockLLM()
     return etsy, amazon, llm

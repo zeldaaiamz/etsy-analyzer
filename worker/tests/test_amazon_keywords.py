@@ -13,41 +13,48 @@ def srcs(items):
     return [i["source"] for i in items]
 
 
-def test_build_dedupes_caps_and_keeps_one_original_title():
-    raw = [{"keyword": "Church Note", "source": "title", "basis": "标题 Church Notes"},
-           {"keyword": "church notes", "source": "title"},          # 复数重复
-           {"keyword": "note church", "source": "review"},          # 词序重复
-           {"keyword": "sermon notebook", "source": "original-title"},
-           {"keyword": "notes journal", "source": "original-title"},  # 第二个 original-title 丢弃
-           {"keyword": "bible study journal", "source": "review"},
-           {"keyword": "prayer journal", "source": "image"},
-           {"keyword": "christian journal", "source": "title"},
-           {"keyword": "faith gift", "source": "title"}]
+def dirs(items):
+    return [i["direction"] for i in items]
+
+
+def test_build_d1_first_one_per_direction_dedup_cap():
+    raw = [{"keyword": "church notes", "direction": 2, "source": "title", "basis": "同场景"},
+           {"keyword": "Sermon Notes Journal for Women", "direction": 1, "source": "title"},
+           {"keyword": "sermon notebook", "direction": 1},                 # 第二个 D1 → 只保留第一个
+           {"keyword": "church note", "direction": 2},                     # 单复数重复
+           {"keyword": "christian gift", "direction": 4},
+           {"keyword": "bible study journal", "direction": 2},
+           {"keyword": "church supplies for women", "direction": 5, "source": "image"},
+           {"keyword": "faith gift", "direction": 4}]
     out = akw.build(raw, TITLE)
-    assert len(out) == 5
-    assert srcs(out).count("original-title") == 1 and out[-1]["keyword"] == "sermon notebook"
+    assert len(out) == 5 and dirs(out) == [1, 2, 4, 5, 2]
+    assert out[0]["keyword"] == "sermon notes journal for women" and dirs(out).count(1) == 1
     keys = [akw.dedup_key(i["keyword"]) for i in out]
     assert len(keys) == len(set(keys))
-    assert out[0] == {"keyword": "church note", "source": "title", "basis": "标题 Church Notes"}
+    assert "original-title" not in srcs(out)
 
 
-def test_original_title_must_be_verbatim_else_fallback():
-    out = akw.build([{"keyword": "praise book", "source": "original-title"}], TITLE)
-    o = [i for i in out if i["source"] == "original-title"]
-    assert len(o) == 1 and f" {o[0]['keyword']} " in f" {akw.norm(TITLE)} "
+def test_d3_slogan_must_be_verbatim_in_title_or_image_text():
+    raw = [{"keyword": "retro phone camera magnet", "direction": 1, "source": "image"},
+           {"keyword": "record your life", "direction": 3, "source": "image"},
+           {"keyword": "made up slogan", "direction": 3, "source": "image"}]
+    out = akw.build(raw, "Retro Camera Magnet", image_text=["Record your life!"])
+    assert [(i["keyword"], i["direction"]) for i in out] == [("retro phone camera magnet", 1), ("record your life", 3)]
+    assert [i["keyword"] for i in akw.build(raw, "Retro Camera Magnet")] == ["retro phone camera magnet"]
 
 
-def test_invalid_sources_and_manual_from_llm():
-    out = akw.build([{"keyword": "x y", "source": "made-up"}, {"keyword": "summer note", "source": "manual"},
-                     "plain string kw", 42, {"keyword": "", "source": "title"}], "Summer Notebook")
-    assert {"keyword": "summer note", "source": "title", "basis": ""} in out  # LLM 不能产出 manual
-    assert all(i["source"] in akw.SOURCES and i["source"] != "manual" for i in out)
-    assert "x y" not in [i["keyword"] for i in out] and "plain string kw" in [i["keyword"] for i in out]
+def test_invalid_direction_source_and_manual_from_llm():
+    out = akw.build([{"keyword": "x y", "direction": 1, "source": "made-up"}, {"keyword": "no dir", "source": "title"},
+                     {"keyword": "summer note", "direction": "D1", "source": "manual"},
+                     {"keyword": "old phrase", "direction": 2, "source": "original-title"}, 42], "Summer Notebook")
+    assert [(i["keyword"], i["direction"], i["source"]) for i in out] == [("summer note", 1, "title"), ("old phrase", 2, "title")]
 
 
-def test_fallback_old_keywords_and_original_dedup():
-    out = akw.build(None, "Reusable Sticker Book", fallback=["reusable sticker book", "cat stickers", "Cat Sticker"])
-    assert [(i["keyword"], i["source"]) for i in out] == [("cat stickers", "title"), ("reusable sticker book", "original-title")]
+def test_missing_d1_falls_back():
+    out = akw.build([{"keyword": "cat stickers", "direction": 2}], "Reusable Sticker Book", fallback=["reusable cat sticker book"])
+    assert out[0] == {"keyword": "reusable cat sticker book", "direction": 1, "source": "title",
+                      "basis": "兜底：旧分析搜索词 / 原标题核心短语"}
+    assert akw.build(None, "Reusable Sticker Book")[0]["keyword"] == "reusable sticker book"
 
 
 @pytest.mark.parametrize("title,phrase", [
@@ -86,23 +93,28 @@ def _llm(resp):
 
 def test_llm_analysis_parses_amazon_keywords():
     l, seen = _llm({"product_summary": "s", "category": "c", "target_audience": "t", "keywords": ["church note"],
-                    "amazon_keywords": [{"keyword": "church note", "source": "title", "basis": "标题"},
-                                        {"keyword": "sermon notebook", "source": "original-title"}]})
+                    "amazon_keywords": [{"keyword": "sermon notes journal", "direction": 1, "source": "title", "basis": "标题"},
+                                        {"keyword": "christian gift", "direction": 4, "source": "title"}]})
     an = l.analyze_product(EtsyProduct(1, TITLE), [])
-    assert "amazon_keywords" in seen["sys"] and "original-title" in seen["sys"]
-    assert "image_description" not in seen["user"]  # 无图片描述时不传
-    assert srcs(an.keyword_items) == ["title", "original-title"]
+    assert "D1 精准词" in seen["sys"] and "D5 细分场景词" in seen["sys"]
+    assert "image_description" not in seen["user"]  # 无图片信息时不传
+    assert dirs(an.keyword_items) == [1, 4]
 
 
-def test_llm_uses_existing_image_description_and_old_response_fallback():
+def test_llm_existing_image_description_and_old_response_fallback():
     l, seen = _llm({"keywords": ["mtg tokens", "game tokens"]})  # 旧格式：无 amazon_keywords
     an = l.analyze_product(EtsyProduct(2, "MTG Token Set", raw={"ehunt": {"image_description": "a stack of cards"}}), [])
     assert seen["user"]["image_description"] == "a stack of cards"
-    # 原标题短语 "mtg token" 与 "mtg tokens" 近似重复 → 只保留 original-title 那条
-    assert [(i["keyword"], i["source"]) for i in an.keyword_items] == [("game tokens", "title"), ("mtg token", "original-title")]
-    assert srcs(an.keyword_items).count("original-title") == 1
+    assert [(i["keyword"], i["direction"]) for i in an.keyword_items] == [("mtg tokens", 1)]
 
 
 def test_mock_llm_has_keyword_items():
     an = MockLLM().analyze_product(EtsyProduct(3, "Summer Note Book", tags=["summer note"]), [])
     assert an.keyword_items and len(an.keyword_items) <= 5
+
+
+def test_d3_brand_logo_dropped():
+    out = akw.build([{"keyword": "retro camera sign magnet", "direction": 1},
+                     {"keyword": "kodak polaroid fujifilm", "direction": 3, "source": "image"}],
+                    "Retro Camera Sign Magnet", image_text=["Kodak", "Polaroid", "FUJIFILM"])
+    assert [i["direction"] for i in out] == [1]

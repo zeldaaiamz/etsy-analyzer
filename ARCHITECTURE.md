@@ -163,3 +163,5 @@ stateDiagram-v2
 - 编辑：RPC `update_library_keywords(p_item, p_keywords)`，新增词强制 manual。`library_page` 多返回 `amazon_keywords`、`competitor_asin`（关联任务里相似度最高的同款 ASIN）。
 - 前端 `web/js/amzsearch.js`：仅 candidate/active 显示按钮；点击时同步 `window.open` 每词一个 `amazon.com/s?k=`，返回 null 计为被拦截并提示；竞品 ASIN 勾选默认关。测试 `node --test web/tests/`。
 - 回填：`tools/backfill_amazon_keywords.py [--dry-run] [--rebuild]`。
+- 五个方向（021）：每个词带 `direction` 1-5（D1 精准词 必有且唯一 / D2 同场景相似品 / D3 产品文案（必须逐字出现在标题或豆包读出的 text_on_product 里，品牌词丢弃）/ D4 人群礼物词 / D5 细分场景词）。`build()` 输出 D1 → 每方向 1 个 → 同方向补满 ≤5。旧的 original-title 槽位取消。
+- 豆包视觉（`providers/doubao_vision.py`）：Ark `https://ark.cn-beijing.volces.com/api/v3/chat/completions`，模型 `DOUBAO_VISION_MODEL`（默认 doubao-seed-2-1-turbo-260628，本账号唯一已开通的；vision-pro / seed-1-6-vision 不可用）。`DOUBAO_VISION_ENABLED=1` + `ARK_API_KEY` 才启用；`DOUBAO_VISION_MODE=always`（默认，读 D3 文案）| `unclear`（仅标题不清楚时）。主图取 EHunt 已有 image_url。任何失败 → None，回退仅标题，不影响分析。约 1.5k tokens/张，约 ¥0.006/产品。

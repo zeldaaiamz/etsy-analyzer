@@ -465,3 +465,8 @@ a{color:var(--primary);text-decoration:none}a:hover{text-decoration:underline}
 .akw-row{display:flex;gap:4px;align-items:center}.akw-in{flex:1;min-width:0;height:26px;font-size:12px;padding:2px 6px}
 .amz-edit .row{display:flex;flex-wrap:wrap;gap:4px;margin-top:2px}.amz-edit .row .spacer{display:none}.amz-edit .row .btn{flex:1 1 30%;min-width:0;padding-left:4px;padding-right:4px}
 .amz-edit,.amz{min-width:0;max-width:100%}.akw-row .btn{flex:0 0 auto;padding:0 4px}
+.akw-d{font-weight:600;font-size:10px;padding:0 4px;border-radius:6px;color:#fff;white-space:nowrap}
+.akw-d.d1{background:#c0392b}.akw-d.d2{background:#2471a3}.akw-d.d3{background:#8e44ad}.akw-d.d4{background:#d68910}.akw-d.d5{background:#16a085}
+.akw-dir{height:26px;font-size:11px;max-width:74px;flex:0 0 auto}
+.akws .akw{flex-wrap:wrap}
+.amz-edit .akw-row{flex-wrap:wrap;row-gap:2px;padding-bottom:3px;border-bottom:1px dotted #e3e3e3}.amz-edit .akw-row .akw-in{order:3;flex:1 1 100%}.amz-edit .akw-dir{max-width:none;flex:1 1 auto}

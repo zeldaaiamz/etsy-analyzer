@@ -251,7 +251,7 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
         trace.append({"step": "keywords", "title": "生成搜索词",
                       "input": {"标签": prod.tags, "人群": an.target_audience},
                       "output": {"搜索词": an.keywords[:3],
-                                 "一键亚马逊搜索词": [f"{k['keyword']}（{k['source']}）" for k in an.keyword_items]},
+                                 "一键亚马逊搜索词": [f"D{k.get('direction', '?')} {k['keyword']}（{k['source']}）" for k in an.keyword_items]},
                       "reasoning": an.keyword_reasoning or "取最能代表产品的英文词组"})
 
         step("search_amazon")

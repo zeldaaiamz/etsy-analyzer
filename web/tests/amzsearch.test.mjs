@@ -33,3 +33,12 @@ test("edit: keep sources, new = manual, dedupe, max 5", () => {
   assert.deepEqual(out.map((k) => [k.keyword, k.source]), [["church note", "title"], ["summer note", "manual"]]);
   assert.throws(() => applyEdit([], Array.from({ length: MAX_KW + 1 }, (_, i) => `k${i}`)));
 });
+test("direction label shown; edit keeps/sets direction", async () => {
+  const { DIR_NAME } = await import("../js/amzsearch.js");
+  const r = { ...R, amazon_keywords: [{ keyword: "retro phone camera magnet", source: "image", direction: 1 }, { keyword: "record your life", source: "image", direction: 3 }] };
+  const html = amzBlock(r, { esc });
+  assert.match(html, /D1 精准词/); assert.match(html, /D3 产品文案\/卖点词/); assert.equal(Object.keys(DIR_NAME).length, 5);
+  assert.match(amzBlock(r, { esc, editing: true }), /<option value="1" selected>D1 精准词/);
+  const out = applyEdit(r.amazon_keywords, [{ keyword: "retro phone camera magnet", direction: "1" }, { keyword: "church supplies for women", direction: "5" }, { keyword: "no dir", direction: "" }]);
+  assert.deepEqual(out.map((k) => [k.keyword, k.source, k.direction]), [["retro phone camera magnet", "image", 1], ["church supplies for women", "manual", 5], ["no dir", "manual", undefined]]);
+});

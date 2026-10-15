@@ -1,6 +1,6 @@
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
 import { computeVelocity, computeManualVelocity, cmpVelocity, velocityBadge, loadReviewDates, demoReviewDates, loadScrapeInfo } from "./velocity.js";
-import { amzBlock, amzUrls, openAll, applyEdit, kwList, MAX_KW } from "./amzsearch.js";
+import { amzBlock, amzUrls, openAll, applyEdit, kwList, MAX_KW, DIR_SELECT_HTML } from "./amzsearch.js";
 import { createScreen } from "./screen.js?v=f838aed4";
 
 // ?demo=1：纯前端示例数据，不登录、不连 Supabase，仅用于预览界面（&offline=1 / &quota=1 预览横幅）
@@ -787,12 +787,12 @@ const syncKwAdd = () => document.querySelectorAll(".amz-edit").forEach((b) => { 
 function addKwRow(btn) {
   const box = btn.closest(".amz-edit"); if (box.querySelectorAll("[data-akwin]").length >= MAX_KW) return;
   const row = document.createElement("div"); row.className = "akw-row";
-  row.innerHTML = '<input class="input akw-in" maxlength="80" placeholder="例如 church note" data-akwin><em class="akw-s s-manual">手动</em><button class="btn btn-link btn-sm" data-akwdel title="删除">✕</button>';
+  row.innerHTML = DIR_SELECT_HTML + '<input class="input akw-in" maxlength="80" placeholder="例如 church note" data-akwin><em class="akw-s s-manual">手动</em><button class="btn btn-link btn-sm" data-akwdel title="删除">✕</button>';
   btn.closest(".row").before(row); row.querySelector("input").focus(); syncKwAdd();
 }
 async function saveKeywords(id) {
   const r = libById(id), box = document.querySelector(`[data-amzbox="${CSS.escape(id)}"]`); if (!r || !box) return;
-  let next; try { next = applyEdit(kwList(r), [...box.querySelectorAll("[data-akwin]")].map((x) => x.value)); } catch (e) { return toast(e.message, "bad"); }
+  let next; try { next = applyEdit(kwList(r), [...box.querySelectorAll(".akw-row")].map((row) => ({ keyword: row.querySelector("[data-akwin]").value, direction: row.querySelector("[data-akwdir]")?.value }))); } catch (e) { return toast(e.message, "bad"); }
   if (!DEMO) { const { data, error } = await sb.rpc("update_library_keywords", { p_item: id, p_keywords: next });
     if (error) return toast(`保存失败：${error.message}`, "bad"); next = data; }
   r.amazon_keywords = next; L.kwEdit = null; renderLibrary(); toast(`已保存 ${next.length} 个搜索词`, "ok");
