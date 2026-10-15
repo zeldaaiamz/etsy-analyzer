@@ -114,8 +114,8 @@ async function boot() {
       if (QS.has("q")) { F.q = QS.get("q"); $("q").value = F.q; }
       const { libraryFixtures } = await import("./demo-library.js");
       let libItems = libraryFixtures(fx);
-      if (QS.has("fixture")) { try { // 本地预览：真实产品库快照（web/preview-fixture.json，不入 git）+ 一个无关键词的演示条目
-        const real = await (await fetch(`./${QS.get("fixture") || "preview-fixture"}.json`)).json();
+      if (QS.has("fixture") && /^(localhost|127\.0\.0\.1)$/.test(location.hostname)) { try { // 仅本机预览：产品库快照（web/preview-fixture.json，不入 git）；线上不可用
+        const real = await (await fetch("./preview-fixture.json")).json();
         libItems = [...real, ...libItems.filter((r) => !(r.amazon_keywords || []).length)]; } catch { /* 无快照文件时用演示数据 */ } }
       S.lib = new Map(libItems.map((r) => [Number(r.etsy_listing_id), r]));
       [...S.lib.keys()].forEach((id) => L.scr.set(id, [1488800014, 1488800016].includes(id) ? "failed" : id === 1488800015 ? "pending" : "ok")); // 演示：两个抓取失败，其中一个已手动填写
