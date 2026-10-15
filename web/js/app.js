@@ -626,7 +626,7 @@ const STAGE_NAME = Object.fromEntries(STAGES.map(([k, n]) => [k, n]));
 const REASONS = [["roi_low", "ROI 太低"], ["cost_high", "成本太高"], ["ip_risk", "侵权风险"], ["competition", "竞争太激烈"], ["demand_low", "市场需求太小"],
   ["seasonal", "季节性太强"], ["logistics", "物流难做（易碎/超大/超重）"], ["compliance", "认证合规问题"], ["supply", "供应链难找"], ["other", "其他"]];
 const REASON_NAME = Object.fromEntries(REASONS);
-const L = { stage: "all", q: "", reason: null, sel: new Set(), items: [], total: 0, counts: null, reasons: {}, limit: LPAGE, loaded: false, loading: false };
+const L = { stage: "all", q: "", reason: null, sel: new Set(), items: [], total: 0, counts: null, reasons: {}, limit: LPAGE, loaded: false, loading: false, selAll: false };
 const stageOf = (r) => r.stage || "candidate";
 const libById = (id) => (DEMO ? [...S.lib.values()] : L.items).find((x) => x.id === id);
 const libMatch = (r, q) => !q || [r.title, r.etsy_listing_id, r.product_summary, r.target_audience, r.shop_name, r.stage_note, ...(r.keywords || [])]
@@ -712,6 +712,49 @@ async function reanalyze(r) {
   S.libPending.add(lid); renderLibrary();
   toast("已提交重新分析，完成后自动关联到产品库（任务列表中不显示）", "ok", null, 4000);
 }
+// ---------- 产品库：导出（TXT 链接 / CSV 表格）----------
+// “全选”后若服务端还有未加载的条目（分页 / 加载更多），导出时通过 library_page 按当前筛选分页拉取全部
+const libSelAllRemote = () => !DEMO && L.selAll && L.total > L.items.length;
+const libExportN = () => (libSelAllRemote() ? L.total : L.sel.size);
+const libExportMenu = () => `<details class="xmenu"><summary class="btn btn-ghost btn-sm" title="导出选中的产品">⇩ 导出 (${libExportN()})</summary>
+  <div class="xmenu-pop"><button class="xmenu-i" data-lexp="txt"><b>TXT</b><span>每行一个 Etsy 链接</span></button>
+  <button class="xmenu-i" data-lexp="csv"><b>表格 CSV</b><span>Excel 可直接打开（UTF-8）</span></button></div></details>`;
+const libUrl = (r) => r.etsy_url || `https://www.etsy.com/listing/${r.etsy_listing_id}`;
+async function libExportItems() {
+  if (libSelAllRemote()) {
+    const out = [], P = 500;
+    for (let off = 0; off < L.total + P; off += P) {
+      const { data, error } = await sb.rpc("library_page", { p_stage: L.stage, p_q: L.q.trim() || null, p_reason: L.stage === "rejected" ? L.reason : null, p_limit: P, p_offset: off });
+      if (error || !data) throw new Error(error?.message || "加载失败");
+      out.push(...(data.items || [])); if ((data.items || []).length < P) break;
+    }
+    return out;
+  }
+  const order = new Map(libVisible().map((r, i) => [r.id, i]));
+  return [...L.sel].map(libById).filter(Boolean).sort((a, b) => (order.get(a.id) ?? 1e9) - (order.get(b.id) ?? 1e9));
+}
+const pad2 = (n) => String(n).padStart(2, "0");
+const fmtDT = (v) => { const d = new Date(v); return isNaN(d) ? "" : `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`; };
+function saveBlob(name, blob) {
+  const a = document.createElement("a"); a.href = URL.createObjectURL(blob); a.download = name;
+  document.body.appendChild(a); a.click(); a.remove(); setTimeout(() => URL.revokeObjectURL(a.href), 4000);
+}
+async function libExport(kind) {
+  document.querySelectorAll(".xmenu[open]").forEach((d) => d.removeAttribute("open"));
+  let items;
+  try { if (libSelAllRemote()) toast(`正在获取全部 ${L.total} 个产品…`, "", null, 1500); items = await libExportItems(); }
+  catch (e) { return toast(`导出失败：${e.message}`, "bad"); }
+  if (!items.length) return toast("没有可导出的产品", "bad");
+  const d = new Date(), base = `产品库_${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}_${pad2(d.getHours())}${pad2(d.getMinutes())}`;
+  if (kind === "txt") saveBlob(`${base}.txt`, new Blob([items.map(libUrl).join("\r\n") + "\r\n"], { type: "text/plain;charset=utf-8" }));
+  else {
+    const header = ["Etsy 链接", "标题", "价格", "阶段", "不考虑原因", "关键词", "同款数", "类似数", "加入日期", "备注"];
+    const rows = items.map((r) => [libUrl(r), r.title, r.price != null ? Number(r.price).toFixed(2) : "", STAGE_NAME[stageOf(r)],
+      (r.reject_reasons || []).map((k) => REASON_NAME[k] || k).join("、"), (r.keywords || []).join(", "), r.identical_count ?? "", r.similar_count ?? "", fmtDT(r.added_at), r.stage_note || ""]);
+    saveBlob(`${base}.csv`, new Blob(["\ufeff" + [header, ...rows].map((x) => x.map(csvCell).join(",")).join("\r\n") + "\r\n"], { type: "text/csv;charset=utf-8" }));
+  }
+  toast(`已导出 ${items.length} 个产品`, "ok");
+}
 // H2：产品库只在打开产品库页时加载；服务端按阶段/搜索/原因分页（library_page，015），只取卡片需要的列
 let libSeq = 0, libQT = null;
 async function loadLibrary(more = false) {
@@ -726,7 +769,7 @@ async function loadLibrary(more = false) {
   S.libPending = new Set((data.pending || []).map(Number));
   renderLibrary();
 }
-const libReload = () => { L.limit = LPAGE; L.sel.clear(); return loadLibrary(); };
+const libReload = () => { L.limit = LPAGE; L.sel.clear(); L.selAll = false; return loadLibrary(); };
 function renderLibrary() {
   const all = [...S.lib.values()], cnt = !DEMO && L.counts ? L.counts : Object.fromEntries(STAGES.map(([k]) => [k, all.filter((r) => stageOf(r) === k).length]));
   const ready = libReady(), totalAll = !DEMO && L.counts ? L.counts.all || 0 : all.length, known = ready ? totalAll : (DEMO ? readLibCount() : S.libCount);
@@ -741,7 +784,7 @@ function renderLibrary() {
     ${n ? `<span class="bulk-n">已选 <b>${n}</b></span><span class="spacer"></span>${L.stage === "all" ? libAllBulk() : L.stage === "candidate"
       ? `<button class="btn btn-primary btn-sm" data-lbulk="active">▶ 进行中 (${n})</button><button class="btn btn-danger-ghost btn-sm" data-lbulk="rejected">✕ 不考虑 (${n})</button>`
       : `<button class="btn btn-ghost btn-sm" data-lbulk="candidate">↩ 移回备选 (${n})</button>`}
-      <button class="btn btn-ghost btn-sm" data-lbulk="remove">移出产品库</button><button class="btn btn-ghost btn-sm" data-lbulk="clear">取消选择</button>`
+      ${libExportMenu()}<button class="btn btn-ghost btn-sm" data-lbulk="remove">移出产品库</button><button class="btn btn-ghost btn-sm" data-lbulk="clear">取消选择</button>`
       : `<span class="hint">勾选卡片可批量${L.stage === "candidate" ? "移到进行中 / 不考虑" : L.stage === "all" ? "移动阶段 / 移出" : "移回备选"}</span>`}</div>` : "";
   $("libBar").innerHTML = bar;
   const libMore = !DEMO && L.total > vis.length ? `<button class="btn btn-ghost load-more lib-more" data-lmore="1">加载更多（已显示 ${vis.length} / ${L.total}）</button>` : "";
@@ -1022,15 +1065,17 @@ function closeDrawer() {
   $("drawer").classList.remove("open"); $("drawer").setAttribute("aria-hidden", "true"); $("drawerMask").classList.add("hidden"); drawerState = null; }
 
 document.addEventListener("click", (ev) => {
-  const t = ev.target.closest("[data-zoom],[data-detail],[data-tab],[data-cat],[data-act],[data-clear],[data-copy],[data-copyall],[data-export],[data-more],[data-dupe],[data-view],[data-bulk],[data-unlib],[data-lstage],[data-lmove],[data-lreason],[data-lbulk],[data-libgo],[data-reana],[data-lmore]") || ev.target;
+  const t = ev.target.closest("[data-zoom],[data-detail],[data-tab],[data-cat],[data-act],[data-clear],[data-copy],[data-copyall],[data-export],[data-more],[data-dupe],[data-view],[data-bulk],[data-unlib],[data-lstage],[data-lmove],[data-lreason],[data-lbulk],[data-libgo],[data-reana],[data-lmore],[data-lexp]") || ev.target;
   if (t.dataset?.bulk) { if (t.dataset.bulk === "clear") { S.sel.clear(); return render(); } return bulk(t.dataset.bulk); }
   if (t.dataset?.unlib) { const r = [...S.lib.values()].find((x) => x.id === t.dataset.unlib); return r && removeLibItems([r]); }
-  if (t.dataset?.lstage) { L.stage = t.dataset.lstage; L.reason = null; L.sel.clear(); if (!DEMO) { L.items = []; L.loaded = false; renderLibrary(); return libReload(); } return renderLibrary(); }
+  if (t.dataset?.lstage) { L.stage = t.dataset.lstage; L.reason = null; L.sel.clear(); L.selAll = false; if (!DEMO) { L.items = []; L.loaded = false; renderLibrary(); return libReload(); } return renderLibrary(); }
   if (t.dataset?.lreason) { L.reason = t.dataset.lreason === "all" || L.reason === t.dataset.lreason ? null : t.dataset.lreason; return DEMO ? renderLibrary() : libReload(); }
+  if (t.dataset?.lexp) return libExport(t.dataset.lexp);
+  if (!t.closest?.(".xmenu")) document.querySelectorAll(".xmenu[open]").forEach((d) => d.removeAttribute("open"));
   if (t.dataset?.lmore) { L.limit += LPAGE; t.disabled = true; t.textContent = "加载中…"; return loadLibrary(true); }
   if (t.dataset?.reana) { const r = libById(t.dataset.reana); return r && reanalyze(r); }
   if (t.dataset?.lmove) return moveStage([t.dataset.id], t.dataset.lmove);
-  if (t.dataset?.lbulk) { if (t.dataset.lbulk === "clear") { L.sel.clear(); return renderLibrary(); }
+  if (t.dataset?.lbulk) { if (t.dataset.lbulk === "clear") { L.sel.clear(); L.selAll = false; return renderLibrary(); }
     if (t.dataset.lbulk === "remove") return removeLibItems([...L.sel].map(libById).filter(Boolean), true);
     return moveStage([...L.sel], t.dataset.lbulk); }
   if (t.dataset?.libgo) { L.stage = t.dataset.libgo; L.sel.clear(); L.loaded = false; if (location.hash.startsWith("#/library")) DEMO ? renderLibrary() : libReload(); return; }
@@ -1065,8 +1110,8 @@ $("q").addEventListener("input", () => { F.q = $("q").value; render(); });
 document.addEventListener("change", (ev) => { if (ev.target.id === "sortSel") { sortKey = ev.target.value; renderSnaps(); }
   const t = ev.target;
   if (t.dataset?.sel) { t.checked ? S.sel.add(t.dataset.sel) : S.sel.delete(t.dataset.sel); render(); }
-  if (t.dataset?.lsel) { t.checked ? L.sel.add(t.dataset.lsel) : L.sel.delete(t.dataset.lsel); return renderLibrary(); }
-  if (t.dataset?.lselall) { libVisible().forEach((r) => t.checked ? L.sel.add(r.id) : L.sel.delete(r.id)); return renderLibrary(); }
+  if (t.dataset?.lsel) { if (!t.checked) L.selAll = false; t.checked ? L.sel.add(t.dataset.lsel) : L.sel.delete(t.dataset.lsel); return renderLibrary(); }
+  if (t.dataset?.lselall) { L.selAll = t.checked; libVisible().forEach((r) => t.checked ? L.sel.add(r.id) : L.sel.delete(r.id)); return renderLibrary(); }
   if (t.dataset?.selall) { const ids = [...document.querySelectorAll("[data-sel]")].map((x) => x.dataset.sel); ids.forEach((id) => t.checked ? S.sel.add(id) : S.sel.delete(id)); render(); } });
 $("libQ").addEventListener("input", () => { L.q = $("libQ").value; if (DEMO) return renderLibrary(); clearTimeout(libQT); libQT = setTimeout(libReload, 300); });
 $("qClear").onclick = () => { F.q = ""; $("q").value = ""; render(); $("q").focus(); };

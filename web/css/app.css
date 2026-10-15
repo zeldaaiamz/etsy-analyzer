@@ -422,3 +422,13 @@ a{color:var(--primary);text-decoration:none}a:hover{text-decoration:underline}
 .nbadge.nb-stale{opacity:.8}
 @keyframes nbp{50%{opacity:.25}}
 .lib-sk{padding:var(--s3)}
+/* 产品库导出菜单 */
+.xmenu{position:relative;display:inline-block}
+.xmenu>summary{list-style:none;cursor:pointer}
+.xmenu>summary::-webkit-details-marker{display:none}
+.xmenu[open]>summary{border-color:var(--primary)}
+.xmenu-pop{position:absolute;top:calc(100% + 6px);left:0;z-index:30;min-width:220px;padding:6px;border:1px solid var(--border);border-radius:var(--r);background:var(--surface);box-shadow:0 8px 24px rgba(0,0,0,.35);display:flex;flex-direction:column;gap:2px}
+.xmenu-i{display:flex;flex-direction:column;align-items:flex-start;gap:2px;width:100%;padding:8px 10px;border:0;border-radius:6px;background:none;color:var(--text);font:inherit;text-align:left;cursor:pointer}
+.xmenu-i:hover,.xmenu-i:focus-visible{background:var(--primary-soft)}
+.xmenu-i span{font-size:12px;color:var(--text-2)}
+@media (max-width:640px){.xmenu-pop{position:fixed;left:12px;right:12px;top:auto;bottom:12px;min-width:0}.xmenu-i{padding:12px}}
