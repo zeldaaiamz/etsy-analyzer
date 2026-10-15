@@ -8,6 +8,7 @@ from .base import LLMProvider
 from ..models import ProductAnalysis
 from ..audience import infer_audience
 from ..http import request_json
+from .. import amazon_keywords as akw
 
 BATCH = 40
 
@@ -25,11 +26,13 @@ REDUCE_PROMPT = """你是亚马逊美国站选品专家。输入为 Etsy 商品�
  "audience_confidence": "high | medium | low",
  "audience_reasoning": "中文：依据什么得出人群；若无评论文本，必须明确写“无评论原文，仅依据标题/标签/描述推断”",
  "keywords": ["3-5 个英文亚马逊搜索词，2-5 个单词，美国买家真实会搜的通用说法，不含品牌/店铺名/Etsy 专用词如 handmade custom listing，从最精确到较宽泛排序"],
- "keyword_reasoning": "中文：为什么选这些搜索词"}
+ "keyword_reasoning": "中文：为什么选这些搜索词",
+ """ + akw.PROMPT_FIELD + """}
 规则：
 - 除 keywords 和 category 用英文外，其它字段一律用中文。
 - audience_signals 为空或 review_count=0 时：audience_basis=listing_text，audience_confidence 只能是 low 或 medium，不得声称“买家评论显示”。
-- 不要编造评论内容或销量数据。"""
+- 不要编造评论内容或销量数据。
+""" + akw.PROMPT_RULES
 
 
 MATCH_PROMPT = """判断每个亚马逊候选商品与 Etsy 商品的关系。严格只输出 JSON：
@@ -43,6 +46,17 @@ log = logging.getLogger(__name__)
 
 def _h(*parts):
     return hashlib.sha256("\x1f".join(str(x) for x in parts).encode()).hexdigest()[:16]
+
+
+def image_description(p):
+    """DeepSeek 无法看图：只使用流水线里已有的图片描述（目前 EHunt/Etsy 数据都不含，返回空）。"""
+    raw = p.raw or {}
+    for k in ("image_description", "image_analysis", "image_caption"):
+        eh = raw.get("ehunt") if isinstance(raw.get("ehunt"), dict) else {}
+        v = raw.get(k) or eh.get(k)
+        if isinstance(v, str) and v.strip():
+            return v.strip()[:1000]
+    return ""
 
 
 class OpenAICompatLLM(LLMProvider):
@@ -99,7 +113,11 @@ class OpenAICompatLLM(LLMProvider):
                                    "source": b[k].source})
         signals = sorted(merged.values(), key=lambda s: -s["count"])
         info = {"title": p.title, "description": p.description[:2000], "tags": p.tags, "materials": p.materials,
-                "price": p.price, "review_count": len(reviews), "audience_signals": signals}
+                "price": p.price, "review_count": len(reviews), "audience_signals": signals,
+                "review_phrases": [r.text[:160] for r in reviews[:15]]}
+        img = image_description(p)
+        if img:
+            info["image_description"] = img
         j = self._chat(REDUCE_PROMPT, info)  # reduce
         _, ev = infer_audience(p, reviews)  # 评论数量/来源统计用确定性代码，避免 LLM 编造
         ev.update(method=(f"LLM({self.model}) 分 {len(batches)} 批（每批≤{BATCH} 条）阅读全部 {len(reviews)} 条评论，"
@@ -116,7 +134,8 @@ class OpenAICompatLLM(LLMProvider):
                 ev["method"] += f"（置信度 {conf}）：" + j["audience_reasoning"]
         kws = [k.strip() for k in j.get("keywords", []) if isinstance(k, str) and k.strip()]
         return ProductAnalysis(j.get("product_summary", ""), j.get("category", ""), j.get("target_audience", ""),
-                               kws[:5], j.get("keyword_reasoning", ""), ev)
+                               kws[:5], j.get("keyword_reasoning", ""), ev,
+                               akw.build(j.get("amazon_keywords"), p.title, fallback=kws))
 
     def rank_similarity(self, p, items):
         """一次调用批量判断所有候选：同款/类似品/无关 + 理由。失败时回退到标题词重叠。"""

@@ -26,6 +26,7 @@ class ProductAnalysis:
     keywords: list
     keyword_reasoning: str = ""
     audience_evidence: dict = field(default_factory=dict)
+    keyword_items: list = field(default_factory=list)  # PM-001：[{keyword, source, basis}]
 
 
 @dataclass

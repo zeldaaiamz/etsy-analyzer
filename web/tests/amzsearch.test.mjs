@@ -1,0 +1,35 @@
+// node --test web/tests/  —— PM-001 一键亚马逊搜索
+import test from "node:test";
+import assert from "node:assert/strict";
+import { amzUrls, openAll, applyEdit, canShowAmz, amzBlock, MAX_KW } from "../js/amzsearch.js";
+
+const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+const R = { id: "x", stage: "candidate", competitor_asin: "B0ABCDEF12", amazon_keywords: [
+  { keyword: "church note", source: "title" }, { keyword: "bible & prayer journal", source: "review" }, { keyword: "sermon notebook", source: "original-title" }] };
+const fakeWin = (blockAfter = Infinity) => { const calls = []; return { calls, open(u, t) { calls.push([u, t]); return calls.length > blockAfter ? null : {}; } }; };
+
+test("click opens exactly N tabs with correct US URLs", () => {
+  const w = fakeWin(), blocked = openAll(amzUrls(R), w);
+  assert.equal(blocked, 0);
+  assert.deepEqual(w.calls, [["https://www.amazon.com/s?k=church%20note", "_blank"],
+    ["https://www.amazon.com/s?k=bible%20%26%20prayer%20journal", "_blank"], ["https://www.amazon.com/s?k=sermon%20notebook", "_blank"]]);
+});
+test("ASIN toggle off by default, on adds /dp/ page", () => {
+  assert.equal(amzUrls(R).length, 3);
+  assert.deepEqual(amzUrls(R, true).at(-1), "https://www.amazon.com/dp/B0ABCDEF12");
+  assert.equal(amzUrls({ ...R, competitor_asin: null }, true).length, 3);
+});
+test("blocked pop-ups are counted", () => { assert.equal(openAll(amzUrls(R), fakeWin(1)), 2); });
+test("stage visibility", () => {
+  assert.ok(canShowAmz("candidate") && canShowAmz("active") && !canShowAmz("rejected"));
+  assert.match(amzBlock(R, { esc }), /data-amz="x"/);
+  assert.doesNotMatch(amzBlock({ ...R, stage: "rejected" }, { esc }), /data-amz=/);
+  const none = amzBlock({ ...R, amazon_keywords: [] }, { esc });
+  assert.match(none, /data-amz="x" disabled/); assert.match(none, /title="关键词未生成"/);
+  assert.match(amzBlock(R, { esc }), /data-amzasin="x">/); // 竞品 ASIN 默认不勾选
+});
+test("edit: keep sources, new = manual, dedupe, max 5", () => {
+  const out = applyEdit(R.amazon_keywords, ["Church  Note", "", "summer note", "church note"]);
+  assert.deepEqual(out.map((k) => [k.keyword, k.source]), [["church note", "title"], ["summer note", "manual"]]);
+  assert.throws(() => applyEdit([], Array.from({ length: MAX_KW + 1 }, (_, i) => `k${i}`)));
+});

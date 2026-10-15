@@ -16,9 +16,12 @@ export const libraryFixtures = (fx) => {
   const items = ok.slice(0, 1).map((j, i) => { const p = e.get(j.id) || {}, an = a.get(j.id) || {};
     return { id: `demo-lib-${i}`, job_id: j.id, etsy_listing_id: j.etsy_listing_id || p.listing_id, etsy_url: j.etsy_url, title: p.title, image_url: p.image_url,
       price: p.price, product_summary: an.product_summary, target_audience: an.target_audience, keywords: an.keywords, identical_count: 2 + i, similar_count: 8 - i,
-      stage: i ? "active" : "candidate", reject_reasons: [], stage_note: null, added_at: day(i), stage_changed_at: i ? day(0) : null }; });
+      stage: i ? "active" : "candidate", reject_reasons: [], stage_note: null, added_at: day(i), stage_changed_at: i ? day(0) : null,
+      amazon_keywords: (an.keywords || []).slice(0, 5).map((k) => ({ keyword: k, source: "title", basis: "演示" })) }; });
   EXTRA.forEach(([title, price, keywords, ic, sc, stage, reasons, note, bg, fg, lbl], i) => items.push({ id: `demo-lib-x${i}`, job_id: null, etsy_listing_id: 1488800010 + i,
     etsy_url: `https://www.etsy.com/listing/${1488800010 + i}`, title, image_url: svg(bg, fg, lbl), price, keywords, identical_count: ic, similar_count: sc,
-    stage, reject_reasons: reasons, stage_note: note, added_at: day(i + 1), stage_changed_at: stage === "candidate" ? null : day(i * 0.5) }));
+    stage, reject_reasons: reasons, stage_note: note, added_at: day(i + 1), stage_changed_at: stage === "candidate" ? null : day(i * 0.5),
+    amazon_keywords: i === 1 ? [] : keywords.map((k, n) => ({ keyword: k, source: n === keywords.length - 1 ? "original-title" : n === 1 ? "review" : "title", basis: "演示" })),
+    competitor_asin: i === 0 ? "B0DEMO1234" : null }));
   return items;
 };

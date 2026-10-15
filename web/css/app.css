@@ -445,3 +445,23 @@ a{color:var(--primary);text-decoration:none}a:hover{text-decoration:underline}
 .ok-t{color:#5bd08a}.bad-t{color:#ff7b72}.mand summary{cursor:pointer;font-size:12px;opacity:.8;margin-top:6px}
 .spin{width:12px;height:12px;border:2px solid #888;border-top-color:transparent;border-radius:50%;display:inline-block;animation:sp 1s linear infinite}@keyframes sp{to{transform:rotate(360deg)}}
 .ocr .manf-t{white-space:normal;overflow-wrap:anywhere}.ocr .row{flex-wrap:wrap}.ocr,.manf{min-width:0;max-width:100%}
+/* PM-001 一键亚马逊搜索 */
+.amz{margin-top:4px;display:flex;flex-direction:column;gap:4px}
+.akws{display:flex;flex-wrap:wrap;gap:4px;align-items:center}
+.akw{display:inline-flex;align-items:center;gap:3px;border:1px solid var(--border,#ddd);border-radius:10px;padding:1px 6px;font-size:11.5px;line-height:18px;max-width:100%}
+.akw-k{white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.akw-s{font-style:normal;font-size:10px;padding:0 4px;border-radius:6px;background:#eef1f5;color:#555;white-space:nowrap}
+.akw-s.s-title{background:#e6f0ff;color:#1f5fbf}.akw-s.s-original-title{background:#fff2d9;color:#9a6200}
+.akw-s.s-image{background:#e9f7ef;color:#1e7b45}.akw-s.s-review{background:#f3e8ff;color:#6b3fa0}.akw-s.s-manual{background:#ffe8e8;color:#b03030}
+.akw-ed{padding:0 4px;min-height:0}
+.amz-acts{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.amz-wrap{display:inline-flex}
+.btn-amz{background:#ff9900;color:#111;border:1px solid #e88b00;font-weight:600}
+.btn-amz:hover:not(:disabled){background:#f08804}
+.btn-amz:disabled{background:#eee;color:#999;border-color:#ddd;cursor:not-allowed;pointer-events:none}
+.amz-asin{font-size:11.5px;color:var(--text-2);display:inline-flex;gap:3px;align-items:center}
+.amz-edit{border:1px dashed #bbb;border-radius:8px;padding:6px;background:#fafafa}
+.amz-h{font-size:11.5px;color:var(--text-2)}
+.akw-row{display:flex;gap:4px;align-items:center}.akw-in{flex:1;min-width:0;height:26px;font-size:12px;padding:2px 6px}
+.amz-edit .row{display:flex;flex-wrap:wrap;gap:4px;margin-top:2px}.amz-edit .row .spacer{display:none}.amz-edit .row .btn{flex:1 1 30%;min-width:0;padding-left:4px;padding-right:4px}
+.amz-edit,.amz{min-width:0;max-width:100%}.akw-row .btn{flex:0 0 auto;padding:0 4px}
