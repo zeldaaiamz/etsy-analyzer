@@ -29,23 +29,33 @@ python3 replay_classify.py <EHunt列表.json> <输出目录> --keyword "acrylic 
 保留 24 / 待确认 8 / 排除 64；视觉 111 次，约 20.7 万 tokens，约 ¥0.18，约 5 分钟（8 并发）。
 旧版回放脚本：replay_classify_v2_legacy.py + replay_aggregate.py。
 
-## 线上流程（按需抓取，2026-10-16 起）
-1. 用户在选品雷达「选品预筛」#/selscreen 输入关键词 → 点“开始抓取并预筛” → `sel_start()` 在 `sel_runs` 建任务（queued；每人同时最多 1 个）。
-2. ECS 上的 `etsy-selection-worker`（systemd，与 etsy-analyzer-worker 同模式、独立进程，见 deploy/etsy-selection-worker.service）用 `sel_claim_run()` 认领（FOR UPDATE SKIP LOCKED，心跳超时 10 分钟回收）。
-3. worker（worker/selection/ehunt_worker.py）用 Playwright 持久化登录的 Chromium 打开 EHunt 列表页（价格 $8–40、总销量 ≥100、按 7 天销量降序），**逐行读 DOM**（不用 EHunt API），每行：写 `sel_raw_rows` → upsert `sel_items`（item_state=scraped，同 listing 合并）→ 立即 `classify.classify_one()`（规则 + 视觉×3）→ item_state=classified + 初始 gate。
-4. 前端每 3 秒轮询（024 也把两张表加进 Realtime，可改订阅），条目逐条出现，带进度条；人工复核 ✓/✕/恢复（`sel_set_gate`）。
-5. 只有 gate=passed 的进入「选品筛选」#/select（短名单 / 未全勾 / 机器保留 / 人工确认 / 全部已通过）→ 加入产品库备选。
+## 线上流程（按需，2026-10-16 定稿）
+1. 「选品预筛」#/selscreen 输入关键词 → **查询数量**：`sel_count()` 建轻量任务 → worker 在 EHunt 界面设好筛选后只读 “Find N products” → 页面显示 N 条（acrylic decoration = 505）。
+   - N ≤ 100 全读；N > 100 默认前 100 可调；N > 1000 建议跳过等人工决定（`sel_skip`）。查到数量前“开始抓取”按钮禁用。
+2. 填最多读取条数 → **开始抓取**：`sel_start(run, limit)`。
+3. worker 逐行读列表（每页 20 条），每行：原始行入 `sel_raw_rows` → 同 listing 合并 → 标题关键词 + 视觉×3 + 陈选六条规则分类。
+   - **排除的不进入预筛**，只进页面上的审计清单（“已排除 64：定制 55 / IP 4 / 材质 4 …”，可展开、可恢复），满足规则 6。
+   - 保留、待确认进入预筛；拿不准一律待确认。
+4. 预筛（待确认 / 保留 / 全部）由 Hongyan 人工复核：✓ 保留、✕ 排除（进审计清单）。只有“保留”的进入「选品筛选」#/select。
 `import_run.py` 只用于离线回放导入。
 
-## 抓取方案与会话
-- Playwright `launch_persistent_context(EHUNT_PROFILE_DIR)`，headless Chromium；首次在服务器上用有头模式/VNC 人工登录 EHunt 一次，cookie 留在 profile 目录（权限 700，仅 worker 用户可读，不进 git）。
-- 列表页 URL 模板 `EHUNT_LIST_URL`（含 {kw}），DOM 选择器 `EHUNT_SELECTORS`（JSON）都放 .env，便于 EHunt 改版时只改配置。
-- 每行间隔 0.3 秒、翻页 2 秒，单 worker 单任务串行；检测到跳到登录页 → 任务 failed「EHunt 登录已失效」，前端显示，需人工重新登录。
-- 测试：`python -m selection.ehunt_worker --fake 列表.json --once` 不开浏览器。
+## EHunt 界面操作（筛选不在 URL 里，必须点界面）
+页面 https://ehunt.ai/etsy-product-research：顶部搜索框（placeholder “Enter a product name, tag, product ID...”）输入关键词 → 橙色 Search；
+Basic: 行 Price(USD) 下拉自定义 Min 8 / Max 40 → OK；Sales 下拉 “Total sales:” Min 100 → OK；结果右上排序（Export to CSV 旁）默认 “↓7-day sales”，校验；
+校验 “Selected:” 有 “Price: 8~40” 和 “Total sales: 100~”；数量用 `/Find ([\d,]+) products/`。任一校验失败 → 任务失败并截图到日志目录，不会用未筛选的数（如 43,805）。
+选择器都在 `UI_DEFAULTS`，可用环境变量 `EHUNT_UI`（JSON）覆盖；筛选值可用 `EHUNT_FILTERS` 覆盖。当前选择器是占位，首次真实运行前需对照页面校准。
+
+## 运行位置：本 box（不是 ECS）
+- 原 ECS systemd 设计（etsy-selection-worker.service）已作废并删除。
+- `deploy/box-selection-worker.sh login|start|stop|status|once-fake <json>`；进程 nohup 常驻轮询 Supabase；分类（Doubao，ARK_API_KEY）也在 box 上跑。
+- 密钥放 `~/.config/etsy-selection/worker.env`（600），脚本不打印。
+- 浏览器用**自己的** Playwright 持久化目录 `~/.local/share/etsy-selection/ehunt-profile`，不连接、不复制桌面浏览器的 cookie/profile。
+- 首次：`deploy/box-selection-worker.sh login` 在 box 显示器（DISPLAY=:1）打开有头浏览器到 EHunt 页面，**人工登录**后关闭窗口即保存；脚本不会自动填写账号。
+- 测试：`deploy/box-selection-worker.sh once-fake 列表.json`（不开浏览器）。
 
 ## 风险
-- EHunt 服务条款可能不允许自动化读取页面；账号可能被风控或封禁。上线前需确认，或保持低频。
-- 登录态过期 / 二次验证 / 验证码：headless 下无法自动处理，只能报错等人工。
-- DOM 改版导致选择器失效：上线前须对照真实页面校准（当前选择器是占位）。
-- ECS 内存：Chromium 需 400–800M，单独 unit（MemoryMax=1200M），不能并进 analyzer（500M 上限）。
-- 视觉成本：约 ¥0.18 / 100 行（3 次投票），时长约 5 分钟 / 100 行。
+- EHunt 条款可能不允许自动化读取页面；账号风控。保持低频（每行 0.3 秒、翻页 2 秒、单任务串行）。
+- 登录过期 / 二次验证 / 验证码：任务失败并提示重新 `login`。
+- 界面改版使选择器失效；每次都校验 Selected: 标签和排序，避免拿到未筛选数据。
+- box 重启后需 `start`（可改 systemd --user）；box 与桌面共享机器，浏览器内存约 400–800M。
+- 成本：约 ¥0.18 / 100 行（视觉×3），约 5 分钟 / 100 行。

@@ -1,6 +1,7 @@
 -- 024：Etsy 选品筛选（选品雷达模块，纯追加：新表 + 新函数，不改动已有表/函数）
--- 数据流（按需）：用户在网站输入关键词点“开始” → sel_start() 建 sel_runs 任务(queued)
---        → ECS 上 selection worker（systemd，与 etsy-analyzer-worker 同模式）sel_claim_run() 认领 → Playwright 已登录 EHunt 的浏览器读列表页（读页面，不用 EHunt API）
+-- 数据流（按需）：用户输入关键词点“查询数量” → sel_count() 建轻量任务(count_queued) → worker 只读列表页结果数 → counted(total_count)
+--        → 用户看 N（≤100 全读；>100 默认前 100 可调；>1000 建议跳过等人工）→ sel_start(run, limit) 转 queued，或 sel_skip() → skipped
+--        → 本 box 上的 selection worker（deploy/box-selection-worker.sh，nohup；自有 Playwright profile）sel_claim_run() 认领 → Playwright 已登录 EHunt 的浏览器读列表页（读页面，不用 EHunt API）
 --        → 每读到一条：写 sel_raw_rows（原始全保留）+ upsert sel_items(item_state=scraped) → 立即规则+视觉×3 分类 → item_state=classified，按结论设 gate
 --        → 前端 #/selscreen 轮询/Realtime 看到逐条进入（进度条）→ 人工复核 → 只有 gate=passed 的进入 #/select。
 --        （tools/etsy_selection/import_run.py 仅用于离线回放导入）
@@ -16,7 +17,9 @@ create table if not exists public.sel_runs (
   stats jsonb not null default '{}'::jsonb,       -- 计数、成本、tokens、耗时
   created_at timestamptz not null default now(),
   -- 任务队列（按需抓取）
-  status text not null default 'queued' check (status in ('queued','running','succeeded','failed','canceled')),
+  status text not null default 'count_queued' check (status in ('count_queued','counting','counted','skipped','queued','running','succeeded','failed','canceled')),
+  total_count int,                                -- EHunt 标准筛选下的结果总数（“Find N products”）
+  counted_at timestamptz,
   target_count int not null default 100,          -- 本次最多读多少条
   scraped_count int not null default 0,
   classified_count int not null default 0,
@@ -26,7 +29,7 @@ create table if not exists public.sel_runs (
   started_at timestamptz, finished_at timestamptz,
   heartbeat_at timestamptz                        -- worker 每条更新；前端据此显示“抓取中/卡住”
 );
-create index if not exists sel_runs_queue_idx on public.sel_runs (status, created_at) where status in ('queued','running');
+create index if not exists sel_runs_queue_idx on public.sel_runs (status, created_at) where status in ('count_queued','counting','queued','running');
 create index if not exists sel_runs_user_idx on public.sel_runs (user_id, created_at desc);
 
 -- 原始抓取行全部保留（同一 listing_id 的重复/变体行都在这里）
@@ -80,24 +83,41 @@ create policy sel_raw_select on public.sel_raw_rows for select to authenticated
 revoke all on public.sel_runs, public.sel_raw_rows, public.sel_items from anon;
 revoke insert, update, delete on public.sel_runs, public.sel_raw_rows, public.sel_items from authenticated;  -- 写入只走 service_role 导入脚本
 
--- 按需开始：用户建任务（同一用户最多 1 个进行中的任务）
-create or replace function public.sel_start(p_keyword text, p_params jsonb default '{}'::jsonb)
+-- 第 1 步：查询数量（轻量任务；同一用户最多 1 个进行中的任务）
+create or replace function public.sel_count(p_keyword text, p_params jsonb default '{}'::jsonb)
 returns uuid language plpgsql security definer set search_path = public as $$
 declare rid uuid; uid uuid := (select auth.uid());
 begin
   if uid is null or coalesce(trim(p_keyword), '') = '' then raise exception '需要登录并填写关键词'; end if;
-  if exists (select 1 from public.sel_runs where user_id = uid and status in ('queued','running')) then raise exception '已有进行中的选品任务'; end if;
-  insert into public.sel_runs (user_id, keyword, params, target_count)
-  values (uid, trim(p_keyword), coalesce(p_params, '{}'::jsonb) || jsonb_build_object('mode','convertible','runs',3,'optional_custom','keep'),
-          least(greatest(coalesce((p_params->>'limit')::int, 100), 1), 300))
+  if exists (select 1 from public.sel_runs where user_id = uid and status in ('count_queued','counting','queued','running')) then raise exception '已有进行中的选品任务'; end if;
+  insert into public.sel_runs (user_id, keyword, status, params)
+  values (uid, trim(p_keyword), 'count_queued', jsonb_build_object('price_min',8,'price_max',40,'min_sales',100,'sort','↓7-day sales') || coalesce(p_params, '{}'::jsonb)  -- 标准筛选，数量与抓取都必须带
+          || jsonb_build_object('mode','convertible','runs',3,'optional_custom','keep'))
   returning id into rid;
   return rid;
 end $$;
-revoke all on function public.sel_start(text, jsonb) from public, anon;
-grant execute on function public.sel_start(text, jsonb) to authenticated;
+revoke all on function public.sel_count(text, jsonb) from public, anon;
+grant execute on function public.sel_count(text, jsonb) to authenticated;
+
+-- 第 2 步：确认读取条数后开始（counted → queued）；>1000 时前端需二次确认
+create or replace function public.sel_start(p_run uuid, p_limit int default 100)
+returns boolean language sql security definer set search_path = public as $$
+  update public.sel_runs set status = 'queued', target_count = least(greatest(coalesce(p_limit, 100), 1), least(coalesce(total_count, 300), 1000)),
+         params = params || jsonb_build_object('limit', p_limit)
+   where id = p_run and user_id = auth.uid() and status = 'counted' returning true;
+$$;
+revoke all on function public.sel_start(uuid, int) from public, anon;
+grant execute on function public.sel_start(uuid, int) to authenticated;
+
+-- 跳过（N 太大等人工决定，需求文档 §2）
+create or replace function public.sel_skip(p_run uuid) returns boolean language sql security definer set search_path = public as $$
+  update public.sel_runs set status = 'skipped', finished_at = now() where id = p_run and user_id = auth.uid() and status = 'counted' returning true;
+$$;
+revoke all on function public.sel_skip(uuid) from public, anon;
+grant execute on function public.sel_skip(uuid) to authenticated;
 
 create or replace function public.sel_cancel(p_run uuid) returns boolean language sql security definer set search_path = public as $$
-  update public.sel_runs set status = 'canceled', finished_at = now() where id = p_run and user_id = auth.uid() and status in ('queued','running') returning true;
+  update public.sel_runs set status = 'canceled', finished_at = now() where id = p_run and user_id = auth.uid() and status in ('count_queued','counting','counted','queued','running') returning true;
 $$;
 revoke all on function public.sel_cancel(uuid) from public, anon;
 grant execute on function public.sel_cancel(uuid) to authenticated;
@@ -108,11 +128,11 @@ language plpgsql security definer set search_path = public as $$
 declare r public.sel_runs;
 begin
   select * into r from public.sel_runs
-   where status = 'queued' or (status = 'running' and coalesce(heartbeat_at, locked_at) < now() - interval '10 minutes' and attempts < 3)
+   where status in ('queued','count_queued') or (status in ('running','counting') and coalesce(heartbeat_at, locked_at) < now() - interval '10 minutes' and attempts < 3)
    order by created_at for update skip locked limit 1;
   if not found then return null; end if;
-  update public.sel_runs set status = 'running', locked_by = p_worker, locked_at = now(), heartbeat_at = now(),
-         started_at = coalesce(started_at, now()), attempts = attempts + 1
+  update public.sel_runs set status = case when r.status in ('count_queued','counting') then 'counting' else 'running' end, locked_by = p_worker, locked_at = now(), heartbeat_at = now(),
+         started_at = case when r.status in ('count_queued','counting') then started_at else coalesce(started_at, now()) end, attempts = attempts + 1
    where id = r.id returning * into r;
   return r;
 end $$;

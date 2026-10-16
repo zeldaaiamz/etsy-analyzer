@@ -23,8 +23,11 @@ PRICE_IN,PRICE_OUT=0.8,2.0  # 元/百万token，按需调整
 def key():
     k=os.environ.get('ARK_API_KEY')
     if not k:
-        for l in open(os.path.join(os.path.dirname(os.path.abspath(__file__)),'..','..','worker','.env')):
-            if l.startswith('ARK_API_KEY='): k=l.split('=',1)[1].strip().strip('"\'')
+        for f in (os.path.join(os.path.dirname(os.path.abspath(__file__)),'..','..','worker','.env'),'/workspace/amazon/tools/etsy-analyzer/worker/.env'):
+            if not os.path.exists(f): continue
+            for l in open(f):
+                if l.startswith('ARK_API_KEY='): k=l.split('=',1)[1].strip().strip('"\'')
+            if k: break
     return k
 KEY=key()
 CUSTOM=r'\b(personali[sz]ed?|personalisation|personalization|custom(i[sz]ed)?|your (name|text|photo|logo)|with (name|photo|names)|name|names|photo(?!\s*(booths?|props?)\b)|monogram\w*|initials?|engraved|any text|logo)\b'
