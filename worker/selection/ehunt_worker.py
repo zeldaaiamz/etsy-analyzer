@@ -45,13 +45,25 @@ def scrape_ehunt(keyword, params, start_rank, end_rank):
     from playwright.sync_api import sync_playwright
     U = ui(); ps = int(U["page_size"]); num = lambda s: float("".join(ch for ch in (s or "") if ch.isdigit() or ch == ".") or 0)
     def d7_of(t): m = re.search(U["d7_regex"], t or ""); return int(m.group(1).replace(",", "")) if m else 0
-    def total_of(t): return int(num(re.split(r"↑", t or "")[0]))
+    def total_of(t):  # “637” / “6.26K” / “1.2M”
+        t = re.split(r"↑", t or "")[0].strip().upper(); k = 1000 if t.endswith("K") else 1000000 if t.endswith("M") else 1
+        return int(round(num(t) * k))
     page = (start_rank - 1) // ps + 1
     with sync_playwright() as p:
         ctx, pg = _open_list(p, keyword, params)
         try:
-            if page > 1:  # 续读：分页“跳至”输入框（占位选择器，校准时确认）
-                pg.fill(U["jump_input"], str(page)); pg.keyboard.press("Enter"); pg.wait_for_load_state("networkidle"); time.sleep(2)
+            def first_href():
+                e = pg.query_selector(U["row"] + " " + U["title"]); return e.get_attribute("href") if e else None
+            def wait_page(n, old):  # SPA 翻页：等到当前页码 = n 且首行变化
+                for _ in range(60):
+                    a_ = pg.query_selector(U["active_page"])
+                    if a_ and a_.inner_text().strip() == str(n) and first_href() != old: break
+                    time.sleep(0.5)
+                else: raise RuntimeError(f"翻页到第 {n} 页超时")
+                time.sleep(1.5)
+            pg.wait_for_selector(U["row"], timeout=30000)
+            if page > 1:  # 续读：分页 “Go to” 输入框
+                old = first_href(); pg.fill(U["jump_input"], str(page)); pg.keyboard.press("Enter"); wait_page(page, old)
             rank = (page - 1) * ps
             while rank < end_rank:
                 pg.wait_for_selector(U["row"], timeout=30000)
@@ -61,41 +73,44 @@ def scrape_ehunt(keyword, params, start_rank, end_rank):
                     rank += 1
                     if rank < start_rank: continue
                     if rank > end_rank: break
-                    href = a.get_attribute("href") or ""; lid = "".join(ch for ch in href.split("/listing/")[-1].split("/")[0] if ch.isdigit())
-                    img = tr.query_selector(U["img"]); cell = lambda k: (tr.query_selector(U[k]) or a).inner_text()
-                    yield {"rank": rank, "page": page, "title": a.inner_text().strip(), "listing_id": lid, "image_url": img.get_attribute("src") if img else "",
+                    lk = tr.query_selector(U["link"]); href = (lk.get_attribute("href") if lk else "") or a.get_attribute("href") or ""
+                    lid = "".join(ch for ch in href.rstrip("/").split("/listing/")[-1].split("/product-detail/")[-1].split("/")[0] if ch.isdigit())
+                    img = tr.query_selector(U["img"]); cell = lambda k: (lambda e: e.inner_text() if e else "")(tr.query_selector(U[k]))
+                    yield {"rank": rank, "page": page, "title": a.inner_text().strip(), "listing_id": lid, "url": f"https://www.etsy.com/listing/{lid}", "image_url": img.get_attribute("src") if img else "",
                            "price": num(cell("price")), "total_sales": total_of(cell("total")), "sales_7d": d7_of(cell("d7"))}
                     time.sleep(0.3)
                 nxt = pg.query_selector(U["next"])
                 if not nxt or rank >= end_rank: break
-                nxt.click(); page += 1; pg.wait_for_load_state("networkidle"); time.sleep(2)
+                old = first_href(); nxt.click(); page += 1; wait_page(page, old)
         finally: ctx.close()
 
 # 标准筛选（需求文档 §2）：数量与抓取都必须带上，否则会拿到未筛选的总数（如 43,805）。
 # EHunt 的筛选不在 URL 里（https://ehunt.ai/etsy-product-research 无查询参数），只在页面状态里 → 必须通过界面操作设置。
 FILTER_DEFAULTS = {"price_min": 8, "price_max": 40, "min_sales": 100, "min_sales_7d": 4, "sort": "↓7-day sales"}  # 7 天销量 >3 即 Min 4
-# 界面选择器/文字（占位，按 2026-10-16 浏览器观察；EHunt 改版时用 EHUNT_UI（JSON）覆盖，不改代码）
+# 界面选择器/文字（2026-10-16 已登录实测校准；EHunt 改版时用 EHUNT_UI（JSON）覆盖，不改代码）
 UI_DEFAULTS = {
     "url": "https://ehunt.ai/etsy-product-research",
+    "banner_close": "button.ehunt-ai-banner__close",          # 顶部 “Meet the new EHunt AI” 横幅会挡住点击
     "search_input": "input[placeholder^='Enter a product name, tag, product ID']",
-    "search_btn": "button:has-text('Search')",
-    "basic_row": ":text('Basic:')",
-    "price_dd": "text=Price(USD)",
-    "sales_dd": "text=Sales",
-    "total_sales_line": ":text('Total sales:')",
-    "sales7_line": ":text('7-day sales:')",
-    # Selected: 标签期望文字（7 天销量那枚的确切文字待校准时确认）
+    "search_btn": ".el-input-group__append >> text=Search",   # 不能用 button:has-text('Search')：会命中 “Batch search” 弹窗
+    "price_dd": "span.truncate:text-is('Price(USD)')",
+    "sales_dd": "span.truncate:text-is('Sales')",
+    "popover": ".el-popover[aria-hidden='false']",             # 当前展开的下拉面板
+    "total_sales_line": "xpath=.//div[normalize-space(text())='Total sales:']/..",
+    "sales7_line": "xpath=.//div[normalize-space(text())='7-day sales:']/..",
     "chip_price": "Price: {price_min}~{price_max}", "chip_total": "Total sales: {min_sales}~", "chip_7d": "7-day sales: {min_sales_7d}~",  # 10-16 实测确认；Min 为闭区间
-    "min_input": "input[placeholder*='Min' i]", "max_input": "input[placeholder*='Max' i]",
-    "ok_btn": "button:has-text('OK')",
+    "min_input": "input[placeholder='Min']", "max_input": "input[placeholder='Max']",
+    "ok_btn": "[role=button]:text-is('OK')",                   # div[role=button]，不是 <button>；只在 popover 内找
     "sort_dd": ":text('Export to CSV') >> xpath=following::*[contains(normalize-space(.),'sales')][1]",
     "selected_row": ":text('Selected:') >> xpath=..",
-    "count_text": ":text-matches('Find [\\d,]+ products')",
+    "count_text": ":text-matches('Find [0-9,]+ products')",
     "count_regex": r"Find ([\d,]+) products",
-    # 列表：“Total sales (7-Day Sales)” 列里总销量旁的绿色 ↑N 就是 7 天销量（同一格）
-    "row": "table tbody tr", "title": "a[href*='etsy.com/listing']", "price": "td:nth-child(3)", "total": "td:nth-child(4)",
-    "d7": "td:nth-child(4)", "d7_regex": r"↑\s*([\d,]+)", "img": "img", "next": "li.ant-pagination-next:not(.ant-pagination-disabled)",
-    "page_size": 20, "jump_input": ".ant-pagination-options-quick-jumper input",
+    # 列表（Element Plus el-table）：第 1 列 商品信息（图/标题/价格），第 2 列 Total sales + 绿色 ↑N（7 天销量）
+    "row": "table.el-table__body tr.el-table__row", "title": "a.product-title-clamp", "link": "a[href*='etsy.com/listing/']",
+    "price": "td:nth-child(1) span.text-brand", "total": "td:nth-child(2) span:first-child",
+    "d7": "td:nth-child(2)", "d7_regex": r"↑\s*([\d,]+)", "img": "td:nth-child(1) img",
+    "next": "button.btn-next:not([disabled])", "active_page": ".el-pager li.is-active",
+    "page_size": 20, "jump_input": ".el-pagination__jump input",   # “Go to”/跳至 输入框，回车跳页
 }
 def ui(): return {**UI_DEFAULTS, **json.loads(os.environ.get("EHUNT_UI", "{}"))}
 def filters(params): return {**FILTER_DEFAULTS, **json.loads(os.environ.get("EHUNT_FILTERS", "{}")), **{k: v for k, v in (params or {}).items() if k in FILTER_DEFAULTS}}
@@ -108,15 +123,18 @@ def _open_list(p, keyword, params):
     pg = ctx.pages[0] if ctx.pages else ctx.new_page(); pg.goto(U["url"], wait_until="networkidle", timeout=60000)
     if "login" in pg.url: ctx.close(); raise RuntimeError("EHunt 登录已失效：需要在 box 上运行 --login 重新人工登录")
     try:
-        pg.fill(U["search_input"], keyword); pg.click(U["search_btn"]); pg.wait_for_load_state("networkidle"); time.sleep(1.5)
-        # Basic: Price(USD) → 自定义 Min/Max → OK
-        pg.click(U["price_dd"]); pg.fill(U["min_input"], str(F["price_min"])); pg.fill(U["max_input"], str(F["price_max"])); pg.click(U["ok_btn"]); time.sleep(1.5)
-        # Sales → Total sales: Min → OK
-        pg.click(U["sales_dd"]); line = pg.locator(U["total_sales_line"]).locator("xpath=..")
-        line.locator(U["min_input"]).first.fill(str(F["min_sales"]))
-        # 同一 Sales 下拉的 “7-day sales:” 行 Min 4（>3）
-        pg.locator(U["sales7_line"]).locator("xpath=..").locator(U["min_input"]).first.fill(str(F["min_sales_7d"]))
-        pg.click(U["ok_btn"]); pg.wait_for_load_state("networkidle"); time.sleep(1.5)
+        b = pg.query_selector(U["banner_close"])
+        if b and b.is_visible(): b.click(); time.sleep(0.5)
+        pg.fill(U["search_input"], keyword); pg.click(U["search_btn"]); pg.wait_for_load_state("networkidle"); time.sleep(2)
+        # Basic: Price(USD) → 自定义 Min/Max → OK（都在展开的 popover 里）
+        pg.click(U["price_dd"]); time.sleep(1); pop = pg.locator(U["popover"])
+        pop.locator(U["min_input"]).first.fill(str(F["price_min"])); pop.locator(U["max_input"]).first.fill(str(F["price_max"]))
+        pop.locator(U["ok_btn"]).first.click(); pg.wait_for_load_state("networkidle"); time.sleep(2)
+        # Sales → Total sales: Min 100 + 7-day sales: Min 4（>3）→ OK
+        pg.click(U["sales_dd"]); time.sleep(1); pop = pg.locator(U["popover"])
+        pop.locator(U["total_sales_line"]).locator(U["min_input"]).first.fill(str(F["min_sales"]))
+        pop.locator(U["sales7_line"]).locator(U["min_input"]).first.fill(str(F["min_sales_7d"]))
+        pop.locator(U["ok_btn"]).first.click(); pg.wait_for_load_state("networkidle"); time.sleep(2)
         # 排序默认 ↓7-day sales，校验
         st = pg.locator(U["sort_dd"]).first.inner_text().strip()
         if "7-day" not in st: raise RuntimeError(f"排序不是 7 天销量降序：{st}")
