@@ -533,3 +533,7 @@ html,body{overflow-x:hidden}
 /* 继续读取（2026-10-16） */
 .ss-next{flex-wrap:wrap;row-gap:8px}.ss-next .ss-thr{width:84px}#ssAddErr:empty{display:none}
 .ss-count-n .pill{white-space:normal;max-width:100%}
+/* 排除词表 */
+.ex-words{margin-top:var(--s4);padding:var(--s3) var(--s4)}.ex-words summary{cursor:pointer;display:flex;flex-wrap:wrap;gap:6px;align-items:baseline}
+.ex-list{display:flex;flex-wrap:wrap;gap:6px;margin:var(--s3) 0}.ex-word{display:inline-flex;align-items:center;gap:4px;padding:2px 8px;border:1px solid var(--border);border-radius:8px;font-size:13px;max-width:100%}
+.ex-word code{word-break:break-all}.ex-word.off{opacity:.45;text-decoration:line-through}.ex-add .input{flex:1;min-width:0}

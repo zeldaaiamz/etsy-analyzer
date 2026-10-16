@@ -30,12 +30,35 @@ def key():
             if k: break
     return k
 KEY=key()
-CUSTOM=r'\b(personali[sz]ed?|personalisation|personalization|custom(i[sz]ed)?|your (name|text|photo|logo)|with (name|photo|names)|name|names|photo(?!\s*(booths?|props?)\b)|monogram\w*|initials?|engraved|any text|logo)\b'
-IP=r'\b(disney|marvel|pokemon|pok[eé]mon|star wars|harry potter|hogwarts|peter rabbit|hello kitty|sanrio|barbie|nfl|nba|mlb|taylor swift|swiftie|bluey|stitch|mickey|minnie|frozen|anime|naruto|one piece|sailor moon|ghibli|totoro|zelda|mario|nintendo|kpop|bts|labubu|snoopy|peanuts|grinch|sesame street|paw patrol|super ?bowl|eras tour)\b'
+# 排除词表 v2（Hongyan 2026-10-16 定稿）：每项是一个正则片段，整词匹配（\b…\b，不区分大小写）。
+# 线上以 Supabase 表 sel_exclude_words 为准（后台可编辑，worker 定时加载），下面是表不可用时的内置兜底，内容与 031 迁移的种子一致。
+# 定稿：定制类新增 address / return address；不加 adjust/adjustable；不新增素材/非成品类词；wholesale / bulk / vintage 不排除。
+CUSTOM_WORDS=[r'personali[sz]ed?',r'personalisation',r'personalization',r'custom(i[sz]ed)?',r'your (name|text|photo|logo)',r'with (name|photo|names)',
+    r'name',r'names',r'photo(?!\s*(booths?|props?)\b)',r'monogram\w*',r'initials?',r'engraved',r'any text',r'logo',r'return address',r'address']
+IP_WORDS=[r'disney',r'marvel',r'pokemon',r'pok[eé]mon',r'star wars',r'harry potter',r'hogwarts',r'peter rabbit',r'hello kitty',r'sanrio',r'barbie',r'nfl',r'nba',r'mlb',
+    r'taylor swift',r'swiftie',r'bluey',r'stitch',r'mickey',r'minnie',r'frozen',r'anime',r'naruto',r'one piece',r'sailor moon',r'ghibli',r'totoro',r'zelda',r'mario',r'nintendo',
+    r'kpop',r'bts',r'labubu',r'snoopy',r'peanuts',r'grinch',r'sesame street',r'paw patrol',r'super ?bowl',r'eras tour']
 WHITELIST=r'(happy birthday|schulkind|mr\.? ?(&|and) ?mrs\.?|welcome|congrat\w*|merry christmas|happy (new year|easter|halloween|thanksgiving|holidays|hanukkah|valentine\w*)|season\'?s greetings|eid mubarak)'
 OPTIONAL_HINT=r'(optional personali[sz]ation|personali[sz]ation (is )?optional|add (a )?names? \(optional\)|\(optional\)|optional (name|text|custom\w*)|with or without (name|personali[sz]ation))'
 REQUIRED_HINT=r'(custom name|personali[sz]ed with your|enter (the |your )?names?|your name|add your)'
-DIGITAL=r'\b(svg|stl|png|pdf|digital|download|printable|template|blank|blanks|laser cut file|cut file|bulk)\b'
+DIGITAL_WORDS=[r'svg',r'stl',r'png',r'pdf',r'digital',r'download',r'printable',r'template',r'blank',r'blanks',r'laser cut file',r'cut file']  # 原有规则（已去掉 bulk）
+NEVER_EXCLUDE={'wholesale','bulk','vintage'}  # Hongyan 明确不排除：即使后台表里误加也忽略
+def _rx(words):
+    ws=[w for w in words if w and w.strip().lower() not in NEVER_EXCLUDE]
+    return r'\b('+'|'.join(sorted(ws,key=len,reverse=True))+r')\b' if ws else r'(?!x)x'
+def set_words(rows=None):
+    """rows: [{'category':'custom|ip|digital','word':正则片段,'enabled':bool}]；None/空 → 内置兜底。返回生效来源。"""
+    global CUSTOM,IP,DIGITAL
+    by={'custom':[],'ip':[],'digital':[]}; src='builtin'
+    for r in rows or []:
+        if r.get('enabled',True) and r.get('category') in by:
+            try: re.compile(r['word'])
+            except re.error: continue
+            by[r['category']].append(r['word'])
+    if any(by.values()): src='table'
+    CUSTOM=_rx(by['custom'] if src=='table' else CUSTOM_WORDS); IP=_rx(by['ip'] if src=='table' else IP_WORDS); DIGITAL=_rx(by['digital'] if src=='table' else DIGITAL_WORDS)
+    return src
+set_words()
 def up(u):
     for s in ('il_794xN','il_570xN'):
         v=u.replace('il_120xN',s)

@@ -37,6 +37,7 @@ class Store:
     def new_batch(self, body): self._req("POST", "/rest/v1/sel_batches", body, "return=minimal")
     def passed_ids(self, rid): return {str(x["etsy_listing_id"]) for x in (self._req("GET", f"/rest/v1/sel_items?run_id=eq.{rid}&select=etsy_listing_id") or [])}
     def insert_item(self, body): self._req("POST", "/rest/v1/sel_items?on_conflict=run_id,etsy_listing_id", body, "return=minimal,resolution=ignore-duplicates")
+    def exclude_words(self): return self._req("GET", "/rest/v1/sel_exclude_words?select=category,word,enabled&enabled=eq.true") or []
     def purge(self): return self._req("POST", "/rest/v1/rpc/sel_purge_older_than", {})
 
 def scrape_ehunt(keyword, params, start_rank, end_rank):
@@ -179,7 +180,8 @@ def log_exclusion(run, batch_no, row, reason, detail, source):
     os.makedirs(EXCL_DIR, mode=0o700, exist_ok=True)
     with open(os.path.join(EXCL_DIR, f"{run['id']}.jsonl"), "a", encoding="utf-8") as f:
         f.write(json.dumps({"ts": NOW(), "run_id": run["id"], "keyword": run.get("keyword"), "batch_no": batch_no, "rank": row.get("rank"),
-                            "listing_id": str(row["listing_id"]), "title": row.get("title"), "reason": reason, "detail": detail, "source": source}, ensure_ascii=False) + "\n")
+                            "listing_id": str(row["listing_id"]), "title": row.get("title"), "reason": reason, "detail": detail, "source": source,
+                            "matched_word": (detail or "")[4:] if (detail or "").startswith("关键词:") else None}, ensure_ascii=False) + "\n")
 def purge_local():
     if not os.path.isdir(EXCL_DIR): return 0
     n = 0; cutoff = time.time() - KEEP_SECONDS
@@ -329,18 +331,23 @@ def login(url):
         except Exception: pass
     print("登录窗口已关闭，profile 已保存", flush=True)
 
+WORDS_TTL = int(os.environ.get("SEL_WORDS_TTL", "300"))
 def main(argv=None):
     ap = argparse.ArgumentParser(); ap.add_argument("--once", action="store_true"); ap.add_argument("--fake", help="回放 JSON，代替真实抓取")
     ap.add_argument("--login", action="store_true", help="一次性人工登录 EHunt（有头浏览器，box 显示器）")
     ap.add_argument("--login-url", default="https://ehunt.ai/etsy-product-research")
     a = ap.parse_args(argv); logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if a.login: return login(a.login_url)
-    store = Store(); last_purge = 0
+    store = Store(); last_purge = 0; last_words = 0
     while True:
         if time.time() - last_purge > 86400:  # 启动时 + 每 24 小时：DB 3 天清理（pg_cron 不可用时的兜底）+ 本地排除日志清理
             try: log.info("purge db=%s local=%s", store.purge(), purge_local())
             except Exception: log.warning("purge failed", exc_info=True)
             last_purge = time.time()
+        if time.time() - last_words > WORDS_TTL:  # 排除词表：后台 sel_exclude_words，5 分钟刷新；表不可用 → 内置兜底
+            try: rows = store.exclude_words(); log.info("exclude words: %s (%d rows)", C.set_words(rows), len(rows))
+            except Exception: log.warning("exclude words load failed, using built-in", exc_info=True); C.set_words(None)
+            last_words = time.time()
         run = store.claim()
         if run:
             log.info("claimed run %s kw=%s status=%s", run["id"], run["keyword"], run["status"])

@@ -2,6 +2,7 @@ import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
 import { computeVelocity, computeManualVelocity, cmpVelocity, velocityBadge, loadReviewDates, demoReviewDates, loadScrapeInfo } from "./velocity.js";
 import { amzBlock, amzUrls, openAll, applyEdit, kwList, MAX_KW, DIR_SELECT_HTML } from "./amzsearch.js";
 import { createScreen } from "./screen.js?v=c4015382";
+import { createExWords } from "./exwords.js?v=f468cb07";
 import { createSelScreen } from "./selscreen.js?v=322e596c";
 
 // ?demo=1：纯前端示例数据，不登录、不连 Supabase，仅用于预览界面（&offline=1 / &quota=1 预览横幅）
@@ -938,11 +939,12 @@ async function sendToPrescreen(urls) {
   toast(`✓ 已提交 ${list.length} 条预筛选`, "ok"); location.hash = `#/screen/${batch.id}`;
 }
 const SSC = createSelScreen({ $, esc, toast, getSb: () => sb, DEMO, confirmDialog, sendToPrescreen });
+const EXW = createExWords({ $, esc, toast, getSb: () => sb, DEMO, confirmDialog });
 function route() {
   const lib = location.hash.startsWith("#/library"), scr = location.hash.startsWith("#/screen"), ssc = location.hash.startsWith("#/selscreen");
   if (!$("nav").classList.contains("hidden")) { $("app").classList.toggle("hidden", lib || scr || ssc); $("selScreenView").classList.toggle("hidden", !ssc); $("libraryView").classList.toggle("hidden", !lib); $("screenView").classList.toggle("hidden", !scr); }
   document.querySelectorAll("[data-nav]").forEach((a) => a.classList.toggle("active", a.dataset.nav === (lib ? "library" : scr ? "screen" : ssc ? "selscreen" : "tasks")));
-  if (ssc && (DEMO || (sb && currentUser))) SSC.show(location.hash.split("/")[2] || null);
+  if (ssc && (DEMO || (sb && currentUser))) SSC.show(location.hash.split("/")[2] || null); if (ssc && (DEMO || (sb && currentUser))) EXW.show();
   if (scr) { if (DEMO || (sb && currentUser)) SCR.show(location.hash.split("/")[2] || null); } else SCR.hide();
   if (lib) { renderLibrary(); if (!DEMO && sb && currentUser) loadLibrary(); }
 }
