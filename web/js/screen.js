@@ -64,7 +64,8 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
       `<button class="fchip${V.tab === k ? " active" : ""}" data-stab="${k}">${n}<span class="fchip-n">${k === "all" ? tot : k === "pending" ? nPend - V.items.filter((it) => it.status === "screening" && V.rej.has(it.id)).length : nRej}</span></button>`).join("")
     const nDone = V.items.filter((it) => it.screen_state === "rejected").length; // 只算已确认排除的（未确认的 ✕ 可直接撤销）
     const nRetry = V.items.filter(canRefetch).length;
-    $("screenTabs").innerHTML += `<span class="spacer"></span>${nRetry ? `<button class="btn btn-primary btn-sm" data-srefall="1" ${V.busy.has("refall") ? "disabled" : ""} title="重新取数所有失败且未达 3 次上限的条目">${V.busy.has("refall") ? '<span class="spin"></span>' : ""}一键刷新（${nRetry} 条失败）</button>` : ""}${nDone ? `<button class="btn btn-danger-ghost btn-sm" data-shide="1" title="永久删除全部已排除条目（不可恢复，不消耗 EHunt 额度）">🗑 删除所有已排除 (${nDone})</button>` : ""}`;
+    const nDead = V.items.filter(deadFailed).length;
+    $("screenTabs").innerHTML += `<span class="spacer"></span>${nRetry ? `<button class="btn btn-primary btn-sm" data-srefall="1" ${V.busy.has("refall") ? "disabled" : ""} title="重新取数所有失败且未达 3 次上限的条目">${V.busy.has("refall") ? '<span class="spin"></span>' : ""}一键刷新（${nRetry} 条失败）</button>` : ""}${nDead ? `<button class="btn btn-danger-ghost btn-sm" data-sdelfail="1" title="永久删除已重试 3 次仍失败的条目（不可恢复）">🗑 一键删除失败（${nDead} 条）</button>` : ""}${nDone ? `<button class="btn btn-danger-ghost btn-sm" data-shide="1" title="永久删除全部已排除条目（不可恢复，不消耗 EHunt 额度）">🗑 删除所有已排除 (${nDone})</button>` : ""}`;
     if (V.loadErr && !tot) { box.innerHTML = `<div class="card empty"><div class="ico">!</div><h3>加载失败</h3><p class="muted">${esc(V.loadErr)}</p><button class="btn btn-primary btn-sm" data-sreload="1">刷新</button></div>`; $("screenFoot").innerHTML = ""; return; }
     if (!tot) { box.innerHTML = `<div class="card empty"><div class="ico">◎</div><h3>${!DEMO && !V.loaded ? "加载中…" : "没有待筛选的链接"}</h3><p class="muted">在“任务”页粘贴链接并勾选“先预筛选”，取到 EHunt 数据后会出现在这里</p></div>`; $("screenFoot").innerHTML = ""; return; }
     box.innerHTML = bs.map((b, i) => {
@@ -105,6 +106,14 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     render(); if (!DEMO) load();
   }
   const canRefetch = (it) => it.status === "failed" && it.screen_state !== "kept" && (it.attempts ?? 0) < (it.max_attempts ?? 3);
+  const deadFailed = (it) => it.status === "failed" && it.screen_state !== "kept" && (it.attempts ?? 0) >= (it.max_attempts ?? 3);
+  async function deleteFailed() {
+    const ids = V.items.filter(deadFailed).map((it) => it.id), n = ids.length; if (!n) return;
+    let res = { deleted: n, ids };
+    if (!DEMO) { const r = await getSb().rpc("screen_delete_failed", V.batch ? { p_batch: V.batch } : {}); if (r.error) return toast(`删除失败：${r.error.message}`, "bad"); res = r.data || res; }
+    const gone = new Set(res.ids || ids); V.items = V.items.filter((it) => !gone.has(it.id));
+    toast(`已永久删除 ${res.deleted ?? n} 条`, "ok"); render();
+  }
   async function refetchAll() {
     const list = V.items.filter(canRefetch); if (!list.length || V.busy.has("refall")) return;
     V.busy.add("refall"); render();
@@ -138,7 +147,7 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
   document.addEventListener("error", (ev) => { const t = ev.target; if (t.tagName === "IMG" && t.dataset?.sid) markImg(t, true); }, true);
   document.addEventListener("click", (ev) => {
     if (!visible()) return;
-    const t = ev.target.closest("[data-srej],[data-sundo],[data-srestore],[data-sconfirm],[data-stab],[data-shide],[data-srefall],[data-sreload]"); if (!t) return;
+    const t = ev.target.closest("[data-srej],[data-sundo],[data-srestore],[data-sconfirm],[data-stab],[data-shide],[data-srefall],[data-sdelfail],[data-sreload]"); if (!t) return;
     ev.preventDefault();
     if (t.dataset.srej) { V.rej.add(t.dataset.srej); toast("已排除，不会进入分析", "", [{ label: "撤销", run: () => { V.rej.delete(t.dataset.srej); render(); } }], 4000); render(); }
     else if (t.dataset.sundo) { V.rej.delete(t.dataset.sundo); render(); }
@@ -147,6 +156,7 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     else if (t.dataset.stab) { V.tab = t.dataset.stab; render(); }
     else if (t.dataset.shide) hideRejected();
     else if (t.dataset.srefall) refetchAll();
+    else if (t.dataset.sdelfail) deleteFailed();
     else if (t.dataset.sreload) load();
   });
 
