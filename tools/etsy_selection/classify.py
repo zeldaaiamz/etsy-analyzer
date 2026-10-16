@@ -106,6 +106,10 @@ def classify_one(o,runs=None):
                  核心卖点='; '.join(j.get('核心卖点',[]) or []),适用场合='; '.join(j.get('适用场合',[]) or []),votes='/'.join(finals),一致=agree)
     o['gate']={'保留':'passed','待确认':'pending','排除':'rejected'}[o['结果']]
     return o,usage,n
+def reason_group(reason):
+    """排除原因归类（只计数 + 本地日志用）。"""
+    r=reason or ''
+    return '7天销量≤3' if r=='7天销量≤3' else '定制' if '定制' in r else 'IP' if r=='IP' else '材质' if '材质' in r else '素材/数字文件' if any(k in r for k in ('数字','素材','空白')) else '其他'
 def dedupe(rows):
     grp=defaultdict(list)
     for r in rows: grp[str(r['listing_id'])].append(r)

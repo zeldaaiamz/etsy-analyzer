@@ -37,7 +37,7 @@
   </section>
 
   <section id="selScreenView" class="hidden">
-    <div class="lib-head"><div><h2>链接筛选 <span class="hint" id="ssSum"></span></h2><p class="muted">① 输入关键词先查 EHunt 结果数（$8–40 · 总销量 ≥100 · 7 天销量 >3 · 按 7 天销量降序）→ ② 填写最多读取条数点“抓取” → ③ 每条经标题关键词 + 视觉 + 陈选六条规则判断 → ④ 全部完成后输出“符合要求 N 条”和 Etsy 链接清单（含待确认）。排除记录留存可查。</p></div></div>
+    <div class="lib-head"><div><h2>链接筛选 <span class="hint" id="ssSum"></span></h2><p class="muted">输入关键词先查 EHunt 结果数（$8–40 · 总销量 ≥100 · 7 天销量 >3 · 按 7 天销量降序）→ 填最多读取条数点“抓取”（在 box 上读 EHunt 页面）→ 标题规则先筛（排除的不调豆包、不显示）→ 通过的调豆包判断 → 输出符合要求的 Etsy 链接。超过 1000 条分批读取。</p></div></div>
     <div id="ssStart"></div>
     <div id="ssTabs" class="fchips sc-tabs"></div>
     <div id="ssBody"></div>
@@ -45,7 +45,7 @@
   </section>
 
   <section id="selectView" class="hidden">
-    <div class="lib-head"><div><h2>选品筛选</h2><p class="muted">EHunt 列表页抓取 → 规则（定制/IP/素材关键词）→ 视觉三次判断（不一致一律待确认）。这里只有通过预筛选的条目（机器保留 + 人工确认）。短名单 = 每个条件都打勾。</p></div></div>
+    <div class="lib-head"><div><h2>选品筛选</h2><p class="muted">次要页面（主输出是「链接筛选」的链接清单）：查看链接筛选中符合要求的条目（最近 3 天）、勾选条件、加入产品库备选。</p></div></div>
     <div id="selHead" class="ss-head"></div>
     <div id="selTabs" class="fchips"></div>
     <div id="selBody" class="ss-list"></div>

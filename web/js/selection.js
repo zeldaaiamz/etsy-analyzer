@@ -69,7 +69,7 @@ export function createSelection({ $, esc, imgUrl, toast, getSb, DEMO }) {
       <button class="btn btn-sm btn-primary" id="selAddAll"${cnt.short ? "" : " disabled"}>短名单全部加入备选 (${cnt.short})</button>` : "";
     $("selTabs").innerHTML = TABS.map(([k, n]) => `<button class="fchip${V.tab === k ? " active" : ""}" data-seltab="${k}">${n}<span class="fchip-n">${cnt[k]}</span></button>`).join("");
     const list = V.items.filter(F[V.tab] || F.all);
-    body.innerHTML = !V.run ? '<div class="empty">还没有导入的筛选结果。用 tools/etsy_selection/classify.py 处理 EHunt 列表 JSON，import_run.py 导入后先到“链接筛选”复核。</div>'
+    body.innerHTML = !V.run ? '<div class="empty">还没有导入的筛选结果。在“链接筛选”页抓取后，符合要求的链接会出现在这里（次要页面，主输出是链接筛选页的链接清单）。</div>'
       : list.length ? list.map(card).join("") : '<div class="empty">此分类下没有条目</div>';
   }
   async function add(ids) {

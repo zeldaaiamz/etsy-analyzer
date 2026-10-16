@@ -529,3 +529,7 @@ a.btn[aria-disabled="true"]{pointer-events:none;opacity:.5}
 .ss-links{background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r);padding:10px 12px;font-size:13px;line-height:1.7;max-height:60vh;overflow:auto;white-space:pre;user-select:all;margin:0 0 10px}
 .ss-audit-mini{border:0;padding:0;background:none;font-size:12px;color:var(--text-3)}.ss-audit-mini summary{color:var(--text-3)}
 .ss-wait{margin:8px 0}
+.ss-batch{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:var(--s4);margin-bottom:12px}
+.ss-batch-copied,.ss-batch-run{display:flex;align-items:center;gap:8px;padding:10px 14px}
+.ss-cum,.ss-next{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 16px;margin-bottom:12px}.ss-next p{margin:2px 0 0}
+.ss-note{margin-top:6px}

@@ -921,7 +921,7 @@ function renderLibrary() {
 }
 const SCR = createScreen({ $, esc, imgUrl, toast, getSb: () => sb, DEMO, QS, confirmDialog });
 const SEL = createSelection({ $, esc, imgUrl, toast, getSb: () => sb, DEMO });
-const SSC = createSelScreen({ $, esc, imgUrl, toast, getSb: () => sb, DEMO });
+const SSC = createSelScreen({ $, esc, toast, getSb: () => sb, DEMO, confirmDialog });
 function route() {
   const lib = location.hash.startsWith("#/library"), scr = location.hash.startsWith("#/screen"), sel = location.hash.startsWith("#/select"), ssc = location.hash.startsWith("#/selscreen");
   if (!$("nav").classList.contains("hidden")) { $("app").classList.toggle("hidden", lib || scr || sel || ssc); $("selScreenView").classList.toggle("hidden", !ssc); $("libraryView").classList.toggle("hidden", !lib); $("screenView").classList.toggle("hidden", !scr); $("selectView").classList.toggle("hidden", !sel); }
