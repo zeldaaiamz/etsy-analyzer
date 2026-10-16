@@ -184,34 +184,72 @@ def purge_local():
         if fn.endswith(".jsonl") and os.path.getmtime(fp) < cutoff: os.remove(fp); n += 1
     return n
 
+# ---- 豆包视觉并发（规则/投票/判定完全不变，只是并行发请求）----
+import threading, random, urllib.error
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+VISION_CONC = max(1, int(os.environ.get("SEL_VISION_CONCURRENCY", "6")))      # 同时处理的条目数
+ARK_INFLIGHT = max(1, int(os.environ.get("SEL_ARK_MAX_INFLIGHT", "12")))     # 同时在途的 Ark 请求上限
+_ARK_SEM = threading.BoundedSemaphore(ARK_INFLIGHT); _TL = threading.local()
+_VOTE_POOL = ThreadPoolExecutor(max_workers=ARK_INFLIGHT, thread_name_prefix="ark")
+def _ark_vision(title, img):
+    """与 classify.vision 相同的请求体；加在途上限 + 429/5xx/网络错误指数退避重试。最终失败 → 待确认（同原逻辑）。"""
+    import base64
+    b = {'model': C.MODEL, 'messages': [{'role': 'user', 'content': [{'type': 'image_url', 'image_url': {'url': 'data:image/jpeg;base64,' + base64.b64encode(img).decode()}},
+         {'type': 'text', 'text': C.PROMPT + title}]}], 'response_format': {'type': 'json_object'}, 'thinking': {'type': 'disabled'}, 'temperature': 0}
+    err = ""
+    for a in range(6):
+        try:
+            with _ARK_SEM:
+                r = json.load(urllib.request.urlopen(urllib.request.Request(C.URL, json.dumps(b).encode(), {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + C.KEY}), timeout=120))
+            t = r['choices'][0]['message']['content']; t = t[t.find('{'):t.rfind('}') + 1]
+            return json.loads(t), r.get('usage', {})
+        except urllib.error.HTTPError as e:
+            err = f"HTTP {e.code}"
+            if e.code != 429 and e.code < 500 and a >= 1: break      # 4xx（非 429）不无限重试
+        except Exception as e: err = str(e)[:200]
+        time.sleep(min(30, 2 ** a) + random.random())
+    return {'分类': '待确认', '原因': '视觉调用失败', '说明': err}, {}
+def _vision_hook(title, img):  # classify_one 内部调用：优先返回预先并发拿到的投票结果（按顺序）
+    pre = getattr(_TL, "pre", None)
+    return pre.pop(0) if pre else _ark_vision(title, img)
+def _up_hook(u):
+    pre = getattr(_TL, "img", None)
+    return pre if pre else _ORIG_UP(u)
+_ORIG_UP = C.up; C.vision = _vision_hook; C.up = _up_hook
+def classify_parallel(o):
+    """一条：下载图片 → 3 次投票并发 → 交给原 classify_one 汇总（判定逻辑零改动）。"""
+    runs = C.ARGS.runs
+    try:
+        u, img = _ORIG_UP(o['image_url'])
+        votes = [f.result() for f in [_VOTE_POOL.submit(_ark_vision, o['title'], img) for _ in range(runs)]]
+        _TL.img, _TL.pre = (u, img), votes
+        return C.classify_one(o, runs)
+    finally: _TL.img = _TL.pre = None
+
 SEEN = {}  # run_id → 本进程已见过的 listing（含被排除的，只在内存）；跨批去重
 def process_batch(store, run, batch, scraper):
+    """抓取顺序进行；规则通过的条目丢进视觉线程池，不阻塞翻页。结果按抓取顺序（rank）在主线程依次落定：计数/进度/入库都只在主线程，天然线程安全。"""
     rid, bno = run["id"], batch["batch_no"]
     seen = SEEN.setdefault(rid, set()) | store.passed_ids(rid); SEEN[rid] = seen
-    cnt = {"scraped": 0, "passed": 0, "excluded": 0, "dup": 0}; reasons = {}; calls = 0
+    cnt = {"scraped": 0, "passed": 0, "excluded": 0, "dup": 0}; reasons = {}; calls = [0]; clock = threading.Lock()
     store.patch_batch(batch["id"], status="running", started_at=NOW())
-    def flush(final=False):
+    def flush():
         store.patch_batch(batch["id"], scraped_count=cnt["scraped"], passed_count=cnt["passed"], excluded_count=cnt["excluded"], dup_count=cnt["dup"], excluded_by_reason=reasons)
         store.patch_run(rid, heartbeat_at=NOW())
-    for row in scraper:
-        if cnt["scraped"] % 20 == 0 and store.run(rid).get("status") == "canceled":
-            store.patch_batch(batch["id"], status="canceled", finished_at=NOW()); flush(); return "canceled"
-        cnt["scraped"] += 1; lid = str(row["listing_id"])
-        if lid in seen: cnt["dup"] += 1; continue          # 跨批/同批重复：不重复调用、不重复入库
-        seen.add(lid)
-        o = C.dedupe([row])[0]
-        r = C.guard(o) or C.rule(o["title"])                 # ① 标题规则 + 7 天销量兜底：命中即排除，不调豆包
-        if r:
-            g = C.reason_group(r[1]); reasons[g] = reasons.get(g, 0) + 1; cnt["excluded"] += 1
+    def finalize(row, kind, val):   # kind: dup | rule | vision
+        cnt["scraped"] += 1
+        if kind == "dup": cnt["dup"] += 1
+        elif kind == "rule":
+            r = val; g = C.reason_group(r[1]); reasons[g] = reasons.get(g, 0) + 1; cnt["excluded"] += 1
             log_exclusion(run, bno, row, r[1], r[2], "兜底" if r[1] == "7天销量≤3" else "规则")
-        else:                                                 # ② 规则通过 → 豆包视觉×3
-            try: o, usage, n = C.classify_one(o); calls += n
-            except Exception as e: o = {**o, "结果": "待确认", "备注": f"视觉失败：{str(e)[:80]}", "原因": "视觉调用失败"}   # 拿不准就保留
+        else:
+            o = val
             if o["结果"] == "排除":
                 g = C.reason_group(o.get("原因", "")); reasons[g] = reasons.get(g, 0) + 1; cnt["excluded"] += 1
                 log_exclusion(run, bno, row, o.get("原因"), o.get("说明"), "视觉")
-            else:                                             # ③ 只有符合要求的入库
-                sp = lambda v: [x.strip() for x in (v or "").split(";") if x.strip()]
+            else:                                             # 只有符合要求的入库
+                lid = str(row["listing_id"]); sp = lambda v: [x.strip() for x in (v or "").split(";") if x.strip()]
                 store.insert_item({"run_id": rid, "batch_id": batch["id"], "user_id": run["user_id"], "batch_no": bno, "etsy_listing_id": int(lid),
                     "rank": row.get("rank"), "page": row.get("page"), "title": o["title"], "price_min": o["price_min"], "price_max": o["price_max"],
                     "total_sales": o["total_sales"], "sales_7d": o["sales_7d"], "image_url": o.get("image_url_hd") or o.get("image_url"),
@@ -219,16 +257,48 @@ def process_batch(store, run, batch, scraper):
                     "acrylic_fit": o.get("acrylic_fit") or None, "custom_type": o.get("定制类型"), "selling_points": sp(o.get("核心卖点")),
                     "occasions": sp(o.get("适用场合")), "votes": o.get("votes")})
                 cnt["passed"] += 1
-        if cnt["scraped"] % 5 == 0:   # 每 5 条刷新一次进度（网页进度条 = 本批 scraped_count / 本批条数）
+        if cnt["scraped"] % 5 == 0:   # 每 5 条落定刷新一次进度（网页进度条 = 本批 scraped_count / 本批条数）
             store.patch_batch(batch["id"], last_page=row.get("page")); flush()
-        if cnt["scraped"] % 20 == 0: log.info("run %s batch %s: scraped=%s passed=%s excluded=%s dup=%s vision_calls=%s", rid, bno, cnt["scraped"], cnt["passed"], cnt["excluded"], cnt["dup"], calls)
+        if cnt["scraped"] % 20 == 0: log.info("run %s batch %s: done=%s passed=%s excluded=%s dup=%s vision_calls=%s", rid, bno, cnt["scraped"], cnt["passed"], cnt["excluded"], cnt["dup"], calls[0])
+    def vision_task(o):
+        try:
+            o2, usage, n = classify_parallel(o)
+            with clock: calls[0] += n
+            return o2
+        except Exception as e: return {**o, "结果": "待确认", "备注": f"视觉失败：{str(e)[:80]}", "原因": "视觉调用失败"}   # 拿不准就保留
+    pend = deque()   # 按抓取顺序：(row, kind, value|future)
+    def drain(block=False):
+        while pend:
+            row, kind, v = pend[0]
+            if kind == "vision":
+                if not block and not v.done(): return
+                v = v.result()
+            pend.popleft(); finalize(row, kind, v)
+    pool = ThreadPoolExecutor(max_workers=VISION_CONC, thread_name_prefix="vision"); n_seen = 0
+    try:
+        for row in scraper:
+            if n_seen % 20 == 0 and store.run(rid).get("status") == "canceled":
+                for _, k, v in pend:
+                    if k == "vision": v.cancel()
+                pool.shutdown(wait=True, cancel_futures=True); pend.clear()
+                store.patch_batch(batch["id"], status="canceled", finished_at=NOW()); flush(); return "canceled"
+            n_seen += 1; lid = str(row["listing_id"])
+            if lid in seen: pend.append((row, "dup", None))       # 跨批/同批重复：不重复调用、不重复入库
+            else:
+                seen.add(lid); o = C.dedupe([row])[0]
+                r = C.guard(o) or C.rule(o["title"])               # ① 标题规则 + 7 天销量兜底：命中即排除，不调豆包
+                pend.append((row, "rule", r) if r else (row, "vision", pool.submit(vision_task, o)))   # ② 规则通过 → 豆包视觉×3（并发）
+            drain()
+        drain(block=True)
+    finally: pool.shutdown(wait=True)
+    flush()
     # 本批完成：只在这里更新“还剩 N 条未读”
     run = store.run(rid); remaining = max(0, (run.get("max_rows") or 0) - batch["offset_end"])
     store.patch_batch(batch["id"], status="done", finished_at=NOW(), remaining_after=remaining); flush()
     agg = {k: (run.get(f"{k}_count") or 0) + cnt[k] for k in ("scraped", "passed", "excluded")}
     rr = dict(run.get("excluded_by_reason") or {}); [rr.__setitem__(k, rr.get(k, 0) + v) for k, v in reasons.items()]
     upd = dict(scraped_count=agg["scraped"], passed_count=agg["passed"], excluded_count=agg["excluded"], excluded_by_reason=rr,
-               vision_calls=(run.get("vision_calls") or 0) + calls, remaining_count=remaining)
+               vision_calls=(run.get("vision_calls") or 0) + calls[0], remaining_count=remaining)
     if remaining <= 0 or bno >= 5:
         store.patch_run(rid, status="succeeded", finished_at=NOW(), **upd)
     elif run.get("read_all"):  # 一键读取全部剩余：自动排下一批
