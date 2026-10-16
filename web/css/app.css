@@ -485,3 +485,32 @@ a{color:var(--primary);text-decoration:none}a:hover{text-decoration:underline}
 .rfilter .spacer{flex:1}.rfilter [data-ldelrej]{margin-left:auto}
 .delrej-l{display:flex;flex-direction:column;gap:4px;margin-top:8px;font-size:13px}.delrej-l .input{max-width:140px}
 .sc-tabs{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.sc-tabs .spacer{flex:1}
+
+/* .ss-thr 复用于获取链接页的「最多读取」输入 */
+.ss-thr{width:70px;display:inline-block}
+/* 获取链接 #/selscreen（复用 sc-*） */
+.sc-x.ss-pass{right:50px;background:var(--ok)}.sc-x.ss-pass:hover{filter:brightness(1.1);background:var(--ok)}
+.sc-tag.ss-tag-q{background:#c98a00}
+.ss-reason{font-size:12px;margin-top:4px;display:flex;flex-wrap:wrap;gap:4px;align-items:center;color:var(--text-2)}
+.ss-start{padding:var(--s4);margin-bottom:var(--s4)}.ss-form{display:flex;gap:10px;flex-wrap:wrap;align-items:center}.ss-form #ssKw{flex:1;min-width:240px}
+.ss-prog-row{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-top:8px}.ss-prog{width:220px}
+.sc-tag.ss-tag-run{background:var(--info, #3b6fd8)}
+.ss-new{animation:ssIn .35s ease}@keyframes ssIn{from{opacity:0;transform:translateY(-6px)}to{opacity:1;transform:none}}
+a.btn[aria-disabled="true"]{pointer-events:none;opacity:.5}
+.ss-count{margin-top:10px;padding:10px 12px;border:1px solid var(--border);border-radius:var(--r);background:var(--surface-2);display:flex;flex-direction:column;gap:8px}
+.ss-count-warn{border-color:var(--bad);background:var(--bad-bg)}
+.ss-count-n{display:flex;align-items:center;gap:8px;flex-wrap:wrap;font-size:15px}
+.ss-n{font-size:24px;font-weight:700}.ss-n-ok{color:var(--ok)}.ss-n-info{color:var(--primary)}.ss-n-bad{color:var(--bad)}
+.ss-audit{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:10px 14px;margin-bottom:var(--s4);font-size:13px}
+.ss-audit summary{cursor:pointer}
+.ss-audit-t{width:100%;border-collapse:collapse;margin-top:8px;font-size:12px}.ss-audit-t th,.ss-audit-t td{border-bottom:1px solid var(--border);padding:4px 6px;text-align:left;vertical-align:top}
+.ss-audit-t .ss-at{max-width:420px}
+.ss-count p{margin:0}
+.ss-result{padding:var(--s4)}.ss-res-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap;margin-bottom:10px}.ss-res-head h3{margin:0}
+.ss-links{background:var(--surface-2);border:1px solid var(--border);border-radius:var(--r);padding:10px 12px;font-size:13px;line-height:1.7;max-height:60vh;overflow:auto;white-space:pre;user-select:all;margin:0 0 10px}
+.ss-audit-mini{border:0;padding:0;background:none;font-size:12px;color:var(--text-3)}.ss-audit-mini summary{color:var(--text-3)}
+.ss-wait{margin:8px 0}
+.ss-batch{background:var(--surface);border:1px solid var(--border);border-radius:var(--r-lg);padding:var(--s4);margin-bottom:12px}
+.ss-batch-copied,.ss-batch-run{display:flex;align-items:center;gap:8px;padding:10px 14px}
+.ss-cum,.ss-next{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 16px;margin-bottom:12px}.ss-next p{margin:2px 0 0}
+.ss-note{margin-top:6px}
