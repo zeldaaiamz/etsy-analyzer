@@ -100,6 +100,7 @@ UI_DEFAULTS = {
     "popover": ".el-popover[aria-hidden='false']",             # 当前展开的下拉面板
     "total_sales_line": "xpath=.//div[normalize-space(text())='Total sales:']/..",
     "sales7_line": "xpath=.//div[normalize-space(text())='7-day sales:']/..",
+    "chip_keyword": "Keyword: {keyword}",
     "chip_price": "Price: {price_min}~{price_max}", "chip_total": "Total sales: {min_sales}~", "chip_7d": "7-day sales: {min_sales_7d}~",  # 10-16 实测确认；Min 为闭区间
     "min_input": "input[placeholder='Min']", "max_input": "input[placeholder='Max']",
     "ok_btn": "[role=button]:text-is('OK')",                   # div[role=button]，不是 <button>；只在 popover 内找
@@ -127,7 +128,10 @@ def _open_list(p, keyword, params):
     try:
         b = pg.query_selector(U["banner_close"])
         if b and b.is_visible(): b.click(); time.sleep(0.5)
-        pg.fill(U["search_input"], keyword); pg.click(U["search_btn"]); pg.wait_for_load_state("networkidle"); time.sleep(2)
+        for attempt in range(3):   # 页面水合前填写的关键词会被清空 → 以 Selected: 的 Keyword 标签为准，最多重试 3 次
+            pg.fill(U["search_input"], keyword); pg.click(U["search_btn"]); pg.wait_for_load_state("networkidle"); time.sleep(2 + attempt * 2)
+            if U["chip_keyword"].format(keyword=keyword).replace(" ", "").lower() in pg.locator(U["selected_row"]).first.inner_text().replace(" ", "").lower(): break
+        else: raise RuntimeError(f"关键词未生效：Selected: 中没有 Keyword: {keyword}")
         # Basic: Price(USD) → 自定义 Min/Max → OK（都在展开的 popover 里）
         pg.click(U["price_dd"]); time.sleep(1); pop = pg.locator(U["popover"])
         pop.locator(U["min_input"]).first.fill(str(F["price_min"])); pop.locator(U["max_input"]).first.fill(str(F["price_max"]))
@@ -141,8 +145,8 @@ def _open_list(p, keyword, params):
         st = pg.locator(U["sort_dd"]).first.inner_text().strip()
         if "7-day" not in st: raise RuntimeError(f"排序不是 7 天销量降序：{st}")
         sel = pg.locator(U["selected_row"]).first.inner_text()
-        need = [U["chip_price"].format(**F), U["chip_total"].format(**F), U["chip_7d"].format(**F)]
-        miss = [x for x in need if x.replace(" ", "") not in sel.replace(" ", "")]
+        need = [U["chip_keyword"].format(keyword=keyword), U["chip_price"].format(**F), U["chip_total"].format(**F), U["chip_7d"].format(**F)]
+        miss = [x for x in need if x.replace(" ", "").lower() not in sel.replace(" ", "").lower()]
         if miss: raise RuntimeError(f"筛选未生效，Selected: 缺少 {miss}（实际：{sel[:120]}）")
     except Exception:
         try: os.makedirs(LOGDIR, exist_ok=True); pg.screenshot(path=f"{LOGDIR}/ehunt-fail-{int(time.time())}.png")
