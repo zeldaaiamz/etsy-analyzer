@@ -109,16 +109,10 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
   const deadFailed = (it) => it.status === "failed" && it.screen_state !== "kept" && (it.attempts ?? 0) >= (it.max_attempts ?? 3);
   async function deleteFailed() {
     const ids = V.items.filter(deadFailed).map((it) => it.id), n = ids.length; if (!n) return;
-    const ok = await confirmDialog({ title: `一键删除失败（${n} 条）`, danger: true, ok: `删除 ${n} 条`,
-      body: `<p>将<b>永久删除</b> <b>${n}</b> 条已重试 3 次仍取数失败的产品（任务及其数据一并删除）。确定删除？</p>
-        <p class="hint">删除后不可恢复；不消耗 EHunt 额度。</p>
-        <label class="delrej-l"><span>请输入数量 <b>${n}</b> 以确认：</span><input id="scDelFailN" class="input" inputmode="numeric" autocomplete="off" placeholder="${n}"></label><p id="scDelFailErr" class="rj-err"></p>`,
-      validate: () => { const v = $("scDelFailN").value.trim() === String(n); $("scDelFailErr").textContent = v ? "" : `请输入 ${n}`; return v; } });
-    if (!ok) return;
     let res = { deleted: n, ids };
     if (!DEMO) { const r = await getSb().rpc("screen_delete_failed", V.batch ? { p_batch: V.batch } : {}); if (r.error) return toast(`删除失败：${r.error.message}`, "bad"); res = r.data || res; }
     const gone = new Set(res.ids || ids); V.items = V.items.filter((it) => !gone.has(it.id));
-    toast(`已永久删除 ${res.deleted ?? n} 条失败条目`, "ok"); render();
+    toast(`已永久删除 ${res.deleted ?? n} 条`, "ok"); render();
   }
   async function refetchAll() {
     const list = V.items.filter(canRefetch); if (!list.length || V.busy.has("refall")) return;
