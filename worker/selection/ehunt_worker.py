@@ -66,7 +66,8 @@ def scrape_ehunt(keyword, params, start_rank, end_rank):
                 old = first_href(); pg.fill(U["jump_input"], str(page)); pg.keyboard.press("Enter"); wait_page(page, old)
             rank = (page - 1) * ps
             while rank < end_rank:
-                pg.wait_for_selector(U["row"], timeout=30000)
+                pg.wait_for_selector(U["row"], timeout=30000); t_page = time.time()
+                log.info("ehunt page %s: reading rows (rank %s→, target %s)", page, rank + 1, end_rank)
                 for tr in pg.query_selector_all(U["row"]):
                     a = tr.query_selector(U["title"])
                     if not a: continue
@@ -79,6 +80,7 @@ def scrape_ehunt(keyword, params, start_rank, end_rank):
                     yield {"rank": rank, "page": page, "title": a.inner_text().strip(), "listing_id": lid, "url": f"https://www.etsy.com/listing/{lid}", "image_url": img.get_attribute("src") if img else "",
                            "price": num(cell("price")), "total_sales": total_of(cell("total")), "sales_7d": d7_of(cell("d7"))}
                     time.sleep(0.3)
+                log.info("ehunt page %s done: rank=%s, %.0fs", page, rank, time.time() - t_page)
                 nxt = pg.query_selector(U["next"])
                 if not nxt or rank >= end_rank: break
                 old = first_href(); nxt.click(); page += 1; wait_page(page, old)
@@ -217,7 +219,9 @@ def process_batch(store, run, batch, scraper):
                     "acrylic_fit": o.get("acrylic_fit") or None, "custom_type": o.get("定制类型"), "selling_points": sp(o.get("核心卖点")),
                     "occasions": sp(o.get("适用场合")), "votes": o.get("votes")})
                 cnt["passed"] += 1
-        if cnt["scraped"] % 20 == 0: store.patch_batch(batch["id"], last_page=row.get("page")); flush()
+        if cnt["scraped"] % 5 == 0:   # 每 5 条刷新一次进度（网页进度条 = 本批 scraped_count / 本批条数）
+            store.patch_batch(batch["id"], last_page=row.get("page")); flush()
+        if cnt["scraped"] % 20 == 0: log.info("run %s batch %s: scraped=%s passed=%s excluded=%s dup=%s vision_calls=%s", rid, bno, cnt["scraped"], cnt["passed"], cnt["excluded"], cnt["dup"], calls)
     # 本批完成：只在这里更新“还剩 N 条未读”
     run = store.run(rid); remaining = max(0, (run.get("max_rows") or 0) - batch["offset_end"])
     store.patch_batch(batch["id"], status="done", finished_at=NOW(), remaining_after=remaining); flush()
