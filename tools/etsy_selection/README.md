@@ -29,11 +29,18 @@ python3 replay_classify.py <EHunt列表.json> <输出目录> --keyword "acrylic 
 保留 24 / 待确认 8 / 排除 64；视觉 111 次，约 20.7 万 tokens，约 ¥0.18，约 5 分钟（8 并发）。
 旧版回放脚本：replay_classify_v2_legacy.py + replay_aggregate.py。
 
+## 标准筛选（数量查询与抓取完全一致）
+价格 $8–40 · 总销量 ≥100 · 7 天销量 >3（EHunt Min 4）· 按 7 天销量降序 · 陈选六条规则。默认值在 worker `FILTER_DEFAULTS`，可用 `EHUNT_FILTERS` 覆盖；迁移 024 `sel_count` 默认参数同步。
+
+## 输出（Hongyan 10-16 最新）
+「链接筛选」#/selscreen（导航在「任务」之前）：查数量 → 填最多读取条数点“抓取” → 抓取中只显示进度条和停止 → 全部完成后显示“符合要求 N 条”（保留 + 待确认）和纯 Etsy 链接清单（每行一个 https://www.etsy.com/listing/<id>），可复制全部、下载 TXT/CSV。
+排除项全部存库（sel_items gate=rejected，含原因），页面只留一个折叠的“排除记录”（规则 6）。逐条卡片复核已从此页移除；#/select 保留但不再是主要输出。
+
 ## 线上流程（按需，2026-10-16 定稿）
-1. 「选品预筛」#/selscreen 输入关键词 → **查询数量**：`sel_count()` 建轻量任务 → worker 在 EHunt 界面设好筛选后只读 “Find N products” → 页面显示 N 条（acrylic decoration = 505）。
+1. 「链接筛选」#/selscreen 输入关键词 → **查询数量**：`sel_count()` 建轻量任务 → worker 在 EHunt 界面设好筛选后只读 “Find N products” → 页面显示 N 条（全部筛选含 7 天销量 Min 4 实测：acrylic decoration = 20（“Find 20 products”），sign = 1,688（85 页，>1000 建议跳过））。
    - N ≤ 100 全读；N > 100 默认前 100 可调；N > 1000 建议跳过等人工决定（`sel_skip`）。查到数量前“开始抓取”按钮禁用。
 2. 填最多读取条数 → **开始抓取**：`sel_start(run, limit)`。
-3. worker 逐行读列表（每页 20 条），每行：原始行入 `sel_raw_rows` → 同 listing 合并 → 标题关键词 + 视觉×3 + 陈选六条规则分类。
+3. worker 逐行读列表（每页 20 条）。兜底：7 天销量 ≤3 的行直接排除（原因“7天销量≤3”，不调视觉，进审计）。每行：原始行入 `sel_raw_rows` → 同 listing 合并 → 标题关键词 + 视觉×3 + 陈选六条规则分类。
    - **排除的不进入预筛**，只进页面上的审计清单（“已排除 64：定制 55 / IP 4 / 材质 4 …”，可展开、可恢复），满足规则 6。
    - 保留、待确认进入预筛；拿不准一律待确认。
 4. 预筛（待确认 / 保留 / 全部）由 Hongyan 人工复核：✓ 保留、✕ 排除（进审计清单）。只有“保留”的进入「选品筛选」#/select。
@@ -41,8 +48,8 @@ python3 replay_classify.py <EHunt列表.json> <输出目录> --keyword "acrylic 
 
 ## EHunt 界面操作（筛选不在 URL 里，必须点界面）
 页面 https://ehunt.ai/etsy-product-research：顶部搜索框（placeholder “Enter a product name, tag, product ID...”）输入关键词 → 橙色 Search；
-Basic: 行 Price(USD) 下拉自定义 Min 8 / Max 40 → OK；Sales 下拉 “Total sales:” Min 100 → OK；结果右上排序（Export to CSV 旁）默认 “↓7-day sales”，校验；
-校验 “Selected:” 有 “Price: 8~40” 和 “Total sales: 100~”；数量用 `/Find ([\d,]+) products/`。任一校验失败 → 任务失败并截图到日志目录，不会用未筛选的数（如 43,805）。
+Basic: 行 Price(USD) 下拉自定义 Min 8 / Max 40 → OK；Sales 下拉 “Total sales:” Min 100、“7-day sales:” Min 4（即 >3）→ OK；结果右上排序（Export to CSV 旁）默认 “↓7-day sales”，校验；
+校验 “Selected:” 有 “Price: 8~40”、“Total sales: 100~” 和 7 天销量标签（实测 “7-day sales: 4~”，Min 为闭区间）；数量用 `/Find ([\d,]+) products/`。任一校验失败 → 任务失败并截图到日志目录，不会用未筛选的数（如 43,805）。
 选择器都在 `UI_DEFAULTS`，可用环境变量 `EHUNT_UI`（JSON）覆盖；筛选值可用 `EHUNT_FILTERS` 覆盖。当前选择器是占位，首次真实运行前需对照页面校准。
 
 ## 运行位置：本 box（不是 ECS）
@@ -59,3 +66,5 @@ Basic: 行 Price(USD) 下拉自定义 Min 8 / Max 40 → OK；Sales 下拉 “To
 - 界面改版使选择器失效；每次都校验 Selected: 标签和排序，避免拿到未筛选数据。
 - box 重启后需 `start`（可改 systemd --user）；box 与桌面共享机器，浏览器内存约 400–800M。
 - 成本：约 ¥0.18 / 100 行（视觉×3），约 5 分钟 / 100 行。
+- 列表 “Total sales (7-Day Sales)” 列：总销量旁绿色 ↑N 为 7 天销量，worker 用 `↑N` 正则从同一格解析。
+- 列表 “Total sales (7-Day Sales)” 列：总销量旁绿色 ↑N 为 7 天销量，worker 用 `↑N` 正则从同一格解析。

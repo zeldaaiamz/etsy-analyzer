@@ -13,7 +13,7 @@
 <body>
 <header class="topbar">
   <div class="brand"><span class="logo">◆</span> 选品雷达 <span class="brand-sub">Etsy → Amazon US</span></div>
-  <nav id="nav" class="nav hidden"><a href="#/" data-nav="tasks">任务</a><a href="#/screen" data-nav="screen">预筛选</a><a href="#/selscreen" data-nav="selscreen">选品预筛</a><a href="#/select" data-nav="select">选品筛选</a><a href="#/library" data-nav="library">产品库 <span id="libCount" class="nbadge nb-loading" title="加载中">…</span></a></nav>
+  <nav id="nav" class="nav hidden"><a href="#/selscreen" data-nav="selscreen">链接筛选</a><a href="#/" data-nav="tasks">任务</a><a href="#/screen" data-nav="screen">预筛选</a><a href="#/select" data-nav="select">选品筛选</a><a href="#/library" data-nav="library">产品库 <span id="libCount" class="nbadge nb-loading" title="加载中">…</span></a></nav>
   <div id="userBox" class="user hidden"><span id="quotaMeter" class="qmeter hidden" title="EHunt 每日额度（每条新 listing 1 次；24 小时内重复的 listing 走缓存不耗额度）"></span><span id="demoBadge" class="pill pill-warn hidden">演示数据</span><span id="who" class="muted"></span><button id="btnLogout" class="btn btn-ghost btn-sm">退出</button></div>
 </header>
 
@@ -37,7 +37,7 @@
   </section>
 
   <section id="selScreenView" class="hidden">
-    <div class="lib-head"><div><h2>选品预筛 <span class="hint" id="ssSum"></span></h2><p class="muted">① 输入关键词先查 EHunt 结果数（$8–40 · 总销量 ≥100 · 按 7 天销量降序）→ ② 设置最多读取条数开始抓取 → ③ 每条读到后立即按标题关键词 + 视觉 + 六条规则筛选：排除的不进入预筛（只记入审计清单，含原因和数量），保留和待确认进入预筛 → ④ 人工复核后，“保留”的才进入选品筛选。</p></div></div>
+    <div class="lib-head"><div><h2>链接筛选 <span class="hint" id="ssSum"></span></h2><p class="muted">① 输入关键词先查 EHunt 结果数（$8–40 · 总销量 ≥100 · 7 天销量 >3 · 按 7 天销量降序）→ ② 填写最多读取条数点“抓取” → ③ 每条经标题关键词 + 视觉 + 陈选六条规则判断 → ④ 全部完成后输出“符合要求 N 条”和 Etsy 链接清单（含待确认）。排除记录留存可查。</p></div></div>
     <div id="ssStart"></div>
     <div id="ssTabs" class="fchips sc-tabs"></div>
     <div id="ssBody"></div>

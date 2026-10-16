@@ -74,6 +74,12 @@ def decide(j,title):
         elif ARGS.mode=='lenient': c,rs='待确认','材质不符-'+(fit or '?')
         else: c,rs=(('排除','材质不符-形态不可改') if fit=='不适合' and '定制' not in rs else ('待确认','材质不符-可改造' if fit=='可改造' else '材质不符'))
     return c,(rs if c!='保留' else ''),note
+MIN_SALES_7D=4  # 标准筛选：7 天销量 >3
+def guard(o):
+    """安全检查：EHunt 页面筛选万一失效，7 天销量 ≤3 的直接排除（不调视觉），记入审计。"""
+    try: d7=int(o.get('sales_7d') or 0)
+    except Exception: d7=0
+    return ('排除','7天销量≤3',f'7天销量 {d7} < {MIN_SALES_7D}','无') if d7<MIN_SALES_7D else None
 def rule(t):
     m=re.search(IP,t,re.I)
     if m: return '排除','IP','关键词:'+m.group(0),'无'
@@ -86,8 +92,8 @@ def rule(t):
 def classify_one(o,runs=None):
     """单条（已去重）→ 补全 结果/原因/备注/gate 等字段，返回 (o, usage Counter, 视觉调用次数)。worker 逐条调用。"""
     usage=Counter(); n=0; o.setdefault('image_url_hd',(o.get('image_url') or '').replace('il_120xN','il_794xN'))
-    r=rule(o['title'])
-    if r: o.update(结果=r[0],原因=r[1],说明=r[2],定制类型=r[3],来源='规则',acrylic_fit='',备注='',votes='')
+    r=guard(o) or rule(o['title'])
+    if r: o.update(结果=r[0],原因=r[1],说明=r[2],定制类型=r[3],来源='兜底' if r[1]=='7天销量≤3' else '规则',acrylic_fit='',备注='',votes='')
     else:
         u,img=up(o['image_url']); o['image_url_hd']=u; ds=[]
         for _ in range(runs or ARGS.runs):
@@ -119,8 +125,8 @@ def run():
     items=dedupe(rows); todo=[]
     for o in items:
         o['image_url_hd']=o['image_url'].replace('il_120xN','il_794xN')
-        r=rule(o['title'])
-        if r: o.update(结果=r[0],原因=r[1],说明=r[2],定制类型=r[3],来源='规则',acrylic_fit='',备注='',votes='')
+        r=guard(o) or rule(o['title'])
+        if r: o.update(结果=r[0],原因=r[1],说明=r[2],定制类型=r[3],来源='兜底' if r[1]=='7天销量≤3' else '规则',acrylic_fit='',备注='',votes='')
         else: todo.append(o)
     usage=Counter(); calls=0
     def work(o):

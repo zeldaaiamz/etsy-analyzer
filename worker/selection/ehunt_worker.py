@@ -39,7 +39,10 @@ class Store:
 def scrape_ehunt(keyword, params, limit):
     """逐条产出 {rank,title,price,total_sales,sales_7d,listing_id,image_url}：界面设好筛选后读表格 DOM，每页 20 条翻页。"""
     from playwright.sync_api import sync_playwright
+    import re
     U = ui(); num = lambda s: float("".join(ch for ch in (s or "") if ch.isdigit() or ch == ".") or 0)
+    def d7_of(t): m = re.search(U["d7_regex"], t or ""); return int(m.group(1).replace(",", "")) if m else 0
+    def total_of(t): return int(num(re.split(r"↑", t or "")[0]))
     with sync_playwright() as p:
         ctx, pg = _open_list(p, keyword, params); rank = 0
         try:
@@ -51,7 +54,7 @@ def scrape_ehunt(keyword, params, limit):
                     href = a.get_attribute("href") or ""; lid = "".join(ch for ch in href.split("/listing/")[-1].split("/")[0] if ch.isdigit())
                     img = tr.query_selector(U["img"]); cell = lambda k: (tr.query_selector(U[k]) or a).inner_text(); rank += 1
                     yield {"rank": rank, "title": a.inner_text().strip(), "listing_id": lid, "image_url": img.get_attribute("src") if img else "",
-                           "price": num(cell("price")), "total_sales": int(num(cell("total"))), "sales_7d": int(num(cell("d7")))}
+                           "price": num(cell("price")), "total_sales": total_of(cell("total")), "sales_7d": d7_of(cell("d7"))}
                     if rank >= limit: break
                     time.sleep(0.3)  # 读页面节流
                 nxt = pg.query_selector(U["next"])
@@ -61,7 +64,7 @@ def scrape_ehunt(keyword, params, limit):
 
 # 标准筛选（需求文档 §2）：数量与抓取都必须带上，否则会拿到未筛选的总数（如 43,805）。
 # EHunt 的筛选不在 URL 里（https://ehunt.ai/etsy-product-research 无查询参数），只在页面状态里 → 必须通过界面操作设置。
-FILTER_DEFAULTS = {"price_min": 8, "price_max": 40, "min_sales": 100, "sort": "↓7-day sales"}
+FILTER_DEFAULTS = {"price_min": 8, "price_max": 40, "min_sales": 100, "min_sales_7d": 4, "sort": "↓7-day sales"}  # 7 天销量 >3 即 Min 4
 # 界面选择器/文字（占位，按 2026-10-16 浏览器观察；EHunt 改版时用 EHUNT_UI（JSON）覆盖，不改代码）
 UI_DEFAULTS = {
     "url": "https://ehunt.ai/etsy-product-research",
@@ -71,14 +74,18 @@ UI_DEFAULTS = {
     "price_dd": "text=Price(USD)",
     "sales_dd": "text=Sales",
     "total_sales_line": ":text('Total sales:')",
+    "sales7_line": ":text('7-day sales:')",
+    # Selected: 标签期望文字（7 天销量那枚的确切文字待校准时确认）
+    "chip_price": "Price: {price_min}~{price_max}", "chip_total": "Total sales: {min_sales}~", "chip_7d": "7-day sales: {min_sales_7d}~",  # 10-16 实测确认；Min 为闭区间
     "min_input": "input[placeholder*='Min' i]", "max_input": "input[placeholder*='Max' i]",
     "ok_btn": "button:has-text('OK')",
     "sort_dd": ":text('Export to CSV') >> xpath=following::*[contains(normalize-space(.),'sales')][1]",
     "selected_row": ":text('Selected:') >> xpath=..",
     "count_text": ":text-matches('Find [\\d,]+ products')",
     "count_regex": r"Find ([\d,]+) products",
+    # 列表：“Total sales (7-Day Sales)” 列里总销量旁的绿色 ↑N 就是 7 天销量（同一格）
     "row": "table tbody tr", "title": "a[href*='etsy.com/listing']", "price": "td:nth-child(3)", "total": "td:nth-child(4)",
-    "d7": "td:nth-child(5)", "img": "img", "next": "li.ant-pagination-next:not(.ant-pagination-disabled)",
+    "d7": "td:nth-child(4)", "d7_regex": r"↑\s*([\d,]+)", "img": "img", "next": "li.ant-pagination-next:not(.ant-pagination-disabled)",
     "page_size": 20,
 }
 def ui(): return {**UI_DEFAULTS, **json.loads(os.environ.get("EHUNT_UI", "{}"))}
@@ -97,12 +104,15 @@ def _open_list(p, keyword, params):
         pg.click(U["price_dd"]); pg.fill(U["min_input"], str(F["price_min"])); pg.fill(U["max_input"], str(F["price_max"])); pg.click(U["ok_btn"]); time.sleep(1.5)
         # Sales → Total sales: Min → OK
         pg.click(U["sales_dd"]); line = pg.locator(U["total_sales_line"]).locator("xpath=..")
-        line.locator(U["min_input"]).first.fill(str(F["min_sales"])); pg.click(U["ok_btn"]); pg.wait_for_load_state("networkidle"); time.sleep(1.5)
+        line.locator(U["min_input"]).first.fill(str(F["min_sales"]))
+        # 同一 Sales 下拉的 “7-day sales:” 行 Min 4（>3）
+        pg.locator(U["sales7_line"]).locator("xpath=..").locator(U["min_input"]).first.fill(str(F["min_sales_7d"]))
+        pg.click(U["ok_btn"]); pg.wait_for_load_state("networkidle"); time.sleep(1.5)
         # 排序默认 ↓7-day sales，校验
         st = pg.locator(U["sort_dd"]).first.inner_text().strip()
         if "7-day" not in st: raise RuntimeError(f"排序不是 7 天销量降序：{st}")
         sel = pg.locator(U["selected_row"]).first.inner_text()
-        need = [f"Price: {F['price_min']}~{F['price_max']}", f"Total sales: {F['min_sales']}~"]
+        need = [U["chip_price"].format(**F), U["chip_total"].format(**F), U["chip_7d"].format(**F)]
         miss = [x for x in need if x.replace(" ", "") not in sel.replace(" ", "")]
         if miss: raise RuntimeError(f"筛选未生效，Selected: 缺少 {miss}（实际：{sel[:120]}）")
     except Exception:
@@ -139,6 +149,9 @@ def process(store, run, scraper):
         base = {"run_id": rid, "user_id": run["user_id"], "etsy_listing_id": int(lid), "ranks": o["ranks"], "title": o["title"], "price_min": o["price_min"],
                 "price_max": o["price_max"], "total_sales": o["total_sales"], "sales_7d": o["sales_7d"], "dup_note": o["dup_note"],
                 "image_url": o["image_url"].replace("il_120xN", "il_794xN"), "verdict": "待确认", "item_state": "scraped"}
+        if o["sales_7d"] < int(filters(run.get("params")).get("min_sales_7d", 4)):  # 安全检查：页面筛选失效时兜底，记入审计
+            it = store.upsert_item({**base, "verdict": "排除", "reason": "7天销量≤3", "source": "兜底", "gate": "rejected", "item_state": "classified", "classified_at": NOW()})
+            n_cls += 1; store.patch_run(rid, scraped_count=n_scr, classified_count=n_cls, heartbeat_at=NOW()); continue
         if len(g) > 1:  # 重复行：只更新合并字段，不重新分类
             store.upsert_item({k: v for k, v in base.items() if k not in ("verdict", "item_state")}); store.patch_run(rid, scraped_count=n_scr, heartbeat_at=NOW()); continue
         it = store.upsert_item(base); store.patch_run(rid, scraped_count=n_scr, heartbeat_at=NOW())

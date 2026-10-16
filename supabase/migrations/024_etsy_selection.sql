@@ -5,7 +5,7 @@
 --        → 每读到一条：写 sel_raw_rows（原始全保留）+ upsert sel_items(item_state=scraped) → 立即规则+视觉×3 分类 → item_state=classified，按结论设 gate
 --        → 前端 #/selscreen 轮询/Realtime 看到逐条进入（进度条）→ 人工复核 → 只有 gate=passed 的进入 #/select。
 --        （tools/etsy_selection/import_run.py 仅用于离线回放导入）
---        → 前端 #/selscreen「选品预筛」人工复核（通过 / 排除 / 恢复）→ 只有 gate='passed' 的进入 #/select「选品筛选」→ 一键加入产品库“备选”。
+--        → 前端 #/selscreen「链接筛选」人工复核（通过 / 排除 / 恢复）→ 只有 gate='passed' 的进入 #/select「选品筛选」→ 一键加入产品库“备选”。
 -- 闸门 gate：保留→passed(auto)，待确认→pending（必须人工确认才通过），排除→rejected(auto)；人工可改任意一条（gate_by='user'）。
 
 create table if not exists public.sel_runs (
@@ -91,7 +91,7 @@ begin
   if uid is null or coalesce(trim(p_keyword), '') = '' then raise exception '需要登录并填写关键词'; end if;
   if exists (select 1 from public.sel_runs where user_id = uid and status in ('count_queued','counting','queued','running')) then raise exception '已有进行中的选品任务'; end if;
   insert into public.sel_runs (user_id, keyword, status, params)
-  values (uid, trim(p_keyword), 'count_queued', jsonb_build_object('price_min',8,'price_max',40,'min_sales',100,'sort','↓7-day sales') || coalesce(p_params, '{}'::jsonb)  -- 标准筛选，数量与抓取都必须带
+  values (uid, trim(p_keyword), 'count_queued', jsonb_build_object('price_min',8,'price_max',40,'min_sales',100,'min_sales_7d',4,'sort','↓7-day sales') || coalesce(p_params, '{}'::jsonb)  -- 标准筛选，数量与抓取都必须带
           || jsonb_build_object('mode','convertible','runs',3,'optional_custom','keep'))
   returning id into rid;
   return rid;

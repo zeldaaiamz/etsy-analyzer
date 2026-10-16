@@ -1,14 +1,16 @@
-// 选品预筛（#/selscreen[/<run>]）：输入关键词点“开始” → sel_start 建任务 → box 上的 selection worker 用自己已登录的浏览器逐条读 EHunt 列表页
+// 链接筛选（#/selscreen[/<run>]）：输入关键词点“开始” → sel_start 建任务 → box 上的 selection worker 用自己已登录的浏览器逐条读 EHunt 列表页
 // → 每条立即分类（convertible + 可选定制保留，视觉×3）→ 逐条出现在这里（3 秒轮询，带进度条）→ 人工复核，
 // 只有“已通过”（机器保留 + 人工确认的待确认）才进入 #/select。样式/交互沿用 #/screen 的 sc-* 卡片与 ✕/撤销按钮，不改动 #/screen。
 const GATE_NAME = { pending: "待确认", passed: "保留", rejected: "已排除" };
 // 排除原因归类（规则 6：每一步排除都记原因和数量）
-const RGROUP = (it) => it.gate_by === "user" ? "人工排除" : /定制/.test(it.reason || "") ? "定制" : it.reason === "IP" ? "IP" : /材质/.test(it.reason || "") ? "材质" : /数字|素材|空白/.test(it.reason || "") ? "素材/数字文件" : "其他";
+const RGROUP = (it) => it.gate_by === "user" ? "人工排除" : it.reason === "7天销量≤3" ? "7天销量≤3" : /定制/.test(it.reason || "") ? "定制" : it.reason === "IP" ? "IP" : /材质/.test(it.reason || "") ? "材质" : /数字|素材|空白/.test(it.reason || "") ? "素材/数字文件" : "其他";
 export function createSelScreen({ $, esc, imgUrl, toast, getSb, DEMO }) {
   const V = { runs: [], run: null, items: [], tab: "pending", timer: null, fx: null, auditOpen: false };
   const active = (r) => r && ["count_queued", "counting", "queued", "running"].includes(r.status);
   // 演示用的 EHunt 结果数（标准筛选：$8–40、总销量 ≥100、按 7 天销量）
-  const DEMO_COUNTS = { "acrylic decoration": 505, "acrylic sign": 3260, "sign": 12840, "keychain": 4710, "acrylic cake topper": 86 };
+  // 演示数字（非实测，界面上会标“演示数字”）；实测值放 MEASURED（含 7 天销量 >3 筛选后的数）后会替换并标“EHunt 实测”
+  const DEMO_COUNTS = { "acrylic decoration": 20, "sign": 1688 }; // 10-16 实测（全部筛选含 7 天销量 Min 4）；其他词为演示数字
+  const MEASURED = { "acrylic decoration": "10-16 Find 20 products", "sign": "10-16 共 1,688 条 / 85 页" };
   const demoTotal = (kw) => DEMO_COUNTS[kw.toLowerCase()] ?? (40 + [...kw].reduce((a, c) => a + c.charCodeAt(0) * 7, 0) % 900);
   const advice = (n) => n <= 100 ? ["ok", `≤100 条：全部读取`] : n > 1000 ? ["bad", `超过 1000 条：建议先跳过，等人工决定（需求文档 §2，例如 sign、keychain）`] : ["info", `超过 100 条：默认只读前 100 条（按 7 天销量），可调整`];
   // 演示：模拟 worker 逐条抓取 + 分类（scraped → classified），不连 Supabase
@@ -20,8 +22,9 @@ export function createSelScreen({ $, esc, imgUrl, toast, getSb, DEMO }) {
   }
   async function demoStart(run, limit) {
     const fx = V.fx, src = fx.items["demo-run"].map((x) => ({ ...x })), id = run.id;
-    Object.assign(run, { status: "running", target_count: Math.min(limit, src.length) }); render();
-    const raw = JSON.parse(JSON.stringify(src)).sort((a, b) => a.ranks[0] - b.ranks[0]); let i = 0;
+    Object.assign(run, { status: "running", target_count: Math.min(limit, QSP.has("guarddemo") ? src.length : src.filter((x) => x.sales_7d >= FILTERS.min_sales_7d).length) }); render();
+    // EHunt 页面已按 7 天销量 >3 筛选，只会返回这些行；?guarddemo=1 时播放全部回放行，演示兜底排除
+    const raw = JSON.parse(JSON.stringify(src)).filter((x) => QSP.has("guarddemo") || x.sales_7d >= FILTERS.min_sales_7d).sort((a, b) => a.ranks[0] - b.ranks[0]); let i = 0;
     const step = () => {
       if (run.status === "canceled") return;
       if (i >= raw.length || run.scraped_count >= run.target_count) { run.status = "succeeded"; run.stats.raw_rows = run.scraped_count; run.stats.items = fx.items[id].length; return rerender(); }
@@ -35,7 +38,7 @@ export function createSelScreen({ $, esc, imgUrl, toast, getSb, DEMO }) {
   const QSP = new URLSearchParams(location.search);
   const rerender = () => { if (location.hash.startsWith("#/selscreen")) { V.items = V.fx.items[V.run?.id] || V.items; render(); } };
   // 标准筛选（需求文档 §2），数量查询和抓取都带上；box worker 在 EHunt 界面上逐项设置并校验 Selected: 标签
-  const FILTERS = { price_min: 8, price_max: 40, min_sales: 100, sort: "↓7-day sales" };
+  const FILTERS = { price_min: 8, price_max: 40, min_sales: 100, min_sales_7d: 4, sort: "↓7-day sales" };
   async function count() {
     const kw = $("ssKw").value.trim(); if (!kw) return toast("请输入关键词", "bad");
     if (DEMO) return demoCount(kw);
@@ -89,54 +92,57 @@ export function createSelScreen({ $, esc, imgUrl, toast, getSb, DEMO }) {
           ${it.reason ? `<b>${esc(it.reason)}</b>` : ""}${it.note ? ` · ${esc(it.note)}` : ""}${it.acrylic_fit ? ` · 亚克力：${esc(it.acrylic_fit)}` : ""}</div></div></div>`;
   }
   function countPanel(r) {
-    const locked = `<div class="ss-form"><label class="hint">读取前 <input class="input input-sm ss-thr" type="number" disabled placeholder="—"> 条</label><button class="btn btn-primary" disabled title="先查询数量">开始抓取 →</button><span class="hint">先查询数量，显示结果数后才能开始</span></div>`;
+    const locked = `<div class="ss-form"><label class="hint">读取前 <input class="input input-sm ss-thr" type="number" disabled placeholder="—"> 条</label><button class="btn btn-primary" disabled title="先查询数量">抓取 →</button><span class="hint">先查询数量，显示结果数后才能开始</span></div>`;
     if (!r || ["succeeded", "failed", "canceled"].includes(r.status) && r.total_count == null) return `<div class="ss-count">${locked}</div>`;
-    if (r.status === "count_queued" || r.status === "counting") return `<div class="ss-count"><span><span class="spin"></span> 正在读取 EHunt「${esc(r.keyword)}」的结果数（$8–40 · 总销量 ≥100 · 按 7 天销量降序）…</span>${locked}</div>`;
+    if (r.status === "count_queued" || r.status === "counting") return `<div class="ss-count"><span><span class="spin"></span> 正在读取 EHunt「${esc(r.keyword)}」的结果数（$8–40 · 总销量 ≥100 · 7 天销量 >3 · 按 7 天销量降序）…</span>${locked}</div>`;
     if (r.total_count == null) return `<div class="ss-count">${locked}</div>`;
     const n = r.total_count, [k, t] = advice(n), def = Math.min(n, 100);
-    const head = `<div class="ss-count-n"><b>${esc(r.keyword)}</b>：<span class="ss-n ss-n-${k}">${n.toLocaleString()}</span> 条 <span class="pill pill-${k === "ok" ? "ok" : k === "bad" ? "bad" : "info"}">${esc(t)}</span>${DEMO ? (r.keyword.toLowerCase() === "acrylic decoration" ? '<span class="pill pill-ok">演示：与 EHunt 实测一致（Find 505 products）</span>' : '<span class="pill pill-warn">演示占位数</span>') : ""}</div>
-      <p class="hint">筛选：$${FILTERS.price_min}–${FILTERS.price_max} · 总销量 ≥${FILTERS.min_sales} · 按 7 天销量降序</p>`;
+    const head = `<div class="ss-count-n"><b>${esc(r.keyword)}</b>：<span class="ss-n ss-n-${k}">${n.toLocaleString()}</span> 条 <span class="pill pill-${k === "ok" ? "ok" : k === "bad" ? "bad" : "info"}">${esc(t)}</span>${DEMO ? (MEASURED[r.keyword.toLowerCase()] ? `<span class="pill pill-ok">EHunt 实测（${esc(MEASURED[r.keyword.toLowerCase()])}）</span>` : '<span class="pill pill-bad ss-fake">演示数字，非实测</span>') : ""}</div>
+      <p class="hint">筛选：$${FILTERS.price_min}–${FILTERS.price_max} · 总销量 ≥${FILTERS.min_sales} · 7 天销量 >${FILTERS.min_sales_7d - 1} · 按 7 天销量降序</p>`;
     if (r.status === "skipped") return `<div class="ss-count">${head}<p class="hint">已跳过，等人工决定。可以换个更细的子词重新查询。</p></div>`;
     if (r.status !== "counted") return `<div class="ss-count ss-count-done">${head}<p class="hint">本次读取前 ${esc(r.target_count ?? def)} 条（每页 20 条）</p></div>`;
     return `<div class="ss-count${k === "bad" ? " ss-count-warn" : ""}">${head}
       <div class="ss-form"><label>最多读取 <input id="ssLimit" class="input input-sm ss-thr" type="number" min="1" max="${Math.min(n, 1000)}" value="${def}"> 条</label>
         ${k === "bad" ? `<button class="btn btn-primary" id="ssSkip">跳过，等人工决定</button><button class="btn btn-ghost" id="ssGo">仍然读取</button>`
-          : `<button class="btn btn-primary" id="ssGo">开始抓取 →</button><button class="btn btn-ghost" id="ssSkip">跳过</button>`}</div></div>`;
+          : `<button class="btn btn-primary" id="ssGo">抓取 →</button><button class="btn btn-ghost" id="ssSkip">跳过</button>`}</div></div>`;
   }
   function render() {
     const body = $("ssBody"); if (!body) return;
     const done = (i) => i.item_state === "classified" || i.item_state === "error";
     const ex = V.items.filter((i) => done(i) && i.gate === "rejected"), inList = V.items.filter((i) => !(done(i) && i.gate === "rejected"));
     const n = (g) => inList.filter((i) => done(i) && i.gate === g).length, nRun = inList.filter((i) => !done(i)).length, r = V.run;
-    $("ssSum").innerHTML = r ? `进入预筛 <b>${inList.length}</b> · 待确认 <b>${n("pending")}</b> · 保留 ${n("passed")}${nRun ? ` · 分类中 ${nRun}` : ""} · 已排除 ${ex.length}` : "";
+    $("ssSum").innerHTML = "";
     const ST = { count_queued: "排队查询数量", counting: "读取 EHunt 结果数中", counted: "已查询数量", skipped: "已跳过（等人工决定）", queued: "排队中（等待 box 抓取进程）", running: "读取 EHunt 列表页中", succeeded: "已完成", failed: "失败", canceled: "已停止" };
     const pct = r ? Math.round(100 * (r.scraped_count || 0) / (r.target_count || 100)) : 0;
     $("ssStart").innerHTML = `<div class="card ss-start"><div class="ss-form"><input id="ssKw" class="input" placeholder="EHunt 关键词，例如 acrylic decoration" value="${esc($("ssKw")?.value || "")}">
         <button class="btn btn-primary" id="ssCount"${active(r) || r?.status === "counted" ? " disabled" : ""}>查询数量</button></div>
-      <p class="hint">价格 $8–40 · 总销量 ≥100 · 按 7 天销量降序（需求文档 §2）。box 上的抓取进程用自己已登录的浏览器逐条读 EHunt 列表页（不用 EHunt API），先查结果数，再决定读多少条；每读到一条立即分类并出现在下方。</p>
+      <p class="hint">价格 $8–40 · 总销量 ≥100 · 7 天销量 >3 · 按 7 天销量降序（需求文档 §2 + Hongyan 10-16）。box 上的抓取进程用自己已登录的浏览器逐条读 EHunt 列表页（不用 EHunt API），先查结果数，再决定读多少条；每条经规则 + 视觉判断，全部完成后输出符合要求的链接。</p>
       ${countPanel(r)}
       ${r && r.status && !["count_queued", "counting", "counted", "skipped"].includes(r.status) ? `<div class="ss-prog-row"><span class="pill ${active(r) ? "pill-info" : r.status === "succeeded" ? "pill-ok" : "pill-bad"}">${active(r) ? '<span class="spin"></span> ' : ""}${esc(ST[r.status] || r.status)}</span>
         <span class="sc-prog ss-prog"><span style="width:${pct}%"></span></span><span class="hint">已读取 <b>${esc(r.scraped_count || 0)}</b> / ${esc(r.target_count || 100)} 行 · 已分类 <b>${esc(r.classified_count || 0)}</b>${r.error ? ` · <span class="warn">${esc(r.error)}</span>` : ""}</span>
         ${active(r) ? '<button class="btn btn-ghost btn-sm" id="ssStop">■ 停止</button>' : ""}</div>` : ""}</div>`;
+    // 输出（Hongyan 10-16）：全部处理完才显示“符合要求 N 条” + 纯 Etsy 链接清单（含待确认，拿不准就保留）；抓取中只显示进度条和停止
     const grp = {}; ex.forEach((i) => { const g = RGROUP(i); grp[g] = (grp[g] || 0) + 1; });
-    const order = ["定制", "IP", "材质", "素材/数字文件", "人工排除", "其他"].filter((g) => grp[g]);
-    $("ssTabs").innerHTML = (V.runs.length > 1 ? `<select id="ssRun" class="input input-sm">${V.runs.map((x) => `<option value="${esc(x.id)}"${x.id === V.run?.id ? " selected" : ""}>${esc(x.keyword)}</option>`).join("")}</select>` : "")
-      + [["pending", "待确认", n("pending")], ["passed", "保留", n("passed")], ["all", "全部", inList.length]]
-        .map(([k, t, c]) => `<button class="fchip${V.tab === k ? " active" : ""}" data-sstab="${k}">${t}<span class="fchip-n">${c}</span></button>`).join("");
-    const audit = r && ex.length ? `<details class="ss-audit" ${V.auditOpen ? "open" : ""}><summary><b>已排除 ${ex.length}</b>：${order.map((g) => `${esc(g)} ${grp[g]}`).join(" / ")}<span class="hint"> · 不进入预筛，点开查看审计清单（可恢复）</span></summary>
-      <table class="ss-audit-t"><thead><tr><th>rank</th><th>listing</th><th>标题</th><th>类别</th><th>原因 / 依据</th><th>来源</th><th></th></tr></thead><tbody>
-      ${ex.sort((a, b) => (a.ranks?.[0] ?? 0) - (b.ranks?.[0] ?? 0)).map((i) => `<tr><td>${esc((i.ranks || []).join("/"))}</td><td><a href="https://www.etsy.com/listing/${esc(i.etsy_listing_id)}" target="_blank" rel="noopener">${esc(i.etsy_listing_id)}</a></td>
-        <td class="ss-at">${esc(i.title)}</td><td>${esc(RGROUP(i))}</td><td>${esc(i.reason || "")}${i.explain ? `<span class="hint"> · ${esc(i.explain)}</span>` : ""}</td><td>${i.gate_by === "user" ? "人工" : esc(i.source || "")}</td>
-        <td><button class="btn btn-link btn-sm" data-ssgate="pending" data-ssid="${esc(i.id)}">恢复为待确认</button></td></tr>`).join("")}</tbody></table></details>` : "";
-    const show = inList.filter((i) => V.tab === "all" || (done(i) && i.gate === V.tab))
-      .sort((a, b) => V.tab === "all" ? (b.ranks?.[0] ?? 0) - (a.ranks?.[0] ?? 0) : (a.ranks?.[0] ?? 0) - (b.ranks?.[0] ?? 0)); // 全部：最新读到的在前
-    body.innerHTML = !V.run ? '<div class="card empty"><div class="ico">◎</div><h3>还没有选品任务</h3><p class="muted">在上方输入关键词，先“查询数量”，再设置条数开始抓取</p></div>'
-      : `${audit}<section class="sc-batch"><div class="sc-bh"><h3>${esc(V.run.keyword)} <span class="hint">${esc(V.tab === "all" ? "全部" : GATE_NAME[V.tab])} ${show.length}</span></h3><span class="spacer"></span>
-          ${V.tab === "pending" && n("pending") ? `<button class="btn btn-ghost btn-sm" data-ssbulk="passed">全部待确认 → 保留 (${n("pending")})</button>` : ""}</div>
-        ${show.length ? `<div class="sc-grid">${show.map(card).join("")}</div>` : `<p class="hint sc-none">${V.tab === "pending" ? "没有待确认的条目" : "此分类下没有条目"}</p>`}</section>`;
-    body.querySelector(".ss-audit")?.addEventListener("toggle", (e) => { V.auditOpen = e.target.open; });
-    $("ssFoot").innerHTML = V.run ? `<div class="sc-foot"><div><b>进入选品筛选</b><p class="hint">预筛由人工复核：“保留”的 ${n("passed")} 条进入选品筛选（短名单、勾选条件、加入备选）；${n("pending")} 条待确认需先点 ✓ 保留或 ✕ 排除。排除的只在审计清单里。</p></div>
-      <a class="btn btn-primary" href="#/select/${esc(V.run.id)}"${n("passed") ? "" : ' aria-disabled="true"'}>进入选品筛选（${n("passed")} 条）→</a></div>` : "";
+    const order = ["定制", "IP", "材质", "素材/数字文件", "7天销量≤3", "人工排除", "其他"].filter((g) => grp[g]);
+    const finished = r && ["succeeded", "canceled", "failed"].includes(r.status) && !nRun;
+    const ok = inList.filter(done).sort((a, b) => (a.ranks?.[0] ?? 0) - (b.ranks?.[0] ?? 0));
+    V.links = ok.map((i) => `https://www.etsy.com/listing/${i.etsy_listing_id}`);
+    $("ssTabs").innerHTML = V.runs.length > 1 ? `<select id="ssRun" class="input input-sm">${V.runs.map((x) => `<option value="${esc(x.id)}"${x.id === V.run?.id ? " selected" : ""}>${esc(x.keyword)}</option>`).join("")}</select>` : "";
+    const audit = ex.length ? `<details class="ss-audit ss-audit-mini"><summary>排除记录（${ex.length}：${order.map((g) => `${esc(g)} ${grp[g]}`).join(" / ")}）</summary>
+      <table class="ss-audit-t"><thead><tr><th>rank</th><th>listing</th><th>标题</th><th>类别</th><th>原因 / 依据</th><th>来源</th></tr></thead><tbody>
+      ${ex.sort((a, b) => (a.ranks?.[0] ?? 0) - (b.ranks?.[0] ?? 0)).map((i) => `<tr><td>${esc((i.ranks || []).join("/"))}</td><td>${esc(i.etsy_listing_id)}</td><td class="ss-at">${esc(i.title)}</td><td>${esc(RGROUP(i))}</td>
+        <td>${esc(i.reason || "")}${i.explain ? `<span class="hint"> · ${esc(i.explain)}</span>` : ""}</td><td>${i.gate_by === "user" ? "人工" : esc(i.source || "")}</td></tr>`).join("")}</tbody></table></details>` : "";
+    body.innerHTML = !V.run ? '<div class="card empty"><div class="ico">◎</div><h3>还没有任务</h3><p class="muted">在上方输入关键词，先“查询数量”，再填写最多读取条数点“抓取”</p></div>'
+      : !finished ? (["count_queued", "counting", "counted", "skipped"].includes(r.status) ? "" : '<p class="hint ss-wait">全部处理完成后在这里显示符合要求的 Etsy 链接。</p>')
+      : `<section class="card ss-result"><div class="ss-res-head"><h3>符合要求 <span class="ss-n ss-n-ok">${ok.length}</span> 条</h3><span class="hint">保留 ${n("passed")} + 待确认 ${n("pending")}（拿不准就保留）${r.status !== "succeeded" ? ` · 任务${r.status === "canceled" ? "已停止" : "失败"}，以下为已处理部分` : ""}</span><span class="spacer"></span>
+          <button class="btn btn-primary btn-sm" id="ssCopy"${ok.length ? "" : " disabled"}>复制全部</button><button class="btn btn-ghost btn-sm" data-ssdl="txt"${ok.length ? "" : " disabled"}>下载 TXT</button><button class="btn btn-ghost btn-sm" data-ssdl="csv"${ok.length ? "" : " disabled"}>下载 CSV</button></div>
+        <pre class="ss-links" id="ssLinks">${esc(V.links.join("\n"))}</pre>${audit}</section>`;
+    $("ssFoot").innerHTML = "";
+  }
+  function download(kind) {
+    const kw = (V.run?.keyword || "links").replace(/[^\w-]+/g, "_"), txt = kind === "csv" ? "url\n" + V.links.join("\n") + "\n" : V.links.join("\n") + "\n";
+    const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([kind === "csv" ? "\ufeff" + txt : txt], { type: kind === "csv" ? "text/csv" : "text/plain" }));
+    a.download = `etsy_${kw}_${V.links.length}.${kind}`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
   }
   async function setGate(ids, gate) {
     const items = ids.map((id) => V.items.find((x) => x.id === id)).filter(Boolean); if (!items.length) return;
@@ -151,6 +157,8 @@ export function createSelScreen({ $, esc, imgUrl, toast, getSb, DEMO }) {
   }
   document.addEventListener("click", (e) => {
     if (e.target.id === "ssCount") return count();
+    if (e.target.id === "ssCopy") return navigator.clipboard.writeText(V.links.join("\n")).then(() => toast(`已复制 ${V.links.length} 条链接`, "ok"), () => toast("复制失败，请手动选择", "bad"));
+    if (e.target.dataset?.ssdl) return download(e.target.dataset.ssdl);
     if (e.target.id === "ssSkip") return skip();
     if (e.target.id === "ssGo") return start();
     if (e.target.id === "ssStop") return cancel();
