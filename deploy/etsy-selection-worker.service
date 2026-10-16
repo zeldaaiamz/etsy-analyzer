@@ -1,0 +1,31 @@
+# 设计稿（未安装）：阿里云 ECS /etc/systemd/system/etsy-selection-worker.service，与 etsy-analyzer-worker 同模式但单独进程
+# 单独进程原因：需要 Chromium（内存 400–800M，超过 analyzer 的 MemoryMax=500M），且浏览器崩溃不影响 analyzer。
+# 安装（上线时，需审批）：先在服务器上一次性登录 EHunt 到 EHUNT_PROFILE_DIR，再 cp 本文件 && systemctl daemon-reload && systemctl enable --now etsy-selection-worker
+[Unit]
+Description=Etsy selection worker (on-demand EHunt list-page reading + classify)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/etsy-analyzer/worker
+EnvironmentFile=/opt/etsy-analyzer/worker/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=EHUNT_PROFILE_DIR=/opt/etsy-analyzer/ehunt-profile
+ExecStart=/opt/etsy-analyzer/.venv/bin/python -m selection.ehunt_worker
+Restart=always
+RestartSec=15
+TimeoutStopSec=120
+MemoryHigh=800M
+MemoryMax=1200M
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/etsy-analyzer/logs /opt/etsy-analyzer/ehunt-profile
+PrivateTmp=true
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=etsy-selection-worker
+
+[Install]
+WantedBy=multi-user.target

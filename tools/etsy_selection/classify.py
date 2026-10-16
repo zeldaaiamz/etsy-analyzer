@@ -12,7 +12,9 @@ _ap.add_argument('--runs',type=int,default=3,help='每条视觉调用次数；�
 _ap.add_argument('--optional-custom',choices=['keep','exclude'],default='keep',help='可选定制：keep=保留并在备注标注')
 _ap.add_argument('--keyword',default='',help='本次列表的 EHunt 搜索词（写入输出）')
 _ap.add_argument('--workers',type=int,default=8)
-ARGS=_ap.parse_args()
+if __name__=='__main__': ARGS=_ap.parse_args()
+else:  # 作为库被 worker 导入：用审定默认值
+    ARGS=argparse.Namespace(list=None,outdir=None,legacy_outdir=None,baseline=None,mode='convertible',runs=3,optional_custom='keep',keyword='',workers=1)
 if ARGS.legacy_outdir:  # 兼容旧用法: list baseline outdir
     ARGS.baseline,ARGS.outdir=ARGS.outdir,ARGS.legacy_outdir
 LIST,OUT=ARGS.list,ARGS.outdir
@@ -78,6 +80,23 @@ def rule(t):
     m=re.search(DIGITAL,t,re.I)
     if m: return '排除','数字文件/素材/空白件','关键词:'+m.group(0),'无'
     return None
+def classify_one(o,runs=None):
+    """单条（已去重）→ 补全 结果/原因/备注/gate 等字段，返回 (o, usage Counter, 视觉调用次数)。worker 逐条调用。"""
+    usage=Counter(); n=0; o.setdefault('image_url_hd',(o.get('image_url') or '').replace('il_120xN','il_794xN'))
+    r=rule(o['title'])
+    if r: o.update(结果=r[0],原因=r[1],说明=r[2],定制类型=r[3],来源='规则',acrylic_fit='',备注='',votes='')
+    else:
+        u,img=up(o['image_url']); o['image_url_hd']=u; ds=[]
+        for _ in range(runs or ARGS.runs):
+            j,us=vision(o['title'],img); usage.update({k:v for k,v in us.items() if isinstance(v,int)}); n+=1; ds.append((decide(j,o['title']),j))
+        finals=[d[0][0] for d in ds]; agree=len(set(finals))==1
+        maj=Counter(finals).most_common(1)[0][0]; (c,rs,note),j=next(d for d in ds if d[0][0]==maj)
+        if not agree: c,rs,note='待确认',rs or '多次结果不一致',(note+'；' if note else '')+'三次结果不一致'
+        fit=Counter(d[1].get('是否平面亚克力','') for d in ds).most_common(1)[0][0]
+        o.update(结果=c,原因=rs,备注=note,说明=j.get('说明',''),材质=j.get('材质',''),acrylic_fit=fit,定制类型=j.get('定制类型',''),来源='视觉',
+                 核心卖点='; '.join(j.get('核心卖点',[]) or []),适用场合='; '.join(j.get('适用场合',[]) or []),votes='/'.join(finals),一致=agree)
+    o['gate']={'保留':'passed','待确认':'pending','排除':'rejected'}[o['结果']]
+    return o,usage,n
 def dedupe(rows):
     grp=defaultdict(list)
     for r in rows: grp[str(r['listing_id'])].append(r)
@@ -116,13 +135,15 @@ def run():
             fits=Counter(d[1].get('是否平面亚克力','') for d in ds).most_common(1)[0][0]
             o.update(结果=c,原因=rs,备注=note,说明=j.get('说明',''),材质=j.get('材质',''),acrylic_fit=fits,定制类型=j.get('定制类型',''),来源='视觉',
                      核心卖点='; '.join(j.get('核心卖点',[]) or []),适用场合='; '.join(j.get('适用场合',[]) or []),votes='/'.join(finals),一致=agree)
-    f=['listing_id','ranks','title','price','price_min','price_max','total_sales','sales_7d','sales_ratio','结果','原因','备注','说明','来源','材质','acrylic_fit','定制类型','核心卖点','适用场合','votes','dup_note','image_url','image_url_hd']
+    GATE={'保留':'passed','待确认':'pending','排除':'rejected'}
+    for o in items: o['gate']=GATE[o['结果']]   # 预筛选初始闸门；待确认必须人工确认才进入选品筛选
+    f=['listing_id','ranks','title','price','price_min','price_max','total_sales','sales_7d','sales_ratio','结果','gate','原因','备注','说明','来源','材质','acrylic_fit','定制类型','核心卖点','适用场合','votes','dup_note','image_url','image_url_hd']
     with open(OUT+'/selection_result.csv','w',encoding='utf-8-sig',newline='') as fh:
         w=csv.DictWriter(fh,f,extrasaction='ignore'); w.writeheader(); w.writerows(items)
     meta={'keyword':ARGS.keyword,'mode':ARGS.mode,'runs':ARGS.runs,'optional_custom':ARGS.optional_custom,'model':MODEL,'raw_rows':len(rows),'items':len(items),
           'vision_items':len(todo),'vision_calls':calls,'usage':dict(usage),'seconds':round(time.time()-t0,1),
           'cost_yuan':round(usage['prompt_tokens']/1e6*PRICE_IN+usage['completion_tokens']/1e6*PRICE_OUT,4),
-          'counts':dict(Counter(o['结果'] for o in items)),'reasons':dict(Counter(o['原因'] for o in items if o['结果']!='保留')),
+          'counts':dict(Counter(o['结果'] for o in items)),'gate_counts':dict(Counter(o['gate'] for o in items)),'reasons':dict(Counter(o['原因'] for o in items if o['结果']!='保留')),
           'disagree_runs':sum(1 for o in todo if not o.get('一致',True))}
     json.dump({'meta':meta,'raw':rows,'items':items},open(OUT+'/selection.json','w'),ensure_ascii=False,indent=1,default=str)
     json.dump(meta,open(OUT+'/run_meta.json','w'),ensure_ascii=False,indent=1)

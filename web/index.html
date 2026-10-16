@@ -13,7 +13,7 @@
 <body>
 <header class="topbar">
   <div class="brand"><span class="logo">◆</span> 选品雷达 <span class="brand-sub">Etsy → Amazon US</span></div>
-  <nav id="nav" class="nav hidden"><a href="#/" data-nav="tasks">任务</a><a href="#/screen" data-nav="screen">预筛选</a><a href="#/select" data-nav="select">选品筛选</a><a href="#/library" data-nav="library">产品库 <span id="libCount" class="nbadge nb-loading" title="加载中">…</span></a></nav>
+  <nav id="nav" class="nav hidden"><a href="#/" data-nav="tasks">任务</a><a href="#/screen" data-nav="screen">预筛选</a><a href="#/selscreen" data-nav="selscreen">选品预筛</a><a href="#/select" data-nav="select">选品筛选</a><a href="#/library" data-nav="library">产品库 <span id="libCount" class="nbadge nb-loading" title="加载中">…</span></a></nav>
   <div id="userBox" class="user hidden"><span id="quotaMeter" class="qmeter hidden" title="EHunt 每日额度（每条新 listing 1 次；24 小时内重复的 listing 走缓存不耗额度）"></span><span id="demoBadge" class="pill pill-warn hidden">演示数据</span><span id="who" class="muted"></span><button id="btnLogout" class="btn btn-ghost btn-sm">退出</button></div>
 </header>
 
@@ -36,8 +36,16 @@
     <div id="screenFoot"></div>
   </section>
 
+  <section id="selScreenView" class="hidden">
+    <div class="lib-head"><div><h2>选品预筛 <span class="hint" id="ssSum"></span></h2><p class="muted">每条读到后立即经规则 + 视觉三次判断（convertible 材质模式，可选定制保留）。机器“保留”默认通过，“待确认”需要点 ✓ 确认才进入选品筛选；任何一条都可以 ✕ 排除或恢复。</p></div></div>
+    <div id="ssStart"></div>
+    <div id="ssTabs" class="fchips sc-tabs"></div>
+    <div id="ssBody"></div>
+    <div id="ssFoot"></div>
+  </section>
+
   <section id="selectView" class="hidden">
-    <div class="lib-head"><div><h2>选品筛选</h2><p class="muted">EHunt 列表页抓取 → 规则（定制/IP/素材关键词）→ 视觉三次判断（不一致一律待确认）。短名单 = 结论“保留”且每个条件都打勾；拿不准的都在“待确认”，不会自动删除。</p></div></div>
+    <div class="lib-head"><div><h2>选品筛选</h2><p class="muted">EHunt 列表页抓取 → 规则（定制/IP/素材关键词）→ 视觉三次判断（不一致一律待确认）。这里只有通过预筛选的条目（机器保留 + 人工确认）。短名单 = 每个条件都打勾。</p></div></div>
     <div id="selHead" class="ss-head"></div>
     <div id="selTabs" class="fchips"></div>
     <div id="selBody" class="ss-list"></div>

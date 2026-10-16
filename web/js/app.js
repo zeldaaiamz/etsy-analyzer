@@ -3,6 +3,7 @@ import { computeVelocity, computeManualVelocity, cmpVelocity, velocityBadge, loa
 import { amzBlock, amzUrls, openAll, applyEdit, kwList, MAX_KW, DIR_SELECT_HTML } from "./amzsearch.js";
 import { createScreen } from "./screen.js?v=fcc2d909";
 import { createSelection } from "./selection.js";
+import { createSelScreen } from "./selscreen.js";
 
 // ?demo=1：纯前端示例数据，不登录、不连 Supabase，仅用于预览界面（&offline=1 / &quota=1 预览横幅）
 const QS = new URLSearchParams(location.search);
@@ -160,7 +161,7 @@ async function boot() {
     S.libCount = null; S.libCountFresh = false; L.loaded = false;
     if (uid) { S.libCount = readLibCount(); showApp(session.user.email); renderLibCount(); setTimeout(() => { loadLibCount(); loadAll(); loadStatus(); subscribe(); }, 0); }
     else { S.jobs = new Map(); S.loaded = false; S.signed.clear(); closeDrawer();
-      $("login").classList.remove("hidden"); $("app").classList.add("hidden"); $("libraryView").classList.add("hidden"); $("selectView").classList.add("hidden"); $("nav").classList.add("hidden"); $("userBox").classList.add("hidden"); }
+      $("login").classList.remove("hidden"); $("app").classList.add("hidden"); $("libraryView").classList.add("hidden"); $("selectView").classList.add("hidden"); $("selScreenView").classList.add("hidden"); $("nav").classList.add("hidden"); $("userBox").classList.add("hidden"); }
   });
 }
 function showApp(email) {
@@ -920,10 +921,12 @@ function renderLibrary() {
 }
 const SCR = createScreen({ $, esc, imgUrl, toast, getSb: () => sb, DEMO, QS, confirmDialog });
 const SEL = createSelection({ $, esc, imgUrl, toast, getSb: () => sb, DEMO });
+const SSC = createSelScreen({ $, esc, imgUrl, toast, getSb: () => sb, DEMO });
 function route() {
-  const lib = location.hash.startsWith("#/library"), scr = location.hash.startsWith("#/screen"), sel = location.hash.startsWith("#/select");
-  if (!$("nav").classList.contains("hidden")) { $("app").classList.toggle("hidden", lib || scr || sel); $("libraryView").classList.toggle("hidden", !lib); $("screenView").classList.toggle("hidden", !scr); $("selectView").classList.toggle("hidden", !sel); }
-  document.querySelectorAll("[data-nav]").forEach((a) => a.classList.toggle("active", a.dataset.nav === (lib ? "library" : scr ? "screen" : sel ? "select" : "tasks")));
+  const lib = location.hash.startsWith("#/library"), scr = location.hash.startsWith("#/screen"), sel = location.hash.startsWith("#/select"), ssc = location.hash.startsWith("#/selscreen");
+  if (!$("nav").classList.contains("hidden")) { $("app").classList.toggle("hidden", lib || scr || sel || ssc); $("selScreenView").classList.toggle("hidden", !ssc); $("libraryView").classList.toggle("hidden", !lib); $("screenView").classList.toggle("hidden", !scr); $("selectView").classList.toggle("hidden", !sel); }
+  document.querySelectorAll("[data-nav]").forEach((a) => a.classList.toggle("active", a.dataset.nav === (lib ? "library" : scr ? "screen" : ssc ? "selscreen" : sel ? "select" : "tasks")));
+  if (ssc && (DEMO || (sb && currentUser))) SSC.show(location.hash.split("/")[2] || null);
   if (sel && (DEMO || (sb && currentUser))) SEL.show(location.hash.split("/")[2] || null);
   if (scr) { if (DEMO || (sb && currentUser)) SCR.show(location.hash.split("/")[2] || null); } else SCR.hide();
   if (lib) { renderLibrary(); if (!DEMO && sb && currentUser) loadLibrary(); }
