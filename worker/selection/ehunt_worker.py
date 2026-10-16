@@ -236,7 +236,8 @@ def process_batch(store, run, batch, scraper):
     """抓取顺序进行；规则通过的条目丢进视觉线程池，不阻塞翻页。结果按抓取顺序（rank）在主线程依次落定：计数/进度/入库都只在主线程，天然线程安全。"""
     rid, bno = run["id"], batch["batch_no"]
     seen = SEEN.setdefault(rid, set()) | store.passed_ids(rid); SEEN[rid] = seen
-    cnt = {"scraped": 0, "passed": 0, "excluded": 0, "dup": 0}; reasons = {}; calls = [0]; clock = threading.Lock()
+    # 继续本批（sel_resume）：从上次停止时已落定的计数接着累加；抓取起点由 main() 从 offset_start + scraped_count 开始
+    cnt = {k: int(batch.get(f"{k}_count") or 0) for k in ("scraped", "passed", "excluded", "dup")}; reasons = dict(batch.get("excluded_by_reason") or {}); calls = [0]; clock = threading.Lock()
     store.patch_batch(batch["id"], status="running", started_at=NOW())
     def flush():
         store.patch_batch(batch["id"], scraped_count=cnt["scraped"], passed_count=cnt["passed"], excluded_count=cnt["excluded"], dup_count=cnt["dup"], excluded_by_reason=reasons)
@@ -282,8 +283,9 @@ def process_batch(store, run, batch, scraper):
     try:
         for row in scraper:
             if n_seen % 20 == 0 and store.run(rid).get("status") == "canceled":
-                for _, k, v in pend:
+                for prow, k, v in pend:
                     if k == "vision": v.cancel()
+                    if k != "dup": seen.discard(str(prow["listing_id"]))   # 未落定的行：继续本批时要重新读
                 pool.shutdown(wait=True, cancel_futures=True); pend.clear()
                 store.patch_batch(batch["id"], status="canceled", finished_at=NOW()); flush(); return "canceled"
             n_seen += 1; lid = str(row["listing_id"])
@@ -352,7 +354,9 @@ def main(argv=None):
                 b = store.open_batch(run["id"])
                 if b:
                     try:
-                        sc = fake_scrape(a.fake, b["offset_start"], b["offset_end"]) if a.fake else scrape_ehunt(run["keyword"], run.get("params") or {}, b["offset_start"], b["offset_end"])
+                        s0 = b["offset_start"] + int(b.get("scraped_count") or 0)   # 继续本批：跳过已落定的行
+                        if b.get("scraped_count"): log.info("resume batch %s from rank %s", b["batch_no"], s0)
+                        sc = fake_scrape(a.fake, s0, b["offset_end"]) if a.fake else scrape_ehunt(run["keyword"], run.get("params") or {}, s0, b["offset_end"])
                         process_batch(store, run, b, sc)
                     except Exception as e:
                         log.exception("batch failed"); store.patch_batch(b["id"], status="failed", finished_at=NOW())

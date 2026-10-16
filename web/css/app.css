@@ -514,3 +514,19 @@ a.btn[aria-disabled="true"]{pointer-events:none;opacity:.5}
 .ss-batch-copied,.ss-batch-run{display:flex;align-items:center;gap:8px;padding:10px 14px}
 .ss-cum,.ss-next{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 16px;margin-bottom:12px}.ss-next p{margin:2px 0 0}
 .ss-note{margin-top:6px}
+/* QA 2026-10-16：最近 3 天 run、校验、停止态、窄屏顶栏 */
+.ss-recent{display:flex;flex-wrap:wrap;align-items:center;gap:6px;margin:0 0 var(--s3)}
+.ss-rchip{display:inline-flex;align-items:center;gap:6px;padding:4px 10px;border:1px solid var(--border);border-radius:999px;background:var(--surface);color:var(--text);font-size:13px;text-decoration:none;max-width:100%}
+.ss-rchip:hover{background:var(--surface-2);text-decoration:none}.ss-rchip.active{border-color:var(--primary);background:var(--primary-soft)}
+.input-bad{border-color:var(--bad,#d33)!important;box-shadow:0 0 0 2px color-mix(in srgb,var(--bad,#d33) 20%,transparent)}
+#ssLimErr:empty{display:none}
+.ss-res-head{flex-wrap:wrap;row-gap:6px}
+html,body{overflow-x:hidden}
+@media (max-width:640px){
+  .topbar{flex-wrap:wrap;height:auto;padding:8px var(--s3);row-gap:6px}
+  .brand{order:1}.user{order:2;margin-left:auto;min-width:0}
+  #who{display:none}.qmeter{display:none!important}
+  .nav{order:3;flex:1 1 100%;margin:0;overflow-x:auto;scrollbar-width:none}.nav::-webkit-scrollbar{display:none}
+  .container{padding-left:var(--s3);padding-right:var(--s3)}
+  .ss-form{flex-wrap:wrap}.ss-form .input{min-width:0}
+}

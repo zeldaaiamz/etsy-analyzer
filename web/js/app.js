@@ -2,7 +2,7 @@ import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
 import { computeVelocity, computeManualVelocity, cmpVelocity, velocityBadge, loadReviewDates, demoReviewDates, loadScrapeInfo } from "./velocity.js";
 import { amzBlock, amzUrls, openAll, applyEdit, kwList, MAX_KW, DIR_SELECT_HTML } from "./amzsearch.js";
 import { createScreen } from "./screen.js?v=c4015382";
-import { createSelScreen } from "./selscreen.js?v=941f3e67";
+import { createSelScreen } from "./selscreen.js?v=ff6e2b01";
 
 // ?demo=1：纯前端示例数据，不登录、不连 Supabase，仅用于预览界面（&offline=1 / &quota=1 预览横幅）
 const QS = new URLSearchParams(location.search);
@@ -160,8 +160,12 @@ async function boot() {
     S.libCount = null; S.libCountFresh = false; L.loaded = false;
     if (uid) { S.libCount = readLibCount(); showApp(session.user.email); renderLibCount(); setTimeout(() => { loadLibCount(); loadAll(); loadStatus(); subscribe(); }, 0); }
     else { S.jobs = new Map(); S.loaded = false; S.signed.clear(); closeDrawer();
-      $("login").classList.remove("hidden"); $("app").classList.add("hidden"); $("libraryView").classList.add("hidden"); $("selectView").classList.add("hidden"); $("selScreenView").classList.add("hidden"); $("nav").classList.add("hidden"); $("userBox").classList.add("hidden"); }
+      hideAllViews(); }
   });
+}
+function hideAllViews() {
+  $("login").classList.remove("hidden");
+  for (const id of ["app", "libraryView", "screenView", "selScreenView", "nav", "userBox"]) $(id)?.classList.add("hidden");
 }
 function showApp(email) {
   $("login").classList.add("hidden"); $("nav").classList.remove("hidden"); route();
@@ -919,7 +923,21 @@ function renderLibrary() {
     <p class="muted">${totalAll ? (L.stage === "candidate" || L.stage === "all" ? "在任务中点“☆ 加入产品库”会进入备选" : "在备选中选择产品移到这里") : "在已完成任务上点“☆ 加入产品库”，或勾选多个任务批量加入"}</p></div>`;
 }
 const SCR = createScreen({ $, esc, imgUrl, toast, getSb: () => sb, DEMO, QS, confirmDialog });
-const SSC = createSelScreen({ $, esc, toast, getSb: () => sb, DEMO, confirmDialog });
+// 获取链接 → 预筛选：直接复用任务页的提交路径（batches + jobs.prescreen=true），超过单次上限自动分组插入
+async function sendToPrescreen(urls) {
+  const list = []; const seen = new Set();
+  for (const u of urls) { const r = checkLine(u); if (r.reason) continue; const k = r.id ? `id:${r.id}` : r.url; if (!seen.has(k)) { seen.add(k); list.push(r); } }
+  if (!list.length) return toast("没有有效链接", "bad");
+  if (DEMO) { toast(`演示模式不会提交：${list.length} 条将进入预筛选`, "ok"); location.hash = "#/screen"; return; }
+  const { data: batch, error } = await sb.from("batches").insert({ name: `获取链接 ${new Date().toISOString()}` }).select().single();
+  if (error) return toast(`提交失败：${error.message}`, "bad");
+  for (let i = 0; i < list.length; i += MAX_SUBMIT) {
+    const { error: e2 } = await sb.from("jobs").insert(list.slice(i, i + MAX_SUBMIT).map((r) => ({ batch_id: batch.id, etsy_url: r.url, ...(r.id ? { etsy_listing_id: r.id } : {}), prescreen: true })));
+    if (e2) return toast(`提交失败（已提交 ${i} 条）：${e2.message}`, "bad");
+  }
+  toast(`✓ 已提交 ${list.length} 条预筛选`, "ok"); location.hash = `#/screen/${batch.id}`;
+}
+const SSC = createSelScreen({ $, esc, toast, getSb: () => sb, DEMO, confirmDialog, sendToPrescreen });
 function route() {
   const lib = location.hash.startsWith("#/library"), scr = location.hash.startsWith("#/screen"), ssc = location.hash.startsWith("#/selscreen");
   if (!$("nav").classList.contains("hidden")) { $("app").classList.toggle("hidden", lib || scr || ssc); $("selScreenView").classList.toggle("hidden", !ssc); $("libraryView").classList.toggle("hidden", !lib); $("screenView").classList.toggle("hidden", !scr); }
