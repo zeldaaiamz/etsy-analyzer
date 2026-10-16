@@ -41,7 +41,7 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     const img = hasData(it) && imgUrl(it.image_url)
       ? `<img src="${imgUrl(thumb(it.image_url))}" alt="" data-sid="${esc(it.id)}" class="${V.imgOk.has(it.id) ? "on" : ""}">` : "";
     const ph = `<div class="sc-ph">${waiting(it) ? "⏳" : it.status === "failed" ? "!" : hasData(it) && !it.image_url ? "无图" : '<span class="spin"></span>'}</div>`;
-    const act = failed ? (left > 0 ? `<button class="sc-x sc-undo" data-srefetch="${esc(it.id)}" title="重新取数（剩余 ${left} 次）">${V.busy.has(it.id) ? '<span class="spin"></span>' : "刷新"}</button>` : "")
+    const act = failed ? ""
       : done ? `<button class="sc-x sc-undo" data-srestore="${esc(it.id)}" title="恢复为待确认">恢复</button>`
       : it.status === "screening" ? (rj ? `<button class="sc-x sc-undo" data-sundo="${esc(it.id)}" title="撤销排除">撤销</button>`
         : `<button class="sc-x" data-srej="${esc(it.id)}" title="排除（不再分析）" aria-label="排除">✕</button>`) : "";
@@ -63,7 +63,8 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     $("screenTabs").innerHTML = [["all", "全部"], ["pending", "待确认"], ["rejected", "已排除"]].map(([k, n]) =>
       `<button class="fchip${V.tab === k ? " active" : ""}" data-stab="${k}">${n}<span class="fchip-n">${k === "all" ? tot : k === "pending" ? nPend - V.items.filter((it) => it.status === "screening" && V.rej.has(it.id)).length : nRej}</span></button>`).join("")
     const nDone = V.items.filter((it) => it.screen_state === "rejected").length; // 只算已确认排除的（未确认的 ✕ 可直接撤销）
-    $("screenTabs").innerHTML += `<span class="spacer"></span>${nDone ? `<button class="btn btn-danger-ghost btn-sm" data-shide="1" title="永久删除全部已排除条目（不可恢复，不消耗 EHunt 额度）">🗑 删除所有已排除 (${nDone})</button>` : ""}`;
+    const nRetry = V.items.filter(canRefetch).length;
+    $("screenTabs").innerHTML += `<span class="spacer"></span>${nRetry ? `<button class="btn btn-primary btn-sm" data-srefall="1" ${V.busy.has("refall") ? "disabled" : ""} title="重新取数所有失败且未达 3 次上限的条目">${V.busy.has("refall") ? '<span class="spin"></span>' : ""}一键刷新（${nRetry} 条失败）</button>` : ""}${nDone ? `<button class="btn btn-danger-ghost btn-sm" data-shide="1" title="永久删除全部已排除条目（不可恢复，不消耗 EHunt 额度）">🗑 删除所有已排除 (${nDone})</button>` : ""}`;
     if (V.loadErr && !tot) { box.innerHTML = `<div class="card empty"><div class="ico">!</div><h3>加载失败</h3><p class="muted">${esc(V.loadErr)}</p><button class="btn btn-primary btn-sm" data-sreload="1">刷新</button></div>`; $("screenFoot").innerHTML = ""; return; }
     if (!tot) { box.innerHTML = `<div class="card empty"><div class="ico">◎</div><h3>${!DEMO && !V.loaded ? "加载中…" : "没有待筛选的链接"}</h3><p class="muted">在“任务”页粘贴链接并勾选“先预筛选”，取到 EHunt 数据后会出现在这里</p></div>`; $("screenFoot").innerHTML = ""; return; }
     box.innerHTML = bs.map((b, i) => {
@@ -103,15 +104,15 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     toast(`✓ ${res.kept} 条进入分析${res.rejected ? `，${res.rejected} 条已排除` : ""}`, "ok", [{ label: "查看任务", href: "#/" }], 4000);
     render(); if (!DEMO) load();
   }
-  async function refetch(id) {
-    const it = V.items.find((x) => x.id === id); if (!it || V.busy.has(id)) return;
-    if ((it.attempts ?? 0) >= (it.max_attempts ?? 3)) return toast("已达最多 3 次重试，不再取数", "bad");
-    V.busy.add(id); render();
-    let n = 1;
-    if (!DEMO) { const { data, error } = await getSb().rpc("screen_refetch", { p_ids: [id] }); V.busy.delete(id); if (error) { render(); return toast(`刷新失败：${error.message}`, "bad"); } n = data || 0; }
-    else V.busy.delete(id);
+  const canRefetch = (it) => it.status === "failed" && it.screen_state !== "kept" && (it.attempts ?? 0) < (it.max_attempts ?? 3);
+  async function refetchAll() {
+    const list = V.items.filter(canRefetch); if (!list.length || V.busy.has("refall")) return;
+    V.busy.add("refall"); render();
+    let n = list.length;
+    if (!DEMO) { const { data, error } = await getSb().rpc("screen_refetch_all", V.batch ? { p_batch: V.batch } : {}); V.busy.delete("refall"); if (error) { render(); return toast(`刷新失败：${error.message}`, "bad"); } n = data || 0; }
+    else { V.busy.delete("refall"); list.forEach((it) => { it.status = "queued"; it.error = null; }); }
     if (!n) { toast("无法刷新（已达重试上限或状态已变化）", "bad"); return DEMO ? render() : load(); }
-    it.status = "queued"; it.error = null; toast("已重新排队取数", "ok"); render(); if (!DEMO) load();
+    toast(`已重新排队取数 ${n} 条`, "ok"); render(); if (!DEMO) load();
   }
   async function restore(id) {
     if (!DEMO) { const { error } = await getSb().rpc("screen_restore", { p_ids: [id] }); if (error) return toast(`恢复失败：${error.message}`, "bad"); }
@@ -137,7 +138,7 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
   document.addEventListener("error", (ev) => { const t = ev.target; if (t.tagName === "IMG" && t.dataset?.sid) markImg(t, true); }, true);
   document.addEventListener("click", (ev) => {
     if (!visible()) return;
-    const t = ev.target.closest("[data-srej],[data-sundo],[data-srestore],[data-sconfirm],[data-stab],[data-shide],[data-srefetch],[data-sreload]"); if (!t) return;
+    const t = ev.target.closest("[data-srej],[data-sundo],[data-srestore],[data-sconfirm],[data-stab],[data-shide],[data-srefall],[data-sreload]"); if (!t) return;
     ev.preventDefault();
     if (t.dataset.srej) { V.rej.add(t.dataset.srej); toast("已排除，不会进入分析", "", [{ label: "撤销", run: () => { V.rej.delete(t.dataset.srej); render(); } }], 4000); render(); }
     else if (t.dataset.sundo) { V.rej.delete(t.dataset.sundo); render(); }
@@ -145,7 +146,7 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     else if (t.dataset.sconfirm) confirm(t.dataset.sconfirm);
     else if (t.dataset.stab) { V.tab = t.dataset.stab; render(); }
     else if (t.dataset.shide) hideRejected();
-    else if (t.dataset.srefetch) refetch(t.dataset.srefetch);
+    else if (t.dataset.srefall) refetchAll();
     else if (t.dataset.sreload) load();
   });
 
