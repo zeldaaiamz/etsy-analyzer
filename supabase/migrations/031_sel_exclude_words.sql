@@ -1,9 +1,9 @@
 -- 031：获取链接标题排除词表（后台可编辑）。Hongyan 2026-10-16 定稿：
---   定制类新增 address / return address（整词）；不加 adjust/adjustable；不新增素材/非成品类词；wholesale / bulk / vintage 不排除（原 digital 规则里的 bulk 已去掉）。
+--   定制类新增 address / return address（整词）；不加 adjust/adjustable；素材/数字文件/非成品类整组取消（svg/stl/png/pdf/digital/download/printable/template/blank(s)/cut file 不再排除，不入表）；wholesale / bulk / vintage 不排除（原 digital 规则里的 bulk 已去掉）。
 -- word 是正则片段，worker 拼成 \b(…)\b 不区分大小写；worker 每 5 分钟加载，表为空/不可用时用 classify.py 内置兜底（与本种子一致）。
 create table if not exists public.sel_exclude_words (
   id bigint generated always as identity primary key,
-  category text not null check (category in ('custom','ip','digital')),
+  category text not null check (category in ('custom','ip')),
   word text not null,
   enabled boolean not null default true,
   note text,
@@ -105,18 +105,6 @@ insert into public.sel_exclude_words (category, word, note) values
   ('ip', 'sesame street', null),
   ('ip', 'paw patrol', null),
   ('ip', 'super ?bowl', null),
-  ('ip', 'eras tour', null),
-  ('digital', 'svg', null),
-  ('digital', 'stl', null),
-  ('digital', 'png', null),
-  ('digital', 'pdf', null),
-  ('digital', 'digital', null),
-  ('digital', 'download', null),
-  ('digital', 'printable', null),
-  ('digital', 'template', null),
-  ('digital', 'blank', null),
-  ('digital', 'blanks', null),
-  ('digital', 'laser cut file', null),
-  ('digital', 'cut file', null)
+  ('ip', 'eras tour', null)
 on conflict (category, word) do nothing;
 -- 管理员：部署后手动执行（填 Hongyan 的 auth.users id）：insert into public.sel_admins (user_id) values ('<uuid>');

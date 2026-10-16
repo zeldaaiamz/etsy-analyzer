@@ -32,7 +32,7 @@ def key():
 KEY=key()
 # 排除词表 v2（Hongyan 2026-10-16 定稿）：每项是一个正则片段，整词匹配（\b…\b，不区分大小写）。
 # 线上以 Supabase 表 sel_exclude_words 为准（后台可编辑，worker 定时加载），下面是表不可用时的内置兜底，内容与 031 迁移的种子一致。
-# 定稿：定制类新增 address / return address；不加 adjust/adjustable；不新增素材/非成品类词；wholesale / bulk / vintage 不排除。
+# 定稿：定制类新增 address / return address；不加 adjust/adjustable；素材/数字文件/非成品类整组取消（不再排除）；wholesale / bulk / vintage 不排除。
 CUSTOM_WORDS=[r'personali[sz]ed?',r'personalisation',r'personalization',r'custom(i[sz]ed)?',r'your (name|text|photo|logo)',r'with (name|photo|names)',
     r'name',r'names',r'photo(?!\s*(booths?|props?)\b)',r'monogram\w*',r'initials?',r'engraved',r'any text',r'logo',r'return address',r'address']
 IP_WORDS=[r'disney',r'marvel',r'pokemon',r'pok[eé]mon',r'star wars',r'harry potter',r'hogwarts',r'peter rabbit',r'hello kitty',r'sanrio',r'barbie',r'nfl',r'nba',r'mlb',
@@ -41,22 +41,22 @@ IP_WORDS=[r'disney',r'marvel',r'pokemon',r'pok[eé]mon',r'star wars',r'harry pot
 WHITELIST=r'(happy birthday|schulkind|mr\.? ?(&|and) ?mrs\.?|welcome|congrat\w*|merry christmas|happy (new year|easter|halloween|thanksgiving|holidays|hanukkah|valentine\w*)|season\'?s greetings|eid mubarak)'
 OPTIONAL_HINT=r'(optional personali[sz]ation|personali[sz]ation (is )?optional|add (a )?names? \(optional\)|\(optional\)|optional (name|text|custom\w*)|with or without (name|personali[sz]ation))'
 REQUIRED_HINT=r'(custom name|personali[sz]ed with your|enter (the |your )?names?|your name|add your)'
-DIGITAL_WORDS=[r'svg',r'stl',r'png',r'pdf',r'digital',r'download',r'printable',r'template',r'blank',r'blanks',r'laser cut file',r'cut file']  # 原有规则（已去掉 bulk）
+# 素材/数字文件/非成品类（svg、stl、png、pdf、digital、download、printable、template、blank(s)、cut file 等）：Hongyan 2026-10-16 决定整组不再排除
 NEVER_EXCLUDE={'wholesale','bulk','vintage'}  # Hongyan 明确不排除：即使后台表里误加也忽略
 def _rx(words):
     ws=[w for w in words if w and w.strip().lower() not in NEVER_EXCLUDE]
     return r'\b('+'|'.join(sorted(ws,key=len,reverse=True))+r')\b' if ws else r'(?!x)x'
 def set_words(rows=None):
-    """rows: [{'category':'custom|ip|digital','word':正则片段,'enabled':bool}]；None/空 → 内置兜底。返回生效来源。"""
-    global CUSTOM,IP,DIGITAL
-    by={'custom':[],'ip':[],'digital':[]}; src='builtin'
+    """rows: [{'category':'custom|ip','word':正则片段,'enabled':bool}]；None/空 → 内置兜底。返回生效来源。"""
+    global CUSTOM,IP
+    by={'custom':[],'ip':[]}; src='builtin'
     for r in rows or []:
         if r.get('enabled',True) and r.get('category') in by:
             try: re.compile(r['word'])
             except re.error: continue
             by[r['category']].append(r['word'])
     if any(by.values()): src='table'
-    CUSTOM=_rx(by['custom'] if src=='table' else CUSTOM_WORDS); IP=_rx(by['ip'] if src=='table' else IP_WORDS); DIGITAL=_rx(by['digital'] if src=='table' else DIGITAL_WORDS)
+    CUSTOM=_rx(by['custom'] if src=='table' else CUSTOM_WORDS); IP=_rx(by['ip'] if src=='table' else IP_WORDS)
     return src
 set_words()
 def up(u):
@@ -68,8 +68,8 @@ def up(u):
         except Exception: pass
     return u,urllib.request.urlopen(urllib.request.Request(u,headers={'User-Agent':'Mozilla/5.0'}),timeout=20).read()
 PROMPT='''你是Etsy选品审核员。目标：可批量生产、非定制、无IP的平面亚克力装饰品。根据图片和标题判断，只输出JSON：
-{"分类":"排除|保留|待确认","原因":"定制/个性化|IP|材质不符|数字文件/素材/空白件|无","说明":"一句话","材质":"","是否平面亚克力":"是|可改造|不适合","定制类型":"无|可选定制|必须定制|待确认","核心卖点":["1-3项"],"适用场合":["1-3项，如婚礼/生日/圣诞/家居"]}
-规则：需刻名字/文字/照片/日期/logo的→排除 定制/个性化；动漫游戏影视明星品牌球队同人→排除 IP；明显不是亚克力(木/金属/纸/布等)→原因填 材质不符，并判断“是否平面亚克力”：是=本身就是平面亚克力；可改造=设计/图案可以改做成平面亚克力(如海报、画框、带平面图案的木灯)；不适合=形态无法改成平面亚克力(如线香、穿戴甲)；素材/空白件/数字文件→排除。通用文字不算定制：Happy Birthday、Schulkind、Mr & Mrs、Welcome、Congrats、节日祝福等固定文字是批量款。效果图里出现的示例姓名/日期也不算定制，除非标题或描述写明 personalized/custom 可定制。定制类型：无=无需定制；可选定制=可加名字但不加也能直接卖(标题写 optional personalization/add name (optional) 等)，按保留处理；必须定制=下单必须提供名字/日期/照片(标题写 custom name/personalized with your/enter names 等)，只有这种才判 排除 定制/个性化；从列表页分不清是可选还是必须定制时填 待确认（不要默认可选定制）。拿不准一律“待确认”，绝不对存疑的排除。标题：'''
+{"分类":"排除|保留|待确认","原因":"定制/个性化|IP|材质不符|无","说明":"一句话","材质":"","是否平面亚克力":"是|可改造|不适合","定制类型":"无|可选定制|必须定制|待确认","核心卖点":["1-3项"],"适用场合":["1-3项，如婚礼/生日/圣诞/家居"]}
+规则：需刻名字/文字/照片/日期/logo的→排除 定制/个性化；动漫游戏影视明星品牌球队同人→排除 IP；明显不是亚克力(木/金属/纸/布等)→原因填 材质不符，并判断“是否平面亚克力”：是=本身就是平面亚克力；可改造=设计/图案可以改做成平面亚克力(如海报、画框、带平面图案的木灯)；不适合=形态无法改成平面亚克力(如线香、穿戴甲)；通用文字不算定制：Happy Birthday、Schulkind、Mr & Mrs、Welcome、Congrats、节日祝福等固定文字是批量款。效果图里出现的示例姓名/日期也不算定制，除非标题或描述写明 personalized/custom 可定制。定制类型：无=无需定制；可选定制=可加名字但不加也能直接卖(标题写 optional personalization/add name (optional) 等)，按保留处理；必须定制=下单必须提供名字/日期/照片(标题写 custom name/personalized with your/enter names 等)，只有这种才判 排除 定制/个性化；从列表页分不清是可选还是必须定制时填 待确认（不要默认可选定制）。拿不准一律“待确认”，绝不对存疑的排除。标题：'''
 def vision(title,img):
     b={'model':MODEL,'messages':[{'role':'user','content':[{'type':'image_url','image_url':{'url':'data:image/jpeg;base64,'+base64.b64encode(img).decode()}},{'type':'text','text':PROMPT+title}]}],'response_format':{'type':'json_object'},'thinking':{'type':'disabled'},'temperature':0}
     for a in range(3):
@@ -80,7 +80,7 @@ def vision(title,img):
         except Exception as e: err=str(e)[:200]; time.sleep(2)
     return {'分类':'待确认','原因':'视觉调用失败','说明':err},{}
 
-VALID=('定制/个性化','IP','材质不符','数字文件/素材/空白件')
+VALID=('定制/个性化','IP','材质不符')  # 素材/数字文件不再是排除理由：视觉若仍这样判，降为待确认
 def decide(j,title):
     """单次视觉结果 → (结果, 原因, 备注)。规则未命中才会走到这里。"""
     c=j.get('分类','待确认'); rs=j.get('原因','') or ''; fit=j.get('是否平面亚克力',''); ct=j.get('定制类型','无') or '无'; note=''
@@ -109,8 +109,6 @@ def rule(t):
     m=re.search(CUSTOM,re.sub(WHITELIST,' ',t,flags=re.I),re.I)
     if m and not (ARGS.optional_custom=='keep' and re.search(OPTIONAL_HINT,t,re.I) and not re.search(REQUIRED_HINT,t,re.I)):
         return '排除','定制/个性化','关键词:'+m.group(0),'必须定制'
-    m=re.search(DIGITAL,t,re.I)
-    if m: return '排除','数字文件/素材/空白件','关键词:'+m.group(0),'无'
     return None
 def classify_one(o,runs=None):
     """单条（已去重）→ 补全 结果/原因/备注/gate 等字段，返回 (o, usage Counter, 视觉调用次数)。worker 逐条调用。"""

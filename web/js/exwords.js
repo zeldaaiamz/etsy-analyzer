@@ -1,11 +1,10 @@
 // 获取链接 · 标题排除词表（后台表 sel_exclude_words；worker 每 5 分钟加载）。所有人可查看，sel_admins 里的人可增改停用删除。
-const CAT = { custom: "定制", ip: "IP", digital: "素材/数字文件" };
+const CAT = { custom: "定制", ip: "IP" };
 const NEVER = ["wholesale", "bulk", "vintage"];
 // 演示数据：与 classify.py 内置兜底 / 031 种子一致（节选 + 新增 address）
 const DEMO_WORDS = [
   ...["personali[sz]ed?", "personalisation", "personalization", "custom(i[sz]ed)?", "your (name|text|photo|logo)", "with (name|photo|names)", "name", "names", "photo(?!\\s*(booths?|props?)\\b)", "monogram\\w*", "initials?", "engraved", "any text", "logo", "return address", "address"].map((w) => ["custom", w]),
   ...["disney", "marvel", "pokemon", "star wars", "harry potter", "hello kitty", "barbie", "nfl", "taylor swift", "bluey", "stitch", "grinch", "snoopy", "paw patrol"].map((w) => ["ip", w]),
-  ...["svg", "stl", "png", "pdf", "digital", "download", "printable", "template", "blank", "blanks", "laser cut file", "cut file"].map((w) => ["digital", w]),
 ].map(([category, word], i) => ({ id: i + 1, category, word, enabled: true, note: /address/.test(word) ? "v2 新增" : null }));
 export function createExWords({ $, esc, toast, getSb, DEMO, confirmDialog }) {
   const W = { rows: null, admin: false, open: false, cat: "custom", err: "" };
@@ -34,9 +33,9 @@ export function createExWords({ $, esc, toast, getSb, DEMO, confirmDialog }) {
   function render() {
     const el = $("ssWords"); if (!el || !W.rows) return;
     const rows = W.rows.filter((r) => r.category === W.cat), n = (c) => W.rows.filter((r) => r.category === c && r.enabled).length;
-    el.innerHTML = `<details class="card ex-words"${W.open ? " open" : ""}><summary><b>标题排除词表</b> <span class="hint">定制 ${n("custom")} · IP ${n("ip")} · 素材/数字文件 ${n("digital")} · 标题整词命中即排除，不调豆包；每条排除在 box 日志里记下命中的词</span></summary>
+    el.innerHTML = `<details class="card ex-words"${W.open ? " open" : ""}><summary><b>标题排除词表</b> <span class="hint">定制 ${n("custom")} · IP ${n("ip")} · 标题整词命中即排除，不调豆包；每条排除在 box 日志里记下命中的词</span></summary>
       ${W.err ? `<p class="warn">${esc(W.err)}</p>` : ""}
-      <p class="hint">不排除：wholesale / bulk / vintage（照常判断）。通用文字（Happy Birthday、Mr &amp; Mrs、photo booth/prop 等）和标题写 optional personalization 的不算定制。${W.admin ? "" : "只有管理员可以修改。"}</p>
+      <p class="hint">不排除：wholesale / bulk / vintage，以及素材/数字文件类（svg、printable、blank 等，照常判断）。通用文字（Happy Birthday、Mr &amp; Mrs、photo booth/prop 等）和标题写 optional personalization 的不算定制。${W.admin ? "" : "只有管理员可以修改。"}</p>
       <div class="fchips">${Object.entries(CAT).map(([k, v]) => `<button class="fchip${W.cat === k ? " active" : ""}" data-exwcat="${k}">${v} ${W.rows.filter((r) => r.category === k).length}</button>`).join("")}</div>
       <div class="ex-list">${rows.map((r) => `<span class="ex-word${r.enabled ? "" : " off"}" title="${esc(r.note || "")}"><code>${esc(r.word)}</code>${r.note ? ` <span class="pill pill-info">${esc(r.note)}</span>` : ""}${W.admin ? ` <button class="btn btn-link btn-sm" data-exwtog="${r.id}">${r.enabled ? "停用" : "启用"}</button><button class="btn btn-link btn-sm" data-exwdel="${r.id}">删除</button>` : ""}</span>`).join("")}</div>
       ${W.admin ? `<div class="ss-form ex-add"><input id="exwNew" class="input input-sm" placeholder="新增${CAT[W.cat]}词，如 return address"><button class="btn btn-primary btn-sm" id="exwAdd">添加</button></div>` : ""}</details>`;
