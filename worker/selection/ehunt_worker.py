@@ -305,7 +305,7 @@ def process_batch(store, run, batch, scraper):
     rr = dict(run.get("excluded_by_reason") or {}); [rr.__setitem__(k, rr.get(k, 0) + v) for k, v in reasons.items()]
     upd = dict(scraped_count=agg["scraped"], passed_count=agg["passed"], excluded_count=agg["excluded"], excluded_by_reason=rr,
                vision_calls=(run.get("vision_calls") or 0) + calls[0], remaining_count=remaining)
-    if remaining <= 0 or bno >= 5:
+    if remaining <= 0:   # 按条数结束（max_rows ≤ 5000）；“继续读取”后批次号可能超过 5
         store.patch_run(rid, status="succeeded", finished_at=NOW(), **upd)
     elif run.get("read_all"):  # 一键读取全部剩余：自动排下一批
         s0 = batch["offset_end"] + 1; e0 = min(batch["offset_end"] + (run.get("batch_size") or 1000), run["max_rows"])

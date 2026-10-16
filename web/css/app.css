@@ -530,3 +530,6 @@ html,body{overflow-x:hidden}
   .container{padding-left:var(--s3);padding-right:var(--s3)}
   .ss-form{flex-wrap:wrap}.ss-form .input{min-width:0}
 }
+/* 继续读取（2026-10-16） */
+.ss-next{flex-wrap:wrap;row-gap:8px}.ss-next .ss-thr{width:84px}#ssAddErr:empty{display:none}
+.ss-count-n .pill{white-space:normal;max-width:100%}

@@ -2,11 +2,11 @@
 // ① 关键词 → 查 EHunt 结果数（价格 8–40 · 总销量 ≥100 · 7 天销量 >3 · 按 7 天销量降序）→ ② 填最多读取条数 → 抓取（box 上的 worker，不在阿里云）
 // ③ 标题规则先筛：排除的不调豆包、不显示、不入库（页面只一行汇总；原因写 box 本地日志 3 天）→ ④ 通过的调豆包视觉 → 显示符合要求 N 条 + 纯 Etsy 链接
 // ⑤ >1000 分批，每批 1000，最多 5 批 / 5,000；“还剩 N 条未读”只在每批完成后更新 ⑥ 只有符合要求的入库，保留 3 天 ⑦ 网页无搜索，查询找序猿
-const BATCH = 1000, MAX_ROWS = 5000, MAX_BATCHES = 5;
+const BATCH = 1000, MAX_ROWS = 5000; // 每批 1000，最多读到 EHunt 第 5,000 条（分批次数不再单独限制，第 1 批可能不足 1000）
 const RORDER = ["定制", "IP", "材质", "素材/数字文件", "7天销量≤3", "其他"];
 export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sendToPrescreen }) {
   const QSP = new URLSearchParams(location.search);
-  const V = { run: null, batches: [], links: {}, open: new Set(), timer: null, fx: null, demoRuns: {}, recent: null, limErr: "" };
+  const V = { addErr: "", run: null, batches: [], links: {}, open: new Set(), timer: null, fx: null, demoRuns: {}, recent: null, limErr: "" };
   const FILTERS = { price_min: 8, price_max: 40, min_sales: 100, min_sales_7d: 4, sort: "↓7-day sales" };
   const active = (r) => r && ["count_queued", "counting", "queued", "running"].includes(r.status);
   // 实测数（全部筛选含 7 天销量 Min 4，2026-10-16）。其他词在演示里会生成数字并标“演示数字”
@@ -22,8 +22,8 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
     setTimeout(() => { run.status = "counted"; run.total_count = demoTotal(kw); refresh(); }, Number(QSP.get("countms")) || 1000);
   }
   const demoLinks = (run, bno, n) => { const seed = run.keyword.length * 7919 + bno * 104729; return Array.from({ length: n }, (_, i) => `https://www.etsy.com/listing/${9000000000 + ((seed + i * 7121) % 99999999)}`); };
-  function demoBatch(run, bno, resume) {
-    const D = V.demoRuns[run.id], s = (bno - 1) * BATCH + 1, e = Math.min(bno * BATCH, run.max_rows);
+  function demoBatch(run, bno, resume, s0) {
+    const D = V.demoRuns[run.id], s = resume ? resume.offset_start : s0 || (D.batches.at(-1)?.offset_end || 0) + 1, e = resume ? resume.offset_end : Math.min(s + BATCH - 1, run.max_rows);
     if (resume) { Object.assign(resume, { status: "running" }); run.status = "running"; }
     const b = resume || { id: `${run.id}-b${bno}`, batch_no: bno, offset_start: s, offset_end: e, status: "running", scraped_count: 0, passed_count: 0, excluded_count: 0, excluded_by_reason: {}, copied_at: null, demo: run.keyword.toLowerCase() !== "acrylic decoration" }; // 只有 acrylic decoration 有回放真数据，其余批次结果都是演示数字
     if (!resume) D.batches.push(b); Object.assign(run, { status: "running", current_batch: bno }); refresh();
@@ -48,8 +48,8 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
       }
       b.passed_count = D.links[b.id].length; b.status = "done";
       run.remaining_count = Math.max(0, run.max_rows - e); // 只在批次完成时更新
-      if (run.remaining_count <= 0 || bno >= MAX_BATCHES) run.status = "succeeded";
-      else if (run.read_all) return (refresh(), setTimeout(() => demoBatch(run, bno + 1), 400));
+      if (run.remaining_count <= 0) run.status = "succeeded";
+      else if (run.read_all) return (refresh(), setTimeout(() => demoBatch(run, bno + 1, null, e + 1), 400));
       else run.status = "batch_done";
       refresh();
     };
@@ -76,11 +76,28 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
     if (DEMO) { r.max_rows = lim; return demoBatch(r, 1); }
     const { error } = await getSb().rpc("sel_start", { p_run: r.id, p_limit: lim }); if (error) return toast(`开始失败：${error.message}`, "bad"); load(r.id);
   }
+  // 已读到第几条（只看已有批次的 offset_end，不重读）；还能读多少（EHunt 最多前 5,000 条）
+  const readEnd = () => V.batches.reduce((a, b) => Math.max(a, b.offset_end || 0), 0);
+  const canRead = (r) => Math.max(0, Math.min(r?.total_count || 0, MAX_ROWS) - readEnd());
+  function addError() {
+    const max = canRead(V.run), raw = ($("ssAdd")?.value || "").trim(), v = Number(raw);
+    return !raw || !Number.isInteger(v) || v < 1 || v > max ? `请输入 1–${max.toLocaleString()} 之间的整数` : "";
+  }
+  function addLabels() { // 改“再读取”条数时只更新按钮文字，不重绘（保留光标）
+    V.addErr = ""; $("ssAdd")?.classList.remove("input-bad"); const er = $("ssAddErr"); if (er) er.textContent = "";
+    const left = canRead(V.run), re = readEnd(), v = Math.floor(Number($("ssAdd")?.value)); if (!(v >= 1)) return;
+    const add = Math.min(v, left), nb = Math.ceil(add / BATCH);
+    $("ssNext").textContent = `读取下一批（${(re + 1).toLocaleString()}–${(re + Math.min(add, BATCH)).toLocaleString()}）`;
+    const a = $("ssAll"); a.textContent = `一键读取全部（${add.toLocaleString()} 条，${nb} 批）`; a.classList.toggle("hidden", nb <= 1);
+  }
+  // 继续读取：从已读的下一条开始，每批 1000；all=true 时连续读完填写的条数
   async function next(all) {
-    const r = V.run, rem = r.remaining_count, nb = Math.min(MAX_BATCHES - r.current_batch, Math.ceil(rem / BATCH));
-    if (all && !await confirmDialog({ title: "一键读取全部剩余？", ok: `读取 ${rem.toLocaleString()} 条`, body: `<p>将连续读取剩余 <b>${rem.toLocaleString()}</b> 条（${nb} 批，每批 1000），每批完成后结果自动出现在下方。标题规则先筛，只有通过规则的才调用豆包；预计视觉调用约 ${Math.round(rem * 0.4 * 3).toLocaleString()} 次（按回放比例估算）。</p><p class="hint">EHunt 最多只显示前 5,000 条，最多 5 批。</p>` })) return;
-    if (DEMO) { r.read_all = all; return demoBatch(r, r.current_batch + 1); }
-    const { error } = await getSb().rpc("sel_next_batch", { p_run: r.id, p_all: all }); if (error) return toast(error.message, "bad"); load(r.id);
+    const r = V.run, err = addError(); V.addErr = err;
+    if (err) { const el = $("ssAddErr"); if (el) el.textContent = err; $("ssAdd")?.classList.add("input-bad"); $("ssAdd")?.focus(); return; }
+    const add = Number($("ssAdd").value), s = readEnd() + 1, n = all ? add : Math.min(add, BATCH), nb = Math.ceil(n / BATCH);
+    if (all && nb > 1 && !await confirmDialog({ title: "一键读取全部？", ok: `读取 ${n.toLocaleString()} 条`, body: `<p>将从第 <b>${s.toLocaleString()}</b> 条开始连续读取 <b>${n.toLocaleString()}</b> 条（${nb} 批，每批 1000），已读的 1–${(s - 1).toLocaleString()} 条不会重读。每批完成后结果自动出现在下方；标题规则先筛，只有通过规则的才调用豆包。</p><p class="hint">EHunt 最多只显示前 5,000 条。</p>` })) return;
+    if (DEMO) { Object.assign(r, { read_all: all, max_rows: s - 1 + n }); return demoBatch(r, (V.batches.at(-1)?.batch_no || 0) + 1, null, s); }
+    const { error } = await getSb().rpc("sel_extend", { p_run: r.id, p_add: n, p_all: all }); if (error) return toast(`继续读取失败：${error.message}`, "bad"); load(r.id);
   }
   async function cancel() {
     const cur = V.batches.find((b) => b.status === "running" || b.status === "queued");
@@ -124,7 +141,7 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
   async function loadRecent() {
     if (DEMO) {
       const since = Date.now() - 3 * 864e5, own = Object.values(V.demoRuns).filter((d) => !d.run.id.startsWith("demo-recent")).map((d) => ({ ...d.run, created_at: d.run.created_at || new Date(Number(d.run.id.slice(5))).toISOString(), passed_count: d.batches.reduce((a, b) => a + (b.passed_count || 0), 0) }));
-      const fx = [{ id: "demo-recent-1", keyword: "acrylic decoration", status: "succeeded", created_at: new Date(Date.now() - 5 * 36e5).toISOString(), passed_count: 7 },
+      const fx = [{ id: "demo-recent-gift", keyword: "gift", status: "succeeded", created_at: new Date(Date.now() - 6 * 36e5).toISOString(), passed_count: 6 }, { id: "demo-recent-1", keyword: "acrylic decoration", status: "succeeded", created_at: new Date(Date.now() - 5 * 36e5).toISOString(), passed_count: 7 },
         { id: "demo-recent-2", keyword: "wedding sign", status: "batch_done", created_at: new Date(Date.now() - 30 * 36e5).toISOString(), passed_count: 312 }];
       V.recent = [...own, ...fx].filter((r) => Date.parse(r.created_at) > since).sort((a, b) => b.created_at.localeCompare(a.created_at)); return renderRecent();
     }
@@ -142,6 +159,11 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
   function refresh() { if (DEMO && V.run) { const D = V.demoRuns[V.run.id]; if (D) { V.batches = D.batches; V.links = D.links; } } render(); }
   function demoRecentRun(id) { // 演示：最近列表里的固定条目
     if (V.demoRuns[id] || !id?.startsWith("demo-recent")) return;
+    if (id === "demo-recent-gift") { // 与线上 gift 相同：19,893 条只读了前 200 条，已完成
+      const run = { id, keyword: "gift", status: "succeeded", total_count: 19893, max_rows: 200, batch_size: BATCH, current_batch: 1, remaining_count: 0, created_at: new Date(Date.now() - 6 * 36e5).toISOString() };
+      const b = { id: `${id}-b1`, batch_no: 1, offset_start: 1, offset_end: 200, status: "done", scraped_count: 200, passed_count: 6, excluded_count: 194, excluded_by_reason: { "定制": 170, "IP": 14, "材质": 10 }, demo: true };
+      V.demoRuns[id] = { run, batches: [b], links: { [b.id]: demoLinks(run, 1, 6) } }; return;
+    }
     const kw = id === "demo-recent-1" ? "acrylic decoration" : "wedding sign", n = id === "demo-recent-1" ? 20 : 1400;
     const run = { id, keyword: kw, status: id === "demo-recent-1" ? "succeeded" : "batch_done", total_count: n, max_rows: n, batch_size: BATCH, current_batch: 1, remaining_count: n - Math.min(n, BATCH), created_at: new Date(Date.now() - (id === "demo-recent-1" ? 5 : 30) * 36e5).toISOString() };
     const pass = id === "demo-recent-1" ? 7 : 312, b = { id: `${id}-b1`, batch_no: 1, offset_start: 1, offset_end: Math.min(n, BATCH), status: "done", scraped_count: Math.min(n, BATCH), passed_count: pass, excluded_count: Math.min(n, BATCH) - pass, excluded_by_reason: { "定制": Math.min(n, BATCH) - pass }, demo: true };
@@ -205,10 +227,14 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
     const done = V.batches.filter((b) => b.status === "done" || b.status === "canceled");
     const all = [...new Set(done.flatMap((b) => V.links[b.id] || []))], exAll = done.reduce((a, b) => a + (b.excluded_count || 0), 0);
     const exR = {}; done.forEach((b) => Object.entries(b.excluded_by_reason || {}).forEach(([k, v]) => exR[k] = (exR[k] || 0) + v));
-    const nextBar = r && r.status === "batch_done" && r.remaining_count > 0 && r.current_batch < MAX_BATCHES ? (() => {
-      const s = r.current_batch * BATCH + 1, e = Math.min((r.current_batch + 1) * BATCH, r.max_rows), nb = Math.min(MAX_BATCHES - r.current_batch, Math.ceil(r.remaining_count / BATCH));
-      return `<div class="card ss-next"><div><b>还剩 ${r.remaining_count.toLocaleString()} 条未读</b><p class="hint">每批完成后更新 · EHunt 最多显示前 5,000 条，最多 5 批</p></div><span class="spacer"></span>
-        <button class="btn btn-primary" id="ssNext">读取下一批（${s.toLocaleString()}–${e.toLocaleString()}）</button>${nb > 1 ? `<button class="btn btn-ghost" id="ssAll">一键读取全部剩余（${r.remaining_count.toLocaleString()} 条，${nb} 批）</button>` : ""}</div>`; })() : "";
+    const left = r ? canRead(r) : 0;
+    const nextBar = r && ["batch_done", "succeeded"].includes(r.status) && left > 0 ? (() => {
+      const re = readEnd(), planned = Math.max(0, (r.max_rows || 0) - re), def = planned || left;
+      const val = V.addErr && $("ssAdd") ? $("ssAdd").value : String(def), add = Math.min(Math.max(1, Math.floor(Number(val)) || def), left);
+      const e = re + Math.min(add, BATCH), nb = Math.ceil(add / BATCH);
+      return `<div class="card ss-next"><div><b>已读 1–${re.toLocaleString()} 条，还可继续读 ${left.toLocaleString()} 条</b><p class="hint">共 ${(r.total_count || 0).toLocaleString()} 条${r.total_count > MAX_ROWS ? "，EHunt 最多显示前 5,000 条" : ""} · 从第 ${(re + 1).toLocaleString()} 条接着读，已读的不重读 · 每批 1000</p></div><span class="spacer"></span>
+        <label class="hint">再读取 <input id="ssAdd" class="input input-sm ss-thr" type="number" min="1" max="${left}" value="${esc(val)}"> 条</label>
+        <button class="btn btn-primary" id="ssNext">读取下一批（${(re + 1).toLocaleString()}–${e.toLocaleString()}）</button><button class="btn btn-ghost${nb > 1 ? "" : " hidden"}" id="ssAll">一键读取全部（${add.toLocaleString()} 条，${nb} 批）</button><span id="ssAddErr" class="warn" role="alert">${esc(V.addErr)}</span></div>`; })() : "";
     const cum = done.length > 1 || (r && r.status !== "succeeded" && done.length) ? `<div class="card ss-cum"><b>累计符合要求 <span class="ss-n ss-n-ok">${all.length.toLocaleString()}</span> 条</b><span class="hint">（${done.length} 批 · 已读 ${done.reduce((a, b) => a + b.scraped_count, 0).toLocaleString()} 条）</span>${V.batches.some((b) => b.demo) ? '<span class="pill pill-bad">演示数字</span>' : ""}<span class="spacer"></span>
         <button class="btn btn-primary btn-sm" data-sscopy="all"${all.length ? "" : " disabled"}>复制全部批次</button><button class="btn btn-ghost btn-sm" data-ssdl="all"${all.length ? "" : " disabled"}>下载 TXT</button></div>` : "";
     body.innerHTML = !r ? '<div class="card empty"><div class="ico">◎</div><h3>输入关键词，先“查询数量”</h3><p class="muted">再填写最多读取条数点“抓取”</p></div>'
@@ -230,7 +256,8 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
     if (e.key !== "Enter" || e.isComposing) return;
     if (e.target.id === "ssKw" && !$("ssCount")?.disabled) { e.preventDefault(); count(); }
     else if (e.target.id === "ssLimit") { e.preventDefault(); start(); }
+    else if (e.target.id === "ssAdd") { e.preventDefault(); next(false); }
   });
-  document.addEventListener("input", (e) => { if (e.target.id === "ssLimit") { V.limErr = ""; e.target.classList.remove("input-bad"); const el = $("ssLimErr"); if (el) el.textContent = ""; } });
+  document.addEventListener("input", (e) => { if (e.target.id === "ssAdd") return addLabels(); if (e.target.id === "ssLimit") { V.limErr = ""; e.target.classList.remove("input-bad"); const el = $("ssLimErr"); if (el) el.textContent = ""; } });
   return { show: (runId) => load(runId), _state: V };
 }
