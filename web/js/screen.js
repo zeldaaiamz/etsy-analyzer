@@ -4,7 +4,7 @@ export const BATCH = 50;
 const POLL_MS = 3000;
 
 export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDialog }) {
-  const V = { hidden: 0, items: [], batch: null, tab: "all", rej: new Set(), imgOk: new Set(), busy: new Set(), loaded: false, timer: null, demo: null };
+  const V = { loadErr: null, items: [], batch: null, tab: "all", rej: new Set(), imgOk: new Set(), busy: new Set(), loaded: false, timer: null, demo: null };
   const thumb = (u) => (/^https:\/\/i\.etsystatic\.com\//.test(u || "") ? u.replace(/\/il_[0-9a-zA-Z]+x[0-9a-zA-Z]+\./, "/il_570xN.") : u);
   const hasData = (it) => it.status === "screening" || it.screen_state === "rejected" || it.screen_state === "kept";
   const fetchingIt = (it) => (it.status === "queued" || it.status === "running") && it.screen_state !== "kept";
@@ -23,9 +23,8 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     if (DEMO) return;
     const sb = getSb(); if (!sb) return;
     const { data, error } = await sb.rpc("screen_list", V.batch ? { p_batch: V.batch } : {});
-    if (error) { toast(`加载筛选列表失败：${error.message}`, "bad"); return; }
-    V.items = data || []; V.loaded = true;
-    const h = await sb.rpc("screen_hidden_count", V.batch ? { p_batch: V.batch } : {}); V.hidden = h.error ? 0 : h.data || 0; // 023 未应用时静默
+    if (error) { V.loadErr = error.message; toast(`加载筛选列表失败：${error.message}`, "bad"); render(); return; }
+    V.items = data || []; V.loaded = true; V.loadErr = null;
     render(); schedule();
   }
   function schedule() {
@@ -36,11 +35,14 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
 
   function card(it, bstate) {
     const rj = V.rej.has(it.id) || it.screen_state === "rejected", done = it.screen_state === "rejected";
-    const head = it.title ? esc(it.title) : waiting(it) ? "等待 EHunt 额度（明日自动继续）" : it.status === "failed" ? "取数失败" : "读取 Etsy 数据中…";
+    const failed = it.status === "failed" && it.screen_state !== "kept";
+    const left = (it.max_attempts ?? 3) - (it.attempts ?? 0);
+    const head = it.title ? esc(it.title) : waiting(it) ? "等待 EHunt 额度（明日自动继续）" : it.status === "failed" ? (left > 0 ? "取数失败" : `取数失败（已重试 ${it.attempts ?? 3} 次，已停止）`) : "读取 Etsy 数据中…";
     const img = hasData(it) && imgUrl(it.image_url)
       ? `<img src="${imgUrl(thumb(it.image_url))}" alt="" data-sid="${esc(it.id)}" class="${V.imgOk.has(it.id) ? "on" : ""}">` : "";
     const ph = `<div class="sc-ph">${waiting(it) ? "⏳" : it.status === "failed" ? "!" : hasData(it) && !it.image_url ? "无图" : '<span class="spin"></span>'}</div>`;
-    const act = done ? `<button class="sc-x sc-undo" data-srestore="${esc(it.id)}" title="恢复为待确认">恢复</button>`
+    const act = failed ? (left > 0 ? `<button class="sc-x sc-undo" data-srefetch="${esc(it.id)}" title="重新取数（剩余 ${left} 次）">${V.busy.has(it.id) ? '<span class="spin"></span>' : "刷新"}</button>` : "")
+      : done ? `<button class="sc-x sc-undo" data-srestore="${esc(it.id)}" title="恢复为待确认">恢复</button>`
       : it.status === "screening" ? (rj ? `<button class="sc-x sc-undo" data-sundo="${esc(it.id)}" title="撤销排除">撤销</button>`
         : `<button class="sc-x" data-srej="${esc(it.id)}" title="排除（不再分析）" aria-label="排除">✕</button>`) : "";
     const price = it.price != null ? `$${Number(it.price).toFixed(2)}` : "";
@@ -61,8 +63,8 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     $("screenTabs").innerHTML = [["all", "全部"], ["pending", "待确认"], ["rejected", "已排除"]].map(([k, n]) =>
       `<button class="fchip${V.tab === k ? " active" : ""}" data-stab="${k}">${n}<span class="fchip-n">${k === "all" ? tot : k === "pending" ? nPend - V.items.filter((it) => it.status === "screening" && V.rej.has(it.id)).length : nRej}</span></button>`).join("")
     const nDone = V.items.filter((it) => it.screen_state === "rejected").length; // 只算已确认排除的（未确认的 ✕ 可直接撤销）
-    $("screenTabs").innerHTML += `<span class="spacer"></span>${V.hidden ? `<button class="btn btn-link btn-sm" data-sunhide="1" title="把删除的已排除条目放回「已排除」">↩ 恢复已删除 (${V.hidden})</button>` : ""}
-      ${nDone ? `<button class="btn btn-danger-ghost btn-sm" data-shide="1" title="从预筛选列表移除全部已排除条目（可恢复，不消耗 EHunt 额度）">🗑 删除所有已排除 (${nDone})</button>` : ""}`;
+    $("screenTabs").innerHTML += `<span class="spacer"></span>${nDone ? `<button class="btn btn-danger-ghost btn-sm" data-shide="1" title="永久删除全部已排除条目（不可恢复，不消耗 EHunt 额度）">🗑 删除所有已排除 (${nDone})</button>` : ""}`;
+    if (V.loadErr && !tot) { box.innerHTML = `<div class="card empty"><div class="ico">!</div><h3>加载失败</h3><p class="muted">${esc(V.loadErr)}</p><button class="btn btn-primary btn-sm" data-sreload="1">刷新</button></div>`; $("screenFoot").innerHTML = ""; return; }
     if (!tot) { box.innerHTML = `<div class="card empty"><div class="ico">◎</div><h3>${!DEMO && !V.loaded ? "加载中…" : "没有待筛选的链接"}</h3><p class="muted">在“任务”页粘贴链接并勾选“先预筛选”，取到 EHunt 数据后会出现在这里</p></div>`; $("screenFoot").innerHTML = ""; return; }
     box.innerHTML = bs.map((b, i) => {
       const st = batchState(b), pend = pendingOf(b), keep = pend.filter((it) => !V.rej.has(it.id)).length, rj = pend.length - keep;
@@ -101,6 +103,16 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     toast(`✓ ${res.kept} 条进入分析${res.rejected ? `，${res.rejected} 条已排除` : ""}`, "ok", [{ label: "查看任务", href: "#/" }], 4000);
     render(); if (!DEMO) load();
   }
+  async function refetch(id) {
+    const it = V.items.find((x) => x.id === id); if (!it || V.busy.has(id)) return;
+    if ((it.attempts ?? 0) >= (it.max_attempts ?? 3)) return toast("已达最多 3 次重试，不再取数", "bad");
+    V.busy.add(id); render();
+    let n = 1;
+    if (!DEMO) { const { data, error } = await getSb().rpc("screen_refetch", { p_ids: [id] }); V.busy.delete(id); if (error) { render(); return toast(`刷新失败：${error.message}`, "bad"); } n = data || 0; }
+    else V.busy.delete(id);
+    if (!n) { toast("无法刷新（已达重试上限或状态已变化）", "bad"); return DEMO ? render() : load(); }
+    it.status = "queued"; it.error = null; toast("已重新排队取数", "ok"); render(); if (!DEMO) load();
+  }
   async function restore(id) {
     if (!DEMO) { const { error } = await getSb().rpc("screen_restore", { p_ids: [id] }); if (error) return toast(`恢复失败：${error.message}`, "bad"); }
     const it = V.items.find((x) => x.id === id); if (it) { it.status = "screening"; it.screen_state = "awaiting"; }
@@ -110,28 +122,22 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
   async function hideRejected() {
     const ids = V.items.filter((it) => it.screen_state === "rejected").map((it) => it.id), n = ids.length; if (!n) return;
     const ok = await confirmDialog({ title: `删除所有已排除（${n} 条）`, danger: true, ok: `删除 ${n} 条`,
-      body: `<p>将从预筛选列表移除 <b>${n}</b> 条已排除的产品。确定删除？</p>
-        <p class="hint">任务和 EHunt 数据都保留，不消耗 EHunt 额度；之后可点「↩ 恢复已删除」放回「已排除」。</p>
+      body: `<p>将<b>永久删除</b> <b>${n}</b> 条已排除的产品（任务及其 EHunt 数据一并删除）。确定删除？</p>
+        <p class="hint">删除后不可恢复；不消耗 EHunt 额度。</p>
         <label class="delrej-l"><span>请输入数量 <b>${n}</b> 以确认：</span><input id="scHideN" class="input" inputmode="numeric" autocomplete="off" placeholder="${n}"></label><p id="scHideErr" class="rj-err"></p>`,
       validate: () => { const v = $("scHideN").value.trim() === String(n); $("scHideErr").textContent = v ? "" : `请输入 ${n}`; return v; } });
     if (!ok) return;
     let res = { hidden: n, ids };
     if (!DEMO) { const r = await getSb().rpc("screen_hide_rejected", V.batch ? { p_batch: V.batch } : {}); if (r.error) return toast(`删除失败：${r.error.message}`, "bad"); res = r.data || res; }
-    const gone = new Set(res.ids || ids); V.items = V.items.filter((it) => !gone.has(it.id)); V.hidden += res.hidden ?? n;
-    if (DEMO) V.demoHidden = [...(V.demoHidden || []), ...ids.map((id) => ({ id }))];
-    toast(`已删除 ${res.hidden ?? n} 条`, "ok", [{ label: "撤销", run: () => unhide(res.ids || ids) }], 7000); render();
-  }
-  async function unhide(ids = null) {
-    if (!DEMO) { const { data, error } = await getSb().rpc("screen_unhide", { p_ids: ids }); if (error) return toast(`恢复失败：${error.message}`, "bad");
-      toast(`已恢复 ${data} 条到「已排除」`, "ok"); return load(); }
-    toast(`已恢复 ${V.hidden} 条到「已排除」（演示）`, "ok"); V.hidden = 0; render();
+    const gone = new Set(res.ids || ids); V.items = V.items.filter((it) => !gone.has(it.id));
+    toast(`已永久删除 ${res.deleted ?? res.hidden ?? n} 条`, "ok"); render();
   }
 
   document.addEventListener("load", (ev) => { const t = ev.target; if (t.tagName === "IMG" && t.dataset?.sid) markImg(t); }, true);
   document.addEventListener("error", (ev) => { const t = ev.target; if (t.tagName === "IMG" && t.dataset?.sid) markImg(t, true); }, true);
   document.addEventListener("click", (ev) => {
     if (!visible()) return;
-    const t = ev.target.closest("[data-srej],[data-sundo],[data-srestore],[data-sconfirm],[data-stab],[data-shide],[data-sunhide]"); if (!t) return;
+    const t = ev.target.closest("[data-srej],[data-sundo],[data-srestore],[data-sconfirm],[data-stab],[data-shide],[data-srefetch],[data-sreload]"); if (!t) return;
     ev.preventDefault();
     if (t.dataset.srej) { V.rej.add(t.dataset.srej); toast("已排除，不会进入分析", "", [{ label: "撤销", run: () => { V.rej.delete(t.dataset.srej); render(); } }], 4000); render(); }
     else if (t.dataset.sundo) { V.rej.delete(t.dataset.sundo); render(); }
@@ -139,7 +145,8 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     else if (t.dataset.sconfirm) confirm(t.dataset.sconfirm);
     else if (t.dataset.stab) { V.tab = t.dataset.stab; render(); }
     else if (t.dataset.shide) hideRejected();
-    else if (t.dataset.sunhide) unhide(null);
+    else if (t.dataset.srefetch) refetch(t.dataset.srefetch);
+    else if (t.dataset.sreload) load();
   });
 
   // ---------- 演示：?demo=1&screen=300#/screen（&sshot=loading|rejected|confirm|bottom） ----------
@@ -159,6 +166,7 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
       return;
     }
     V.items.forEach(fill);
+    if (shot === "failed") [2, 5, 8].forEach((k, j) => { const it = V.items[k]; if (it) { it.status = "failed"; it.screen_state = null; it.title = it.image_url = null; it.error = "EHunt 取数失败"; it.attempts = j === 2 ? 3 : j + 1; it.max_attempts = 3; } });
     if (shot === "excluded") [1, 4, 7, 9, 12, 53, 58, 61].forEach((k) => { const it = V.items[k]; if (it) { it.status = "canceled"; it.screen_state = "rejected"; } });
     if (shot === "rejected" || shot === "confirm" || shot === "bottom") [1, 4, 7, 9, 12, 53, 58].forEach((k) => V.rej.add(V.items[k].id));
     render();
