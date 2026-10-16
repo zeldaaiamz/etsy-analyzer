@@ -149,7 +149,7 @@ def run():
             o.update(结果=c,原因=rs,备注=note,说明=j.get('说明',''),材质=j.get('材质',''),acrylic_fit=fits,定制类型=j.get('定制类型',''),来源='视觉',
                      核心卖点='; '.join(j.get('核心卖点',[]) or []),适用场合='; '.join(j.get('适用场合',[]) or []),votes='/'.join(finals),一致=agree)
     GATE={'保留':'passed','待确认':'pending','排除':'rejected'}
-    for o in items: o['gate']=GATE[o['结果']]   # 预筛选初始闸门；待确认必须人工确认才进入选品筛选
+    for o in items: o['gate']=GATE[o['结果']]   # 闸门标记（回放用）；线上获取链接页只入库保留/待确认
     f=['listing_id','ranks','title','price','price_min','price_max','total_sales','sales_7d','sales_ratio','结果','gate','原因','备注','说明','来源','材质','acrylic_fit','定制类型','核心卖点','适用场合','votes','dup_note','image_url','image_url_hd']
     with open(OUT+'/selection_result.csv','w',encoding='utf-8-sig',newline='') as fh:
         w=csv.DictWriter(fh,f,extrasaction='ignore'); w.writeheader(); w.writerows(items)

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""selection.json → web/js/demo-selection.js（?demo=1#/select 预览用，不连 Supabase）"""
+"""selection.json → web/js/demo-selection.js（?demo=1#/selscreen 预览用，不连 Supabase）"""
 import json,sys,os
 src=sys.argv[1]; D=json.load(open(src)); M=D['meta']
 split=lambda s:[x.strip() for x in (s or '').split(';') if x.strip()]
@@ -16,5 +16,5 @@ for o in [x for x in items if x['verdict']=='保留'][:3]: o['cross_kw']=2; o['c
 run={'id':'demo-run','keyword':M.get('keyword'),'status':'succeeded','target_count':M.get('raw_rows'),'scraped_count':M.get('raw_rows'),'classified_count':M.get('items'),'created_at':'2026-10-16T03:00:00Z','params':{k:M.get(k) for k in('mode','runs','optional_custom','model')},
      'stats':{k:M.get(k) for k in('raw_rows','items','vision_calls','usage','seconds','cost_yuan','counts','gate_counts','reasons','disagree_runs')}}
 out=os.path.join(os.path.dirname(__file__),'..','..','web','js','demo-selection.js')
-open(out,'w').write('// 自动生成（tools/etsy_selection/gen_demo.py）：?demo=1#/select 使用的示例数据（acrylic decoration 回放）\nlet FX = null; // 单例：预筛选的人工改动在演示中对选品筛选页可见\nexport const selectionFixtures = () => (FX ||= '+json.dumps({'runs':[run],'items':{'demo-run':items}},ensure_ascii=False)+');\n')
+open(out,'w').write('// 自动生成（tools/etsy_selection/gen_demo.py）：?demo=1#/selscreen 使用的示例数据（acrylic decoration 回放）\nlet FX = null; // 单例：演示回放数据供获取链接页使用\nexport const selectionFixtures = () => (FX ||= '+json.dumps({'runs':[run],'items':{'demo-run':items}},ensure_ascii=False)+');\n')
 print('wrote',out,len(items))

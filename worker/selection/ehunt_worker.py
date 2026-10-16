@@ -1,4 +1,4 @@
-"""选品筛选 worker（按需）：认领 sel_runs → Playwright 已登录 EHunt 的浏览器逐条读列表页 → 每条立即分类 → 写 sel_items。
+"""获取链接 worker（按需）：认领 sel_runs → Playwright 已登录 EHunt 的浏览器逐条读列表页 → 每条立即分类 → 写 sel_items。
 读页面 DOM，不调用 EHunt API。部署设计见 deploy/etsy-selection-worker.service 与 tools/etsy_selection/README.md（未部署）。
 
 运行位置：本 box（不是 ECS）。自己的 Playwright 持久化目录，不连接/不复制桌面浏览器的 cookie 或 profile。

@@ -486,28 +486,9 @@ a{color:var(--primary);text-decoration:none}a:hover{text-decoration:underline}
 .delrej-l{display:flex;flex-direction:column;gap:4px;margin-top:8px;font-size:13px}.delrej-l .input{max-width:140px}
 .sc-tabs{display:flex;align-items:center;gap:6px;flex-wrap:wrap}.sc-tabs .spacer{flex:1}
 
-/* 选品筛选 #/select */
-.ss-head{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:8px 0 12px}
+/* .ss-thr 复用于获取链接页的「最多读取」输入 */
 .ss-thr{width:70px;display:inline-block}
-.ss-list{display:flex;flex-direction:column;gap:12px;margin-top:12px}
-.ss-card{display:grid;grid-template-columns:200px 1fr auto;gap:16px;background:#fff;border:1px solid #e6e8ef;border-radius:12px;padding:12px}
-.ss-card.ss-short{border-color:#22a06b;box-shadow:0 0 0 1px #22a06b33}
-.ss-img img{width:200px;height:200px;object-fit:cover;border-radius:8px;display:block;background:#f3f4f7}
-.ss-main{min-width:0;display:flex;flex-direction:column;gap:6px}
-.ss-top{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
-.ss-title{font-weight:600;line-height:1.35}
-.ss-nums{display:flex;gap:14px;flex-wrap:wrap;font-size:13px;color:#555}
-.ss-conds{list-style:none;margin:0;padding:0;display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:2px 12px;font-size:13px}
-.ss-ok{color:#1f8a5a;font-weight:700}.ss-no{color:#d0353f;font-weight:700}.ss-q{color:#c98a00;font-weight:700}
-.ss-tags{display:flex;gap:6px;flex-wrap:wrap;align-items:center;font-size:12px}
-.ss-tags .tag{background:#eef2ff;color:#3646a8;border-radius:10px;padding:1px 8px}.ss-tags .tag-o{background:#fff4e5;color:#9a5b00}
-.ss-why{font-size:12px;color:#666}
-.ss-act{display:flex;align-items:flex-start}
-.ss-v-k{background:#e3f6ec;color:#1f7a50}.ss-v-q{background:#fff4d6;color:#8a6200}.ss-v-x{background:#fde8ea;color:#b4232f}
-.ss-sl{background:#1f8a5a;color:#fff}
-.ss-fit-y{background:#e3f6ec;color:#1f7a50}.ss-fit-c{background:#fff4d6;color:#8a6200}.ss-fit-n{background:#fde8ea;color:#b4232f}
-@media (max-width:760px){.ss-card{grid-template-columns:1fr}.ss-img img{width:100%;height:auto}.ss-conds{grid-template-columns:1fr 1fr}}
-/* 链接筛选 #/selscreen（复用 sc-*） */
+/* 获取链接 #/selscreen（复用 sc-*） */
 .sc-x.ss-pass{right:50px;background:var(--ok)}.sc-x.ss-pass:hover{filter:brightness(1.1);background:var(--ok)}
 .sc-tag.ss-tag-q{background:#c98a00}
 .ss-reason{font-size:12px;margin-top:4px;display:flex;flex-wrap:wrap;gap:4px;align-items:center;color:var(--text-2)}

@@ -1,4 +1,4 @@
--- 024：Etsy「链接筛选」（选品雷达模块）。纯追加：新表 + 新函数，不改动已有表/函数。未在生产执行。
+-- 024：Etsy「获取链接」（选品雷达模块）。纯追加：新表 + 新函数，不改动已有表/函数。未在生产执行。
 -- 定稿（Hongyan 2026-10-16）：
 --   1 关键词 → sel_count() 建轻量任务 → box worker 在 EHunt 界面设筛选（价格 8–40、总销量 ≥100、7 天销量 >3、按 7 天销量降序）只读 “Find N products”
 --   2 用户填最多读取条数 → sel_start()；>1000 时分批，每批 1000，最多 5 批 / 5,000（EHunt 只显示前 5,000）；sel_next_batch(run, all)
@@ -191,31 +191,3 @@ do $$ begin
   begin alter publication supabase_realtime add table public.sel_runs; exception when duplicate_object then null; end;
   begin alter publication supabase_realtime add table public.sel_batches; exception when duplicate_object then null; end;
 end $$;
-
--- 次要页 #/select（非主要输出，保留只读查看 + 加入产品库备选）
-create or replace function public.sel_list(p_run uuid, p_stage text default 'select')
-returns jsonb language sql stable security invoker set search_path = public as $$
-  select coalesce(jsonb_agg(to_jsonb(i) || jsonb_build_object('gate', 'passed', 'gate_by', case when i.verdict = '待确认' then 'user' else 'auto' end,
-           'in_library', exists (select 1 from public.product_library l where l.user_id = i.user_id and l.etsy_listing_id = i.etsy_listing_id))
-         order by i.rank nulls last), '[]'::jsonb)
-    from public.sel_items i where i.run_id = p_run and i.user_id = auth.uid();
-$$;
-revoke all on function public.sel_list(uuid, text) from public, anon;
-grant execute on function public.sel_list(uuid, text) to authenticated;
-
-create or replace function public.sel_add_to_library(p_items uuid[])
-returns int language plpgsql security definer set search_path = public as $$
-declare n int;
-begin
-  if (select auth.uid()) is null then return 0; end if;
-  insert into public.product_library (user_id, job_id, etsy_listing_id, etsy_url, title, image_url, price, currency, product_summary, keywords, stage, note)
-  select distinct on (i.etsy_listing_id) i.user_id, null, i.etsy_listing_id, i.etsy_url, i.title, i.image_url,
-         i.price_min, 'USD', array_to_string(i.selling_points, '；'), i.occasions, 'candidate', '链接筛选：' || r.keyword
-    from public.sel_items i join public.sel_runs r on r.id = i.run_id
-   where i.id = any(p_items) and i.user_id = (select auth.uid())
-   order by i.etsy_listing_id, i.created_at desc
-  on conflict (user_id, etsy_listing_id) do nothing;
-  get diagnostics n = row_count; return n;
-end $$;
-revoke all on function public.sel_add_to_library(uuid[]) from public, anon;
-grant execute on function public.sel_add_to_library(uuid[]) to authenticated;

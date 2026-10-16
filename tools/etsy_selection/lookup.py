@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""链接筛选查询（网页无搜索，由 序猿 在对话里用本脚本查）。只读。
+"""获取链接查询（网页无搜索，由 序猿 在对话里用本脚本查）。只读。
   lookup.py runs [--keyword kw]                 最近 3 天的任务与批次汇总（DB）
   lookup.py links <run_id> [--batch N]          符合要求的链接（DB）
   lookup.py listing <listing_id>                某 listing 是否出现在符合要求结果里（DB），以及本地排除日志里的原因

@@ -2,7 +2,6 @@ import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
 import { computeVelocity, computeManualVelocity, cmpVelocity, velocityBadge, loadReviewDates, demoReviewDates, loadScrapeInfo } from "./velocity.js";
 import { amzBlock, amzUrls, openAll, applyEdit, kwList, MAX_KW, DIR_SELECT_HTML } from "./amzsearch.js";
 import { createScreen } from "./screen.js?v=fcc2d909";
-import { createSelection } from "./selection.js";
 import { createSelScreen } from "./selscreen.js";
 
 // ?demo=1：纯前端示例数据，不登录、不连 Supabase，仅用于预览界面（&offline=1 / &quota=1 预览横幅）
@@ -920,14 +919,12 @@ function renderLibrary() {
     <p class="muted">${totalAll ? (L.stage === "candidate" || L.stage === "all" ? "在任务中点“☆ 加入产品库”会进入备选" : "在备选中选择产品移到这里") : "在已完成任务上点“☆ 加入产品库”，或勾选多个任务批量加入"}</p></div>`;
 }
 const SCR = createScreen({ $, esc, imgUrl, toast, getSb: () => sb, DEMO, QS, confirmDialog });
-const SEL = createSelection({ $, esc, imgUrl, toast, getSb: () => sb, DEMO });
 const SSC = createSelScreen({ $, esc, toast, getSb: () => sb, DEMO, confirmDialog });
 function route() {
-  const lib = location.hash.startsWith("#/library"), scr = location.hash.startsWith("#/screen"), sel = location.hash.startsWith("#/select"), ssc = location.hash.startsWith("#/selscreen");
-  if (!$("nav").classList.contains("hidden")) { $("app").classList.toggle("hidden", lib || scr || sel || ssc); $("selScreenView").classList.toggle("hidden", !ssc); $("libraryView").classList.toggle("hidden", !lib); $("screenView").classList.toggle("hidden", !scr); $("selectView").classList.toggle("hidden", !sel); }
-  document.querySelectorAll("[data-nav]").forEach((a) => a.classList.toggle("active", a.dataset.nav === (lib ? "library" : scr ? "screen" : ssc ? "selscreen" : sel ? "select" : "tasks")));
+  const lib = location.hash.startsWith("#/library"), scr = location.hash.startsWith("#/screen"), ssc = location.hash.startsWith("#/selscreen");
+  if (!$("nav").classList.contains("hidden")) { $("app").classList.toggle("hidden", lib || scr || ssc); $("selScreenView").classList.toggle("hidden", !ssc); $("libraryView").classList.toggle("hidden", !lib); $("screenView").classList.toggle("hidden", !scr); }
+  document.querySelectorAll("[data-nav]").forEach((a) => a.classList.toggle("active", a.dataset.nav === (lib ? "library" : scr ? "screen" : ssc ? "selscreen" : "tasks")));
   if (ssc && (DEMO || (sb && currentUser))) SSC.show(location.hash.split("/")[2] || null);
-  if (sel && (DEMO || (sb && currentUser))) SEL.show(location.hash.split("/")[2] || null);
   if (scr) { if (DEMO || (sb && currentUser)) SCR.show(location.hash.split("/")[2] || null); } else SCR.hide();
   if (lib) { renderLibrary(); if (!DEMO && sb && currentUser) loadLibrary(); }
 }
