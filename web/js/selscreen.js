@@ -51,7 +51,9 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
   function demoCount(kw) {
     const id = `demo-${Date.now()}`, run = { id, keyword: kw, status: "counting", total_count: null, batch_size: BATCH, current_batch: 0, remaining_count: null, measured: !!MEASURED[kw.toLowerCase()] };
     V.demoRuns[id] = { run, batches: [], links: {} }; location.hash = `#/selscreen/${id}`;
-    setTimeout(() => { if (run.status === "canceled") return; run.status = "counted"; run.total_count = demoTotal(kw); refresh(); }, Number(QSP.get("countms")) || 1000);
+    const ms = Number(QSP.get("countms")) || 1000; run.progress = { stage: "count_open", at: new Date().toISOString() };
+    [["count_filter", 0.3], ["count_read", 0.7]].forEach(([st, f]) => setTimeout(() => { if (run.status === "counting") { run.progress = { stage: st, at: new Date().toISOString() }; refresh(); } }, ms * f));
+    setTimeout(() => { if (run.status === "canceled") return; run.status = "counted"; run.total_count = demoTotal(kw); run.progress = { stage: "count_done", total: run.total_count, at: new Date().toISOString() }; refresh(); }, ms);
   }
   const demoLinks = (run, bno, n) => { const seed = run.keyword.length * 7919 + bno * 104729; return Array.from({ length: n }, (_, i) => `https://www.etsy.com/listing/${9000000000 + ((seed + i * 7121) % 99999999)}`); };
   function demoBatch(run, bno, resume, s0) {
@@ -67,7 +69,10 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
       if (QSP.has("failat") && b.scraped_count >= Number(QSP.get("failat")) && !b.failedOnce) { // 演示：批次中途失败（如 box 与数据库连接中断）
         b.failedOnce = true; Object.assign(b, { status: "failed" }); Object.assign(run, { status: "failed", error: "Remote end closed connection without response" });
         D.links[b.id] = demoLinks(run, bno, Math.round(b.scraped_count * 0.35)); b.passed_count = D.links[b.id].length; return refresh(); }
-      if (b.scraped_count < total) { refresh(); return setTimeout(tick, Number(QSP.get("speed")) || 120); }
+      const rd = Math.min(total, b.scraped_count + Math.min(step * 2, total - b.scraped_count)); // 演示：读在前、豆包判断在后
+      run.progress = { stage: b.scraped_count < total ? (rd >= total ? "vision" : "reading") : "done", batch_no: bno, target: total, read: rd, judged: b.scraped_count, vision_pending: rd - b.scraped_count,
+        passed: Math.round(b.scraped_count * 0.35), excluded: b.scraped_count - Math.round(b.scraped_count * 0.35), page: Math.ceil((s - 1 + rd) / 20), at: new Date().toISOString() };
+      if (b.scraped_count < total) { b.passed_count = run.progress.passed; b.excluded_count = run.progress.excluded; refresh(); return setTimeout(tick, Number(QSP.get("speed")) || 120); }
       if (real) { // 回放数据：20 行 → 规则排除 13（定制 11、IP 1、素材 1）→ 7 条过豆包 → 保留 6 + 待确认 1
         const items = V.fx.items["demo-run"].filter((x) => x.sales_7d >= FILTERS.min_sales_7d);
         const ok = items.filter((x) => x.verdict !== "排除"), ex = items.filter((x) => x.verdict === "排除");
@@ -220,9 +225,30 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
     const pass = id === "demo-recent-1" ? 7 : 312, b = { id: `${id}-b1`, batch_no: 1, offset_start: 1, offset_end: Math.min(n, BATCH), status: "done", scraped_count: Math.min(n, BATCH), passed_count: pass, excluded_count: Math.min(n, BATCH) - pass, excluded_by_reason: { "定制": Math.min(n, BATCH) - pass }, demo: true };
     V.demoRuns[id] = { run, batches: [b], links: { [b.id]: demoLinks(run, 1, pass) } };
   }
+  // 演示截图：?demo=1&sprog=counting|reading|vision|done|failed#/selscreen/demo-prog（数字都是演示数字）
+  function demoProgress(kind) {
+    const id = "demo-prog", now = Date.now(), iso = (s) => new Date(now - s * 1000).toISOString();
+    const run = { id, keyword: "acrylic sign", status: "running", total_count: 3260, max_rows: 2000, batch_size: BATCH, current_batch: 2, remaining_count: 1000, created_at: iso(900), heartbeat_at: iso(3), demoProgress: true };
+    const b1 = { id: `${id}-b1`, batch_no: 1, offset_start: 1, offset_end: 1000, status: "done", scraped_count: 1000, passed_count: 352, excluded_count: 641, dup_count: 7, excluded_by_reason: { "定制": 551, "IP": 38, "材质": 31, "素材/数字文件": 21 }, finished_at: iso(400), copied_at: iso(300), demo: true };
+    const b2 = { id: `${id}-b2`, batch_no: 2, offset_start: 1001, offset_end: 2000, status: "running", scraped_count: 0, passed_count: 0, excluded_count: 0, excluded_by_reason: {}, demo: true };
+    let batches = [b1, b2];
+    if (kind === "counting") { Object.assign(run, { status: "counting", total_count: null, max_rows: null, current_batch: 0 }); batches = []; run.progress = { stage: "count_filter", at: iso(2) }; }
+    else if (kind === "reading" || kind === "vision") {
+      const P = kind === "reading" ? { stage: "reading", read: 468, judged: 431, vision_pending: 37, passed: 149, excluded: 279, dup: 3, page: 74 } : { stage: "vision", read: 1000, judged: 962, vision_pending: 38, passed: 333, excluded: 621, dup: 8, page: 100 };
+      Object.assign(b2, { scraped_count: P.judged, passed_count: P.passed, excluded_count: P.excluded }); run.progress = { ...P, batch_no: 2, target: 1000, at: iso(2) };
+    } else if (kind === "done") {
+      Object.assign(b2, { status: "done", scraped_count: 1000, passed_count: 341, excluded_count: 651, dup_count: 8, excluded_by_reason: { "定制": 560, "IP": 41, "材质": 29, "素材/数字文件": 21 }, finished_at: iso(20) });
+      Object.assign(run, { status: "succeeded", remaining_count: 0, progress: { stage: "done", batch_no: 2, target: 1000, read: 1000, judged: 1000, vision_pending: 0, passed: 341, excluded: 651, at: iso(20) } });
+    } else if (kind === "failed") {
+      Object.assign(b2, { status: "failed", scraped_count: 286, passed_count: 97, excluded_count: 187, finished_at: iso(60) });
+      Object.assign(run, { status: "failed", error: "EHunt 登录已失效（页面顶栏显示 Login/Register，搜索弹出登录提示）：需要在 box 上运行 deploy/box-selection-worker.sh login 重新人工登录", progress: { stage: "reading", batch_no: 2, target: 1000, read: 300, judged: 286, vision_pending: 14, passed: 97, excluded: 187, page: 65, at: iso(60) } });
+    }
+    const links = Object.fromEntries(batches.filter((b) => b.status !== "running").map((b) => [b.id, demoLinks(run, b.batch_no, b.passed_count)]));
+    V.demoRuns[id] = { run, batches, links };
+  }
   function schedule() { clearTimeout(V.timer); if (!DEMO && active(V.run) && location.hash.startsWith("#/selscreen")) V.timer = setTimeout(() => load(V.run.id), 3000); }
   async function load(runId) {
-    if (DEMO) { V.fx ||= (await import("./demo-selection.js")).selectionFixtures(); demoRecentRun(runId); loadRecent(); V.run = V.demoRuns[runId]?.run || null; return refresh(); }
+    if (DEMO) { V.fx ||= (await import("./demo-selection.js")).selectionFixtures(); if (runId === "demo-prog" && !V.demoRuns[runId]) demoProgress(QSP.get("sprog") || "reading"); demoRecentRun(runId); loadRecent(); V.run = V.demoRuns[runId]?.run || null; return refresh(); }
     const sb = getSb(); if (!sb) return;
     const seq = ++V.seq, stale = () => seq !== V.seq; // 快速切换标签/轮询时，旧请求晚到不能覆盖当前任务
     if (!runId) { V.run = null; V.batches = []; V.links = {}; loadRecent(); return render(); }
@@ -244,13 +270,64 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
     V.run = r.data; V.batches = b.data || []; V.links = links;
     render(); schedule();
   }
+  // ---------- 实时进度（034 sel_runs.progress，box worker 每 ≤2 秒写一次；未部署时回退到 sel_batches 计数） ----------
+  const CSTEPS = [["count_open", "打开 EHunt 产品研究页"], ["count_filter", "设置关键词与筛选"], ["count_read", "读取结果数"]];
+  const n0 = (v) => Number(v || 0).toLocaleString();
+  const ago = (t) => { const s = Math.max(0, Math.round((Date.now() - Date.parse(t || "")) / 1000)); return Number.isFinite(s) ? (s < 60 ? `${s} 秒前` : `${Math.round(s / 60)} 分钟前`) : ""; };
+  const STALE_S = 180;
+  function progressPanel(r) {
+    if (!r) return "";
+    const P = r.progress || {}, cur = V.batches.find((b) => b.status === "running" || b.status === "queued") || null;
+    const last = [...V.batches].reverse().find((b) => ["done", "failed", "canceled"].includes(b.status)) || null;
+    const demo = DEMO && (r.demoProgress || V.batches.some((b) => b.demo)) ? '<span class="pill pill-bad">演示数字</span>' : "";
+    const at = P.at || r.heartbeat_at, stale = active(r) && !["count_queued", "queued"].includes(r.status) && at && (Date.now() - Date.parse(at)) / 1000 > STALE_S;
+    const upd = at && active(r) ? `<span class="hint ss-pg-at${stale ? " warn" : ""}" title="box 抓取进程最后一次写入进度">${stale ? `⚠ box 抓取进程 ${ago(at)}没有更新进度` : `更新于 ${ago(at)}`}</span>` : "";
+    const stop = active(r) ? `<button class="btn btn-ghost btn-sm" id="ssStop">${["queued", "running"].includes(r.status) ? "■ 停止" : "取消查询"}</button>` : ""; // 查询阶段也能取消（QA #7）
+    const errH = r.error ? `<span class="warn" title="${esc(r.error)}">${esc(friendlyErr(r.error))}</span>` : "";
+    const bar = (rd, jd, cls = "") => `<div class="ss-pg-bar ${cls}" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${Math.round(jd)}"><i class="rd" style="width:${Math.min(100, rd)}%"></i><i class="jd" style="width:${Math.min(100, jd)}%"></i></div>`;
+    const wrap = (cls, pill, step, barH, stats) => `<div class="ss-pg ${cls}"><div class="ss-pg-top">${pill}<span class="ss-pg-step">${step}</span>${demo}<span class="spacer"></span>${upd}${stop}</div>${barH}${stats ? `<div class="ss-pg-stats">${stats}</div>` : ""}</div>`;
+    // ① 查询数量
+    if (r.status === "count_queued" || r.status === "counting") {
+      const i = r.status === "count_queued" ? -1 : Math.max(0, CSTEPS.findIndex(([k]) => k === P.stage));
+      const steps = CSTEPS.map(([, t], k) => `<span class="ss-pg-dot${k < i ? " ok" : k === i ? " on" : ""}">${k < i ? "✓" : k + 1}</span><span class="${k === i ? "" : "hint"}">${t}</span>`).join('<span class="ss-pg-sep">›</span>');
+      const pct = i < 0 ? 3 : [15, 50, 85][i];
+      const w = waitedMin(r.created_at), wt = w >= 2 ? `<span class="warn">已等待 ${w} 分钟（box 可能暂停，恢复后自动继续；也可以取消后重试）</span>` : "";
+      return wrap("ss-pg-run", `<span class="pill pill-info"><span class="spin"></span> ${i < 0 ? "排队查询数量（等待 box 抓取进程）" : "查询数量中"}</span>`, i < 0 ? wt : `第 ${i + 1}/3 步`, bar(pct, pct, "ss-pg-ind"), `<span class="ss-pg-steps">${steps}</span>`);
+    }
+    // ② 抓取（本批）
+    const b = cur || (["batch_done", "succeeded", "failed"].includes(r.status) ? last : null);
+    if (!b) return r.status === "canceled" ? (r.error ? wrap("ss-pg-bad", '<span class="pill pill-bad">已停止</span>', errH, "", "") : "") : r.status === "failed" ? wrap("ss-pg-bad", '<span class="pill pill-bad">失败</span>', errH, "", "") : "";
+    const same = P.batch_no == null || P.batch_no === b.batch_no;   // progress 只描述当前批
+    const tot = b.offset_end - b.offset_start + 1, target = same && P.target ? P.target : tot;
+    const judged = same && P.judged != null ? Math.max(P.judged, b.scraped_count || 0) : b.scraped_count || 0;
+    const read = Math.max(judged, same && P.read != null ? P.read : judged), vp = same ? P.vision_pending || 0 : 0;
+    const passed = same && P.passed != null ? Math.max(P.passed, b.passed_count || 0) : b.passed_count || 0, excl = same && P.excluded != null ? Math.max(P.excluded, b.excluded_count || 0) : b.excluded_count || 0;
+    const pctR = target ? (100 * read) / target : 0, pctJ = target ? (100 * judged) / target : 0, pct = Math.floor(pctJ);
+    const doneR = V.batches.filter((x) => x !== b && x.status === "done").reduce((a, x) => a + (x.scraped_count || 0), 0), maxR = r.max_rows || 0;
+    const overall = maxR > tot ? ` · 总进度 已读 <b>${n0(doneR + read)}</b> / 最多读取 ${n0(maxR)} 条` : "";
+    const nums = `已读 <b>${n0(read)}</b> / 目标 <b>${n0(target)}</b> 条 · 已判断 ${n0(judged)}${vp ? ` · <span class="ss-pg-v">豆包判断中 ${n0(vp)}</span>` : ""} · 通过 <b class="ss-n-ok">${n0(passed)}</b> · 排除 ${n0(excl)}${overall}`;
+    const range = `第 ${b.batch_no} 批（${b.offset_start.toLocaleString()}–${b.offset_end.toLocaleString()}）`;
+    if (b.status === "failed" || r.status === "failed") {
+      const where = { read_setup: "打开 EHunt / 设置筛选", reading: `抓取中（第 ${P.page || "?"} 页）`, vision: "调豆包判断" }[P.stage] || "抓取";
+      const numsF = nums.replace(/ · <span class="ss-pg-v">豆包判断中 [\d,]+<\/span>/, vp ? ` · 未判断 ${n0(vp)}` : "");   // 已停止：不再说“判断中”
+      return wrap("ss-pg-bad", '<span class="pill pill-bad">失败</span>', `${range} · 停在「${where}」 ${pct}%${errH ? ` · ${errH}` : ""}`, bar(pctR, pctJ, "ss-pg-fail"), numsF);
+    }
+    if (b.status === "done") {
+      const all = r.status === "succeeded";
+      return wrap("ss-pg-ok", `<span class="pill pill-ok">✓ ${all ? "全部完成" : "本批完成"}</span>`, `${range} · 100%${b.finished_at ? ` · ${new Date(b.finished_at).toLocaleTimeString("zh-CN", { timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", hour12: false })} 完成` : ""}`, bar(100, 100, "ss-pg-done"),
+        `已读 <b>${n0(b.scraped_count)}</b> / 目标 <b>${n0(tot)}</b> 条 · 通过 <b class="ss-n-ok">${n0(b.passed_count)}</b> · 排除 ${n0(b.excluded_count)}${b.dup_count ? ` · 重复 ${n0(b.dup_count)}` : ""}${maxR > tot ? ` · 总进度 已读 ${n0(doneR + (b.scraped_count || 0))} / 最多读取 ${n0(maxR)} 条` : ""}`);
+    }
+    const bw = b.status === "queued" && !b.started_at ? waitedMin(b.created_at) : 0;
+    const stg = r.status === "queued" || b.status === "queued" ? ["排队中（等待 box 抓取进程）", bw >= 2 ? `<span class="warn">已等待 ${bw} 分钟，box 可能暂停，恢复后自动开始</span>` : ""]
+      : P.stage === "vision" ? ["调豆包判断中", `列表已读完，剩 ${n0(vp || Math.max(0, read - judged))} 条等豆包判断`]
+      : P.stage === "read_setup" || (!P.stage && !judged) ? ["打开 EHunt · 设置筛选中", P.page > 1 ? `从第 ${P.page} 页续读` : ""]
+      : ["抓取中", P.page ? `第 ${P.page} 页${vp ? ` · 同时豆包判断 ${n0(vp)} 条` : ""}` : ""];
+    return wrap("ss-pg-run", `<span class="pill pill-info"><span class="spin"></span> ${stg[0]}</span>`, `${range} · <b>${pct}%</b>${stg[1] ? ` · ${stg[1]}` : ""}`, bar(pctR, pctJ), nums);
+  }
   // ---------- 界面 ----------
   function countPanel(r) {
     const locked = `<div class="ss-form"><label class="hint">最多读取 <input class="input input-sm ss-thr" type="number" disabled placeholder="—"> 条</label><button class="btn btn-primary" disabled title="先查询数量">抓取 →</button><span class="hint">先查询数量，显示结果数后才能抓取</span></div>`;
-    if (!r || r.total_count == null) {
-      const w = r && active(r) ? waitedMin(r.created_at) : 0;
-      return `<div class="ss-count">${r && active(r) ? `<div class="ss-prog-row"><span><span class="spin"></span> ${r.status === "count_queued" ? "排队等待 box 查询" : "正在读取"} EHunt「${esc(r.keyword)}」的结果数…</span>${w >= 2 ? `<span class="warn">已等待 ${w} 分钟（box 可能暂停，恢复后自动继续；也可以取消后重试）</span>` : ""}<button class="btn btn-ghost btn-sm" id="ssStop">取消查询</button></div>` : ""}${locked}</div>`;
-    }
+    if (!r || r.total_count == null) return `<div class="ss-count">${r && active(r) ? `<p class="hint">正在查询 EHunt「${esc(r.keyword)}」的结果数（进度见下方）</p>` : ""}${locked}</div>`;
     const n = r.total_count, nb = Math.ceil(Math.min(n, MAX_ROWS) / BATCH);
     const label = DEMO ? (MEASURED[r.keyword.toLowerCase()] ? `<span class="pill pill-ok">EHunt 实测（10-16 ${esc(MEASURED[r.keyword.toLowerCase()][1])}）</span>` : '<span class="pill pill-bad">演示数字，非实测</span>') : "";
     const tip = n > BATCH ? `<span class="pill pill-info">超过 1000：分批读取，每批 1000，共 ${nb} 批${n > MAX_ROWS ? "（EHunt 最多显示前 5,000 条）" : ""}</span>` : "";
@@ -273,8 +350,8 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
       return `<section class="ss-batch ss-batch-stop"><div class="ss-res-head"><h3>第 ${b.batch_no} 批（${range}）· <span class="pill pill-bad">${f ? "失败" : "已停止"}</span> 已读 ${(b.scraped_count || 0).toLocaleString()} / ${tot.toLocaleString()} 条，通过 <span class="ss-n ss-n-ok">${links.length}</span> 条</h3>${demo}<span class="spacer"></span>
         ${canRe ? `<button class="btn btn-primary btn-sm" id="ssResume">${f ? "重试本批（从断点）" : "继续本批"}</button>` : ""}${btns}</div>
       ${links.length ? `<pre class="ss-links">${esc(links.join("\n"))}</pre>` : ""}${exl}</section>`; }
-    if (b.status !== "done") { const w = b.status === "queued" ? waitedMin(b.created_at) : 0;
-      return `<div class="ss-batch ss-batch-run"><b>第 ${b.batch_no} 批（${range}）</b> <span class="hint">${b.status === "queued" ? `排队中，等待 box 抓取进程${w >= 2 ? `（已等待 ${w} 分钟，box 可能暂停，恢复后自动开始）` : ""}` : `读取中… 已读 ${(b.scraped_count || 0).toLocaleString()} 条，通过 ${b.passed_count || 0} 条`}</span></div>`; }
+    if (b.status !== "done") { const w = b.status === "queued" && !b.started_at ? waitedMin(b.created_at) : 0;
+      return `<div class="ss-batch ss-batch-run"><b>第 ${b.batch_no} 批（${range}）</b> <span class="hint">${b.status === "queued" ? `排队中，等待 box 抓取进程${w >= 2 ? `（已等待 ${w} 分钟，box 可能暂停，恢复后自动开始）` : ""}` : "读取中（进度见上方）"}</span></div>`; }
     if (b.copied_at && !V.open.has(b.id)) return `<div class="ss-batch ss-batch-copied"><span class="pill pill-ok">✓ 已复制</span> <b>第 ${b.batch_no} 批（${range}）</b> 符合要求 ${links.length} 条 ${demo}<span class="spacer"></span>${psBtn}<button class="btn btn-link btn-sm" data-ssopen="${esc(b.id)}">展开</button></div>`;
     return `<section class="ss-batch"><div class="ss-res-head"><h3>第 ${b.batch_no} 批（${range}）· 符合要求 <span class="ss-n ss-n-ok">${links.length}</span> 条</h3>${demo}<span class="spacer"></span>
         ${b.copied_at ? `<button class="btn btn-link btn-sm" data-ssfold="${esc(b.id)}">收起</button>` : ""}
@@ -286,10 +363,7 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
     $("ssSum").innerHTML = ""; $("ssTabs").innerHTML = ""; $("ssFoot").innerHTML = "";
     const cur = V.batches.find((b) => b.status === "running" || b.status === "queued");
     const ST = { count_queued: "排队查询数量", counting: "读取结果数中", queued: "排队中（等待 box 抓取进程）", running: "读取 EHunt 列表页中", batch_done: "本批完成", succeeded: "全部完成", failed: "失败", canceled: "已停止" };
-    const prog = r && cur && active(r) ? (() => { const tot = cur.offset_end - cur.offset_start + 1, pct = Math.round(100 * (cur.scraped_count || 0) / tot);
-      return `<div class="ss-prog-row"><span class="pill pill-info"><span class="spin"></span> 第 ${cur.batch_no} 批（${cur.offset_start.toLocaleString()}–${cur.offset_end.toLocaleString()}）${esc(ST[r.status])}</span>
-        <span class="sc-prog ss-prog"><span style="width:${pct}%"></span></span><span class="hint">${pct}%</span><button class="btn btn-ghost btn-sm" id="ssStop">■ 停止</button></div>`; })()
-      : r && ["failed", "canceled"].includes(r.status) ? `<div class="ss-prog-row"><span class="pill pill-bad">${esc(ST[r.status])}</span>${r.error ? `<span class="warn" title="${esc(r.error)}">${esc(friendlyErr(r.error))}</span>` : ""}</div>` : "";
+    const prog = progressPanel(r);
     $("ssStart").innerHTML = `<div id="ssRecent"></div><div class="card ss-start"><div class="ss-form"><input id="ssKw" class="input" maxlength="${KW_MAX}" placeholder="EHunt 关键词，例如 acrylic decoration" value="${esc($("ssKw")?.value || r?.keyword || "")}">
         <button class="btn btn-primary" id="ssCount"${active(r) ? " disabled" : ""}>查询数量</button></div>${countPanel(r)}${prog}</div>`; DEMO ? loadRecent() : renderRecent();
     const done = V.batches.filter((b) => FIN.includes(b.status));

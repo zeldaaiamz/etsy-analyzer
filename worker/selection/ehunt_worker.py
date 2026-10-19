@@ -31,6 +31,35 @@ def is_transient(e):
     return False
 def _brief(e): return f"HTTP {e.code}" if isinstance(e, urllib.error.HTTPError) else f"{type(e).__name__}: {str(e)[:120]}"
 
+# ---- 实时进度（034 sel_runs.progress jsonb）：网页“获取链接”进度条读这里 ----
+# stage：count_open 打开 EHunt → count_filter 设置关键词/筛选 → count_read 读取结果数（查询数量）；
+#        read_setup 设置筛选/跳页 → reading 逐行读列表页（同时豆包判断）→ vision 列表读完、等豆包判断剩余条目 → done
+# 字段：read 本批已从 EHunt 读出的行数（含续读前已落定的）；judged 已判定（= scraped_count）；vision_pending 豆包判断中；
+#       passed / excluded / dup；page 当前页；target 本批目标条数；at 写入时间（UTC，网页判断 worker 是否还活着）。
+PROGRESS_MIN_INTERVAL = float(os.environ.get("SEL_PROGRESS_SECONDS", "2"))   # 节流：同一阶段内最多每 2 秒写一次
+class Progress:
+    def __init__(self, store, rid, min_interval=PROGRESS_MIN_INTERVAL, clock=time.monotonic):
+        self.store, self.rid, self.min, self.clock = store, rid, min_interval, clock
+        self.state, self.last, self.writes = {}, None, 0
+    def update(self, force=False, **kw):
+        stage_changed = "stage" in kw and kw["stage"] != self.state.get("stage")
+        self.state.update(kw)
+        now = self.clock()
+        if not (force or stage_changed or self.last is None or now - self.last >= self.min): return False
+        self.last = now
+        if not PROGRESS_ON[0]: return False
+        try: self.store.patch_run(self.rid, progress={**self.state, "at": NOW()}); self.writes += 1; return True
+        except urllib.error.HTTPError as e:
+            if e.code == 400:   # 034 未执行：progress 列不存在 → 本进程停写，不影响抓取
+                log.warning("progress column unavailable (migration 034 not applied?), progress writes disabled"); PROGRESS_ON[0] = False
+            else: log.warning("progress write failed: HTTP %s", e.code)
+        except Exception: log.warning("progress write failed", exc_info=True)
+        return False
+PROGRESS_ON = [True]
+_PROG = [None]   # 当前任务的 Progress（只在主线程读写）
+def stage(name, **kw):
+    if _PROG[0]: _PROG[0].update(stage=name, **kw)
+
 class Store:
     """最小 PostgREST 客户端（service_role，只在 box 的 worker.env 中；绝不打印）。只写：run/batch 汇总数 + 符合要求的 sel_items。"""
     def __init__(self):
@@ -95,13 +124,14 @@ def scrape_ehunt(keyword, params, start_rank, end_rank, between=None):
                     time.sleep(0.5)
                 else: raise RuntimeError(f"翻页到第 {n} 页超时")
                 time.sleep(1.5)
+            stage("read_setup", page=page)
             pg.wait_for_selector(U["row"], timeout=30000)
             if page > 1:  # 续读：分页 “Go to” 输入框
                 old = first_href(); pg.fill(U["jump_input"], str(page)); pg.keyboard.press("Enter"); wait_page(page, old)
             rank = (page - 1) * ps
             while rank < end_rank:
                 pg.wait_for_selector(U["row"], timeout=30000); dismiss_overlays(pg, U); t_page = time.time()
-                log.info("ehunt page %s: reading rows (rank %s→, target %s)", page, rank + 1, end_rank)
+                log.info("ehunt page %s: reading rows (rank %s→, target %s)", page, rank + 1, end_rank); stage("reading", page=page)
                 for tr in pg.query_selector_all(U["row"]):
                     a = tr.query_selector(U["title"])
                     if not a: continue
@@ -208,10 +238,13 @@ def _click(pg, U, target, timeout=10000):
 def _open_list(p, keyword, params):
     """打开 EHunt 产品研究页并通过界面设置 关键词 + 价格 + 总销量 + 排序，校验 Selected: 标签后返回。"""
     U, F = ui(), filters(params)
+    counting = (_PROG[0].state.get("stage") or "").startswith("count") if _PROG[0] else False
+    stage("count_open" if counting else "read_setup")
     ctx = p.chromium.launch_persistent_context(PROFILE, headless=True,
                                                viewport={"width": 1440, "height": 1000}, locale="en-US")
     pg = ctx.pages[0] if ctx.pages else ctx.new_page(); pg.goto(U["url"], wait_until="networkidle", timeout=60000)
     if "login" in pg.url: ctx.close(); raise RuntimeError("EHunt 登录已失效：需要在 box 上运行 --login 重新人工登录")
+    if counting: stage("count_filter")
     try:
         b = pg.query_selector(U["banner_close"])
         if b and b.is_visible(): b.click(); time.sleep(0.5)
@@ -252,7 +285,7 @@ def count_ehunt(keyword, params):
     with sync_playwright() as p:
         ctx, pg = _open_list(p, keyword, params)
         try:
-            txt = pg.locator(U["count_text"]).first.inner_text()
+            stage("count_read"); txt = pg.locator(U["count_text"]).first.inner_text()
             m = re.search(U["count_regex"], txt)
             if not m: raise RuntimeError(f"未识别结果数文字：{txt[:80]}")
             return int(m.group(1).replace(",", ""))
@@ -500,6 +533,10 @@ def process_batch(store, run, batch, scraper):
             with clock: calls[0] += n
             return o2
         except Exception as e: return {**o, "结果": "待确认", "备注": f"视觉失败：{str(e)[:80]}", "原因": "视觉调用失败"}   # 拿不准就保留
+    base = cnt["scraped"]; prog = _PROG[0]; n_seen = 0
+    def tick(force=False, **kw):
+        if prog: prog.update(force=force, read=base + n_seen, judged=cnt["scraped"], vision_pending=sum(1 for _, k, _v in pend if k == "vision"),
+                             passed=cnt["passed"], excluded=cnt["excluded"], dup=cnt["dup"], **kw)
     pend = deque()   # 按抓取顺序：(row, kind, value|future)
     def drain(block=False):
         while pend:
@@ -507,8 +544,8 @@ def process_batch(store, run, batch, scraper):
             if kind == "vision":
                 if not block and not v.done(): return
                 v = v.result()
-            pend.popleft(); finalize(row, kind, v)
-    pool = ThreadPoolExecutor(max_workers=VISION_CONC, thread_name_prefix="vision"); n_seen = 0
+            pend.popleft(); finalize(row, kind, v); tick()
+    pool = ThreadPoolExecutor(max_workers=VISION_CONC, thread_name_prefix="vision")
     try:
         for row in scraper:
             if n_seen % 20 == 0 and store.run(rid).get("status") == "canceled":
@@ -516,14 +553,15 @@ def process_batch(store, run, batch, scraper):
                     if k == "vision": v.cancel()
                     if k != "dup": seen.discard(str(prow["listing_id"]))   # 未落定的行：继续本批时要重新读
                 pool.shutdown(wait=True, cancel_futures=True); pend.clear()
-                store.patch_batch(batch["id"], status="canceled", finished_at=NOW()); flush(); return "canceled"
+                store.patch_batch(batch["id"], status="canceled", finished_at=NOW()); flush(); tick(force=True, stage="canceled"); return "canceled"
             n_seen += 1; lid = str(row["listing_id"])
             if lid in seen: pend.append((row, "dup", None))       # 跨批/同批重复：不重复调用、不重复入库
             else:
                 seen.add(lid); o = C.dedupe([row])[0]
                 r = C.guard(o) or C.rule(o["title"])               # ① 标题规则 + 7 天销量兜底：命中即排除，不调豆包
                 pend.append((row, "rule", r) if r else (row, "vision", pool.submit(vision_task, o)))   # ② 规则通过 → 豆包视觉×3（并发）
-            drain()
+            drain(); tick(**({"stage": "reading"} if n_seen == 1 else {}))
+        tick(stage="vision")   # 列表已读完：剩下的只是等豆包判断
         drain(block=True)
     except BaseException:
         # 失败：已落定的计数尽量写回（继续本批从 offset_start + scraped_count 接着读），未落定的豆包任务取消
@@ -531,7 +569,7 @@ def process_batch(store, run, batch, scraper):
             if k == "vision": v.cancel()
             if k != "dup": seen.discard(str(prow["listing_id"]))
         pend.clear()
-        try: flush()
+        try: flush(); tick(force=True, stage="canceled")
         except Exception: log.warning("flush after failure failed", exc_info=True)
         raise
     finally:
@@ -540,7 +578,7 @@ def process_batch(store, run, batch, scraper):
     flush()
     # 本批完成：只在这里更新“还剩 N 条未读”
     run = store.run(rid); remaining = max(0, (run.get("max_rows") or 0) - batch["offset_end"])
-    store.patch_batch(batch["id"], status="done", finished_at=NOW(), remaining_after=remaining); flush()
+    store.patch_batch(batch["id"], status="done", finished_at=NOW(), remaining_after=remaining); flush(); tick(force=True, stage="done")
     agg = {k: (run.get(f"{k}_count") or 0) + cnt[k] for k in ("scraped", "passed", "excluded")}
     rr = dict(run.get("excluded_by_reason") or {}); [rr.__setitem__(k, rr.get(k, 0) + v) for k, v in reasons.items()]
     upd = dict(scraped_count=agg["scraped"], passed_count=agg["passed"], excluded_count=agg["excluded"], excluded_by_reason=rr,
@@ -609,7 +647,9 @@ def main(argv=None):
         run = store.claim()
         if run:
             log.info("claimed run %s kw=%s status=%s", run["id"], run["keyword"], run["status"])
-            handle_run(store, run, a, lookups)
+            _PROG[0] = Progress(store, run["id"])
+            try: handle_run(store, run, a, lookups)
+            finally: _PROG[0] = None
         if playwright_leaked():   # 兜底自检：任何路径漏关了 sync_playwright → 立即换新进程（守护脚本重启），绝不带病继续
             log.critical("asyncio loop still running after run (Playwright not closed); exiting %s for restart", EXIT_RECYCLE); recycle()
         if a.once: break
@@ -621,9 +661,11 @@ def handle_run(store, run, a, lookups):
     """处理一条认领到的 run。Playwright 被污染（asyncio loop 报错）→ 把 run 放回队列后退出进程，由守护脚本重启；
     其他失败：查询数量 → failed（用户重新查询）；抓取批次 → 本批标记“已停止”+原因，网页「继续本批」从断点接着读。"""
     if run["status"] == "counting":
+        stage("count_open")
         try:
             n = len(json.load(open(a.fake))) if a.fake else count_ehunt(run["keyword"], run.get("params") or {})
             store.patch_run_if(run["id"], "counting", status="counted", total_count=n, counted_at=NOW(), heartbeat_at=NOW())
+            if _PROG[0]: _PROG[0].update(force=True, stage="count_done", total=n)
         except Exception as e:
             if is_poisoned(e):
                 log.critical("Playwright poisoned during count; requeue run %s and exit for restart", run["id"])
@@ -636,6 +678,10 @@ def handle_run(store, run, a, lookups):
     try:
         s0 = b["offset_start"] + int(b.get("scraped_count") or 0)   # 继续本批：跳过已落定的行
         if b.get("scraped_count"): log.info("resume batch %s from rank %s", b["batch_no"], s0)
+        k0 = int(b.get("scraped_count") or 0)   # 新批次：从空进度开始（不沿用上一批的计数）
+        if _PROG[0]: _PROG[0].state = {}
+        stage("read_setup", batch_no=b["batch_no"], target=b["offset_end"] - b["offset_start"] + 1, read=k0, judged=k0,
+              vision_pending=0, passed=int(b.get("passed_count") or 0), excluded=int(b.get("excluded_count") or 0), dup=int(b.get("dup_count") or 0), page=(s0 - 1) // 20 + 1)
         sc = fake_scrape(a.fake, s0, b["offset_end"]) if a.fake else scrape_ehunt(run["keyword"], run.get("params") or {}, s0, b["offset_end"],
                                                                                between=(lambda c: serve_lookups_browser(store, c)) if lookups and LOOKUPS_ON else None)
         process_batch(store, run, b, sc)

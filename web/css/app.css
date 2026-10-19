@@ -546,3 +546,25 @@ html,body{overflow-x:hidden}
 .qmeter.qm-bad.qm-state b{color:var(--bad)}.qmeter.qm-unk.qm-state b{color:var(--text-3)}
 @media (max-width:640px){.qmeter.qm-bad.qm-state:not(.hidden){display:flex!important;padding:2px 8px}}  /* 手机上只显示“EHunt 服务异常”状态，正常额度仍隐藏 */
 .u-bad{color:var(--bad)}.u-unk{color:var(--text-3)}
+/* 获取链接实时进度（034 sel_runs.progress） */
+.ss-pg{margin-top:12px;padding:12px 14px;border:1px solid var(--border);border-radius:var(--r);background:var(--surface-2)}
+.ss-pg-top{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-height:28px}
+.ss-pg-step{font-size:13px;color:var(--text-2)}
+.ss-pg-at{font-size:12px}.ss-pg-at.warn{color:var(--warn)}
+.ss-pg-bar{position:relative;height:10px;margin:10px 0 8px;border-radius:999px;background:var(--muted-bg);overflow:hidden}
+.ss-pg-bar i{position:absolute;left:0;top:0;bottom:0;border-radius:999px;transition:width .6s ease}
+.ss-pg-bar .rd{background:color-mix(in srgb,var(--info) 35%,transparent)}   /* 已从 EHunt 读出 */
+.ss-pg-bar .jd{background:var(--info)}                                       /* 已判断（规则 + 豆包） */
+.ss-pg-ok .ss-pg-bar .jd,.ss-pg-ok .ss-pg-bar .rd{background:var(--ok)}
+.ss-pg-bad{border-color:color-mix(in srgb,var(--bad) 35%,transparent)}
+.ss-pg-bad .ss-pg-bar .jd{background:var(--bad)}.ss-pg-bad .ss-pg-bar .rd{background:color-mix(in srgb,var(--bad) 35%,transparent)}
+.ss-pg-ind .jd{background:repeating-linear-gradient(45deg,var(--info) 0 10px,color-mix(in srgb,var(--info) 70%,transparent) 10px 20px);background-size:28px 28px;animation:ss-pg-stripe 1s linear infinite}
+@keyframes ss-pg-stripe{to{background-position:28px 0}}
+.ss-pg-stats{font-size:13px;color:var(--text-2);line-height:1.7}.ss-pg-stats b{color:var(--text)}.ss-pg-stats .ss-n-ok{color:var(--ok)}
+.ss-pg-v{color:var(--info)}
+.ss-pg-steps{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+.ss-pg-dot{display:inline-flex;align-items:center;justify-content:center;width:18px;height:18px;border-radius:50%;font-size:11px;background:var(--muted-bg);color:var(--text-3)}
+.ss-pg-dot.on{background:var(--info);color:#fff}.ss-pg-dot.ok{background:var(--ok-bg);color:var(--ok)}
+.ss-pg-sep{color:var(--text-3);margin:0 2px}
+@media (max-width:640px){.ss-pg{padding:10px 12px}.ss-pg-stats{font-size:12px}.ss-pg-top .spacer{display:none}}
+@media (prefers-reduced-motion:reduce){.ss-pg-ind .jd{animation:none}.ss-pg-bar i{transition:none}}
