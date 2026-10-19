@@ -56,7 +56,8 @@ def scrape_ehunt(keyword, params, start_rank, end_rank):
             def first_href():
                 e = pg.query_selector(U["row"] + " " + U["title"]); return e.get_attribute("href") if e else None
             def wait_page(n, old):  # SPA 翻页：等到当前页码 = n 且首行变化
-                for _ in range(60):
+                for i in range(60):
+                    if i % 10 == 0: dismiss_overlays(pg, U)
                     a_ = pg.query_selector(U["active_page"])
                     if a_ and a_.inner_text().strip() == str(n) and first_href() != old: break
                     time.sleep(0.5)
@@ -67,7 +68,7 @@ def scrape_ehunt(keyword, params, start_rank, end_rank):
                 old = first_href(); pg.fill(U["jump_input"], str(page)); pg.keyboard.press("Enter"); wait_page(page, old)
             rank = (page - 1) * ps
             while rank < end_rank:
-                pg.wait_for_selector(U["row"], timeout=30000); t_page = time.time()
+                pg.wait_for_selector(U["row"], timeout=30000); dismiss_overlays(pg, U); t_page = time.time()
                 log.info("ehunt page %s: reading rows (rank %s→, target %s)", page, rank + 1, end_rank)
                 for tr in pg.query_selector_all(U["row"]):
                     a = tr.query_selector(U["title"])
@@ -84,7 +85,7 @@ def scrape_ehunt(keyword, params, start_rank, end_rank):
                 log.info("ehunt page %s done: rank=%s, %.0fs", page, rank, time.time() - t_page)
                 nxt = pg.query_selector(U["next"])
                 if not nxt or rank >= end_rank: break
-                old = first_href(); nxt.click(); page += 1; wait_page(page, old)
+                old = first_href(); _click(pg, U, U["next"]); page += 1; wait_page(page, old)
         finally: ctx.close()
 
 # 标准筛选（需求文档 §2）：数量与抓取都必须带上，否则会拿到未筛选的总数（如 43,805）。
@@ -94,6 +95,10 @@ FILTER_DEFAULTS = {"price_min": 8, "price_max": 40, "min_sales": 100, "min_sales
 UI_DEFAULTS = {
     "url": "https://ehunt.ai/etsy-product-research",
     "banner_close": "button.ehunt-ai-banner__close",          # 顶部 “Meet the new EHunt AI” 横幅会挡住点击
+    # Element Plus 弹窗（el-overlay 遮罩）会拦截所有点击：营销弹窗关掉即可；登录提示弹窗 = 账号已退出登录，关掉也搜不了（关键词不生效）
+    "overlay": ".el-overlay", "overlay_close": ".el-dialog__headerbtn, .el-message-box__headerbtn, [aria-label='Close this dialog']",
+    "login_dialog": ".login-tip-dialog, .el-overlay-dialog[aria-label='Unlock more EHunt features For Free!']",
+    "header_login": ".EtsyHunt-navbar li.nav-item.login, .navbar :text-is('Login')",   # 已登录时顶栏是头像，没有 Login/Register
     "search_input": "input[placeholder^='Enter a product name, tag, product ID']",
     "search_btn": ".el-input-group__append >> text=Search",   # 不能用 button:has-text('Search')：会命中 “Batch search” 弹窗
     "price_dd": "span.truncate:text-is('Price(USD)')",
@@ -119,6 +124,52 @@ UI_DEFAULTS = {
 def ui(): return {**UI_DEFAULTS, **json.loads(os.environ.get("EHUNT_UI", "{}"))}
 def filters(params): return {**FILTER_DEFAULTS, **json.loads(os.environ.get("EHUNT_FILTERS", "{}")), **{k: v for k, v in (params or {}).items() if k in FILTER_DEFAULTS}}
 
+class LoginExpired(RuntimeError): pass
+LOGIN_MSG = "EHunt 登录已失效（页面顶栏显示 Login/Register，搜索弹出登录提示）：需要在 box 上运行 deploy/box-selection-worker.sh login 重新人工登录"
+
+def _visible(loc):
+    try: return [loc.nth(i) for i in range(loc.count()) if loc.nth(i).is_visible()]
+    except Exception: return []
+
+def _check_login(pg, U):
+    if _visible(pg.locator(U["login_dialog"])) or _visible(pg.locator(U["header_login"])): raise LoginExpired(LOGIN_MSG)
+
+def dismiss_overlays(pg, U, rounds=4):
+    """关掉所有可见的 el-overlay 弹窗：先点右上角关闭 → 再按 Escape → 最后把遮罩隐藏。登录提示弹窗直接报登录失效。返回关掉的弹窗名。"""
+    closed = []
+    for _ in range(rounds):
+        ovs = _visible(pg.locator(U["overlay"]))
+        if not ovs: break
+        _check_login(pg, U)
+        for ov in ovs:
+            try: name = (ov.locator("[aria-label]").first.get_attribute("aria-label", timeout=500) if ov.locator("[aria-label]").count() else "") or ov.inner_text(timeout=500)[:40]
+            except Exception: name = "?"
+            closed.append(name); log.info("ehunt: dismiss overlay %r", name)
+            try:
+                b = _visible(ov.locator(U["overlay_close"]))
+                if b: b[0].click(timeout=3000); time.sleep(0.6)
+            except Exception: pass
+        if not _visible(pg.locator(U["overlay"])): break
+        try: pg.keyboard.press("Escape"); time.sleep(0.6)
+        except Exception: pass
+        if _visible(pg.locator(U["overlay"])):   # 兜底：隐藏遮罩并恢复页面滚动（不删 DOM，避免 Vue 报错）
+            pg.evaluate("""() => { document.querySelectorAll('.el-overlay').forEach(e => { if (e.offsetParent !== null || getComputedStyle(e).display !== 'none') e.style.display = 'none'; });
+                                   document.body.classList.remove('el-popup-parent--hidden'); document.body.style.overflow = ''; }""")
+            time.sleep(0.3)
+    return closed
+
+def _click(pg, U, target, timeout=10000):
+    """点击前后都清弹窗；被遮罩拦截超时 → 清弹窗再试一次（共 3 次）。target 是选择器字符串或 Locator。"""
+    from playwright.sync_api import TimeoutError as PWTimeout
+    loc = pg.locator(target).first if isinstance(target, str) else target
+    for attempt in range(3):
+        dismiss_overlays(pg, U)
+        try: loc.click(timeout=timeout); break
+        except PWTimeout:
+            log.warning("ehunt: click %s timed out (attempt %s), clearing overlays", target if isinstance(target, str) else "locator", attempt + 1)
+            if attempt == 2: dismiss_overlays(pg, U); raise
+    time.sleep(0.5); dismiss_overlays(pg, U)
+
 def _open_list(p, keyword, params):
     """打开 EHunt 产品研究页并通过界面设置 关键词 + 价格 + 总销量 + 排序，校验 Selected: 标签后返回。"""
     U, F = ui(), filters(params)
@@ -129,19 +180,22 @@ def _open_list(p, keyword, params):
     try:
         b = pg.query_selector(U["banner_close"])
         if b and b.is_visible(): b.click(); time.sleep(0.5)
+        dismiss_overlays(pg, U); _check_login(pg, U)
         for attempt in range(3):   # 页面水合前填写的关键词会被清空 → 以 Selected: 的 Keyword 标签为准，最多重试 3 次
-            pg.fill(U["search_input"], keyword); pg.click(U["search_btn"]); pg.wait_for_load_state("networkidle"); time.sleep(2 + attempt * 2)
+            dismiss_overlays(pg, U); pg.fill(U["search_input"], keyword); _click(pg, U, U["search_btn"]); pg.wait_for_load_state("networkidle"); time.sleep(2 + attempt * 2)
+            dismiss_overlays(pg, U)
             if U["chip_keyword"].format(keyword=keyword).replace(" ", "").lower() in pg.locator(U["selected_row"]).first.inner_text().replace(" ", "").lower(): break
         else: raise RuntimeError(f"关键词未生效：Selected: 中没有 Keyword: {keyword}")
         # Basic: Price(USD) → 自定义 Min/Max → OK（都在展开的 popover 里）
-        pg.click(U["price_dd"]); time.sleep(1); pop = pg.locator(U["popover"])
+        _click(pg, U, U["price_dd"]); time.sleep(1); pop = pg.locator(U["popover"])
         pop.locator(U["min_input"]).first.fill(str(F["price_min"])); pop.locator(U["max_input"]).first.fill(str(F["price_max"]))
-        pop.locator(U["ok_btn"]).first.click(); pg.wait_for_load_state("networkidle"); time.sleep(2)
+        _click(pg, U, pop.locator(U["ok_btn"]).first); pg.wait_for_load_state("networkidle"); time.sleep(2)
         # Sales → Total sales: Min 100 + 7-day sales: Min 4（>3）→ OK
-        pg.click(U["sales_dd"]); time.sleep(1); pop = pg.locator(U["popover"])
+        _click(pg, U, U["sales_dd"]); time.sleep(1); pop = pg.locator(U["popover"])
         pop.locator(U["total_sales_line"]).locator(U["min_input"]).first.fill(str(F["min_sales"]))
         pop.locator(U["sales7_line"]).locator(U["min_input"]).first.fill(str(F["min_sales_7d"]))
-        pop.locator(U["ok_btn"]).first.click(); pg.wait_for_load_state("networkidle"); time.sleep(2)
+        _click(pg, U, pop.locator(U["ok_btn"]).first); pg.wait_for_load_state("networkidle"); time.sleep(2)
+        dismiss_overlays(pg, U)
         # 排序默认 ↓7-day sales，校验
         st = pg.locator(U["sort_dd"]).first.inner_text().strip()
         if "7-day" not in st: raise RuntimeError(f"排序不是 7 天销量降序：{st}")
