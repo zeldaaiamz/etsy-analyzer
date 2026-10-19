@@ -340,9 +340,8 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
         if getattr(e, "service_anomaly", False):  # EHunt 账号/服务异常：全局熔断 ANOMALY_RETRY，不计尝试次数，不判永久失败
             until = _now() + ANOMALY_RETRY
             log.warning("job %s: %s; EHunt circuit open until %s (service anomaly)", jid, e, until)
-            try:  # 额度未知：清空 used/remaining，前端额度条显示“异常”而不是 0
-                store.set_service_status(ehunt_paused_until=until, ehunt_remaining=None, ehunt_used_today=None,
-                                         ehunt_quota_at=_now(), reason=str(e)[:300])
+            try:  # 只写熔断与原因；保留 used/remaining/quota_at 作为“上次正常”的额度（前端 tooltip 展示，不当作当前额度）
+                store.set_service_status(ehunt_paused_until=until, reason=str(e)[:300])
             except Exception:  # noqa: BLE001
                 log.warning("set_service_status failed", exc_info=True)
             store.update_job(jid, status="queued", stage=None, error=f"{str(e)[:400]}，已暂停取数，自动重试",

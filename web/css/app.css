@@ -541,3 +541,8 @@ html,body{overflow-x:hidden}
 .qmeter.qm-unk{color:var(--text-3)}.qmeter.qm-unk b{font-weight:600}
 .sc-anom{color:var(--bad)}.sc-anom .hint{color:var(--text-3)}
 .sc-banner{margin:0 0 var(--s3)}
+/* 额度状态胶囊：EHunt 服务异常 / 额度未知（无进度条、无 /200） */
+.qmeter.qm-state .qm-n b{font-weight:600}
+.qmeter.qm-bad.qm-state b{color:var(--bad)}.qmeter.qm-unk.qm-state b{color:var(--text-3)}
+@media (max-width:640px){.qmeter.qm-bad.qm-state:not(.hidden){display:flex!important;padding:2px 8px}}  /* 手机上只显示“EHunt 服务异常”状态，正常额度仍隐藏 */
+.u-bad{color:var(--bad)}.u-unk{color:var(--text-3)}

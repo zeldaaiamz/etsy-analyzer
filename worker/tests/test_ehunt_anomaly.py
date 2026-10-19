@@ -72,7 +72,8 @@ def test_job_requeued_breaker_tripped_attempts_not_consumed():
     assert j["run_after"] > _now() + ANOMALY_RETRY - __import__("datetime").timedelta(seconds=5)
     st = store.status
     assert st["ehunt_paused_until"] == j["run_after"] and st["reason"].startswith(ANOMALY_PREFIX)
-    assert st["ehunt_remaining"] is None and st["ehunt_used_today"] is None  # 前端显示“异常”而非 0
+    assert (st["ehunt_remaining"], st["ehunt_used_today"]) == (103, 97)  # 保留上次正常额度（前端只在 tooltip 里显示）
+    assert "ehunt_quota_at" not in st
     assert store.usage.get("ehunt", [0, 0, 0])[0] == 0  # 失败调用不计入 provider_usage_daily
     assert etsy.calls == 0
 
