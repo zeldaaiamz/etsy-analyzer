@@ -46,3 +46,10 @@ python3 -m analyzer.main --demo https://www.etsy.com/listing/1234567890/x
 - 停止：`pkill -f run-worker.sh; pkill -f analyzer.main`；查看：`pgrep -af analyzer.main; tail -f logs/worker.log`
 
 有 systemd 的主机请用 `deploy/etsy-analyzer-worker.service`（路径已指向本目录）。
+
+## EHunt 网页回退（预筛选只取主图，033）
+EHunt API 无订阅（免费 200 credits 一次性用完，之后返回 `code 500 查询失败: 'daily_limit'`）时：
+1. Supabase 执行 `supabase/migrations/033_ehunt_web_lookup.sql`（请求表 + `ehunt_lookup_request/claim/purge`，仅 service_role）。
+2. box：`deploy/box-selection-worker.sh stop && … start`（同一进程/同一 EHunt profile：空闲时优先处理查询；选品抓取中每读完一页穿插处理；≤1 次/秒；`EHUNT_WEB_LOOKUPS=0` 可关闭）。
+   只读主图：`cd worker && python3 -m selection.ehunt_worker --lookup-dry 1084985134,603690215`（真实浏览器，不连数据库）。
+3. ECS `.env`：`ETSY_PROVIDER=ehunt_web`，重启 worker。登录失效 → 条目显示“EHunt 服务异常（EHunt 未登录…）”，熔断 30 分钟、不计尝试次数；在 box 运行 `deploy/box-selection-worker.sh login` 重新登录即自动恢复。

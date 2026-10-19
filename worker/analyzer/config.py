@@ -43,6 +43,9 @@ class Config:
     heartbeat_interval: float = 30.0
     concurrency: int = 2  # 同时处理的任务数（worker 线程数，建议 2~3；Keepamore 全局限速 20 次/分钟由所有线程共享）
     cache_purge_hours: float = 6.0  # provider_cache 过期行清理间隔（0 = 不清理）
+    ehunt_web_timeout: int = 90      # ETSY_PROVIDER=ehunt_web：单条等待 box 主图查询的最长秒数（超时回队列，不计尝试）
+    ehunt_web_stale: int = 600       # 请求排队超过此秒数仍无人认领 → box worker 未响应（熔断 30 分钟）
+    ehunt_web_prefer_api: bool = False  # 买了 EHunt API 套餐后设 1：先走 API，API 异常/额度用完再回退网页
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -81,4 +84,7 @@ class Config:
             heartbeat_interval=float(e("HEARTBEAT_SECONDS", "30")),
             concurrency=max(1, min(5, int(e("WORKER_CONCURRENCY", "2")))),
             cache_purge_hours=float(e("CACHE_PURGE_HOURS", "6")),
+            ehunt_web_timeout=int(e("EHUNT_WEB_TIMEOUT_SECONDS", "90")),
+            ehunt_web_stale=int(e("EHUNT_WEB_STALE_SECONDS", "600")),
+            ehunt_web_prefer_api=e("EHUNT_WEB_PREFER_API", "0").lower() in ("1", "true", "yes"),
         )

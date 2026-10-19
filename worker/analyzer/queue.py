@@ -27,6 +27,8 @@ class Store:
     def discard_exhausted_job(self, job_id, error): ...
     def purge_expired_cache(self): return 0
     def load_etsy_product(self, job): return None
+    def lookup_request(self, listing_id): return None   # 033 ehunt_lookup_requests（ETSY_PROVIDER=ehunt_web）
+    def lookup_get(self, listing_id): return None
 
 
 class MemoryStore(Store):
@@ -256,6 +258,15 @@ class SupabaseStore(Store):
                                         "created_at": _now().isoformat(),
                                         "expires_at": (_now() + timedelta(seconds=ttl)).isoformat()})
 
+
+    def lookup_request(self, listing_id):
+        """033 ehunt_lookup_request：幂等写入/重新排队，返回当前行。"""
+        r = self._call("POST", "/rpc/ehunt_lookup_request", {"p_listing": int(listing_id)}, prefer="")
+        return (r[0] if isinstance(r, list) else r) or None
+
+    def lookup_get(self, listing_id):
+        rows = self._call("GET", "/ehunt_lookup_requests", params={"listing_id": f"eq.{int(listing_id)}", "select": "*"}, prefer="")
+        return rows[0] if rows else None
 
     def purge_expired_cache(self):
         """L5：删除过期超过 1 小时的 provider_cache 行（015 purge_expired_provider_cache；未部署时静默跳过）。"""

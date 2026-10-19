@@ -1,13 +1,19 @@
 from .mock import MockEtsy, MockAmazon, MockLLM, MockScreenshot
 
 
-def build_providers(cfg, cache=None):
+def build_providers(cfg, cache=None, store=None):
     if cfg.etsy_provider == "etsy_api":
         from .etsy_api import EtsyOpenAPI
         etsy = EtsyOpenAPI(cfg.etsy_api_key)
     elif cfg.etsy_provider == "ehunt":
         from .ehunt import EHuntEtsy
         etsy = EHuntEtsy(cfg.ehunt_api_key, cache=cache, ttl=cfg.ehunt_cache_ttl)
+    elif cfg.etsy_provider == "ehunt_web":
+        from .ehunt import EHuntEtsy
+        from .ehunt_web import EHuntWebEtsy
+        api = EHuntEtsy(cfg.ehunt_api_key, cache=cache, ttl=cfg.ehunt_cache_ttl) if cfg.ehunt_web_prefer_api and cfg.ehunt_api_key else None
+        etsy = EHuntWebEtsy(store if store is not None else getattr(cache, "store", None), cache=cache, ttl=cfg.ehunt_cache_ttl,
+                            timeout=cfg.ehunt_web_timeout, stale=cfg.ehunt_web_stale, api=api)
     else:
         etsy = MockEtsy()
     if cfg.amazon_provider == "rainforest":

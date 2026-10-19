@@ -39,9 +39,14 @@ class Store:
     def insert_item(self, body): self._req("POST", "/rest/v1/sel_items?on_conflict=run_id,etsy_listing_id", body, "return=minimal,resolution=ignore-duplicates")
     def exclude_words(self): return self._req("GET", "/rest/v1/sel_exclude_words?select=category,word,enabled&enabled=eq.true") or []
     def purge(self): return self._req("POST", "/rest/v1/rpc/sel_purge_older_than", {})
+    # 033 预筛选主图查询（ECS ehunt_web provider 写请求，本 worker 认领并写回主图）
+    def lookup_claim(self, n): return self._req("POST", "/rest/v1/rpc/ehunt_lookup_claim", {"p_worker": WID, "p_limit": n}) or []
+    def lookup_patch(self, lid, **kw): self._req("PATCH", f"/rest/v1/ehunt_lookup_requests?listing_id=eq.{int(lid)}", kw, "return=minimal")
+    def lookup_purge(self): return self._req("POST", "/rest/v1/rpc/ehunt_lookup_purge", {})
 
-def scrape_ehunt(keyword, params, start_rank, end_rank):
-    """读 EHunt 排名 start_rank..end_rank（含）：界面设好筛选 → 跳到对应页（每页 20）→ 逐行读 DOM。只在内存里产出行，不落盘。"""
+def scrape_ehunt(keyword, params, start_rank, end_rank, between=None):
+    """读 EHunt 排名 start_rank..end_rank（含）：界面设好筛选 → 跳到对应页（每页 20）→ 逐行读 DOM。只在内存里产出行，不落盘。
+    between(ctx)：每读完一页调用一次（穿插处理预筛选主图查询，用同一浏览器上下文的新标签页，不影响本页状态）。"""
     import re
     from playwright.sync_api import sync_playwright
     U = ui(); ps = int(U["page_size"]); num = lambda s: float("".join(ch for ch in (s or "") if ch.isdigit() or ch == ".") or 0)
@@ -83,6 +88,9 @@ def scrape_ehunt(keyword, params, start_rank, end_rank):
                            "price": num(cell("price")), "total_sales": total_of(cell("total")), "sales_7d": d7_of(cell("d7"))}
                     time.sleep(0.3)
                 log.info("ehunt page %s done: rank=%s, %.0fs", page, rank, time.time() - t_page)
+                if between:
+                    try: between(ctx)
+                    except Exception: log.warning("lookup between pages failed", exc_info=True)
                 nxt = pg.query_selector(U["next"])
                 if not nxt or rank >= end_rank: break
                 old = first_href(); _click(pg, U, U["next"]); page += 1; wait_page(page, old)
@@ -222,6 +230,124 @@ def count_ehunt(keyword, params):
             if not m: raise RuntimeError(f"未识别结果数文字：{txt[:80]}")
             return int(m.group(1).replace(",", ""))
         finally: ctx.close()
+
+# ---- 预筛选主图查询（033 ehunt_lookup_requests）：EHunt API 无订阅 → 用已登录的 EHunt 网页按 listing id 搜索 ----
+# 只读取一项：主图 URL（Hongyan 2026-10-19：不读标题/价格/销量/收藏/评论）。结果必须是 /listing/<id> 完全一致的行，绝不取第一条。
+LOOKUP_BATCH = max(1, int(os.environ.get("EHUNT_WEB_BATCH", "10")))
+LOOKUP_INTERVAL = float(os.environ.get("EHUNT_WEB_MIN_INTERVAL", "1.0"))   # 相邻两次搜索至少间隔（秒），约 ≤1 次/秒
+LOOKUP_READS = 3                                                            # 结果表最多读 3 次（每次间隔 1.5 秒）才判定“未找到”
+LOGIN_TAG = "EHunt 未登录"
+_LAST_LOOKUP = [0.0]
+
+def main_image(u):
+    """EHunt 列表缩略图 → Etsy 主图 il_570xN（只这一张）。"""
+    import re
+    u = (u or "").strip()
+    if u.startswith("//"): u = "https:" + u
+    return re.sub(r"/il_[0-9a-zA-Z]+x[0-9a-zA-Z]+\.", "/il_570xN.", u) if re.match(r"^https://i\.etsystatic\.com/", u) else u
+
+def match_image(rows, listing_id):
+    """rows: [(href, img_src)]。只接受 href 含 /listing/<id>（后面不是数字）的行。
+    返回主图 URL；行匹配但图还没加载/是占位图（data:、空）→ ""；没有匹配行 → None。"""
+    import re
+    pat = re.compile(rf"/listing/{int(listing_id)}(?!\d)"); hit = None
+    for href, src in rows:
+        if pat.search(href or ""):
+            u = main_image(src)
+            if re.match(r"^https://", u or ""): return u
+            hit = ""
+    return hit
+
+def _throttle():
+    wait = _LAST_LOOKUP[0] + LOOKUP_INTERVAL - time.monotonic()
+    if wait > 0: time.sleep(wait)
+    _LAST_LOOKUP[0] = time.monotonic()
+
+def page_finder(pg):
+    """返回 finder(listing_id) → 主图 URL | None；登录失效抛 LoginExpired。在 EHunt 产品研究页的搜索框里输入 listing id。"""
+    U = ui()
+    def rows():
+        out = []
+        for tr in pg.query_selector_all(U["row"]):
+            lk = tr.query_selector(U["link"]) or tr.query_selector(U["title"]); img = tr.query_selector(U["img"])
+            out.append(((lk.get_attribute("href") if lk else "") or "", (img.get_attribute("src") if img else "") or ""))
+        return out
+    def finder(lid):
+        _throttle(); dismiss_overlays(pg, U); _check_login(pg, U)
+        pg.fill(U["search_input"], str(int(lid))); _click(pg, U, U["search_btn"])
+        try: pg.wait_for_load_state("networkidle", timeout=20000)
+        except Exception: pass
+        seen = None
+        for i in range(LOOKUP_READS):
+            time.sleep(1.5); dismiss_overlays(pg, U); _check_login(pg, U)
+            u = match_image(rows(), lid)
+            if u: return u
+            seen = u if u is not None else seen
+        return seen   # "" = EHunt 有这条但没有主图（懒加载占位图）；None = 搜不到
+    return finder
+
+def open_lookup_page(ctx):
+    U = ui(); pg = ctx.new_page(); pg.goto(U["url"], wait_until="networkidle", timeout=60000)
+    if "login" in pg.url: raise LoginExpired(LOGIN_MSG)
+    b = pg.query_selector(U["banner_close"])
+    if b and b.is_visible(): b.click(); time.sleep(0.5)
+    dismiss_overlays(pg, U); _check_login(pg, U)
+    return pg
+
+def serve_lookups(store, finder_factory, limit=LOOKUP_BATCH, max_rounds=20):
+    """认领并处理查询请求，直到队列空（或 max_rounds 轮）。finder_factory() 惰性打开页面（没有请求就不开浏览器）。
+    done=主图；not_found=EHunt 搜不到这个 listing；login_expired=登录失效（本轮剩余全部标记，不算失败，ECS 端熔断并提示重新登录）。"""
+    finder, n = None, 0
+    for _ in range(max_rounds):
+        reqs = store.lookup_claim(limit)
+        if not reqs: break
+        for i, r in enumerate(reqs):
+            lid = r["listing_id"]
+            try:
+                finder = finder or finder_factory()
+                u = finder(lid)
+                store.lookup_patch(lid, status="not_found" if u is None else "done", image_url=u or None, error=None, finished_at=NOW())
+                log.info("lookup %s: %s", lid, "not found" if u is None else "image" if u else "found, no image")
+            except LoginExpired as e:
+                for r2 in reqs[i:]: store.lookup_patch(r2["listing_id"], status="login_expired", error=f"{LOGIN_TAG}：{e}"[:300], finished_at=NOW())
+                log.warning("lookup: %s", e); return n
+            except Exception as e:
+                store.lookup_patch(lid, status="error", error=str(e)[:300], finished_at=NOW()); log.warning("lookup %s failed", lid, exc_info=True)
+                finder = None   # 页面可能已坏：下一条重开
+            n += 1
+    return n
+
+def serve_lookups_browser(store, ctx=None):
+    """ctx=None：自己开持久化上下文（主循环空闲时）；否则在选品抓取的同一上下文里开新标签页（翻页间穿插）。"""
+    from contextlib import ExitStack
+    with ExitStack() as es:
+        def factory():
+            c = ctx
+            if c is None:
+                from playwright.sync_api import sync_playwright
+                p = es.enter_context(sync_playwright())
+                c = p.chromium.launch_persistent_context(PROFILE, headless=True, viewport={"width": 1440, "height": 1000}, locale="en-US")
+                es.callback(c.close)
+            pg = open_lookup_page(c)
+            if ctx is not None: es.callback(pg.close)
+            return page_finder(pg)
+        return serve_lookups(store, factory)
+
+def lookup_dry(ids):
+    """真实浏览器、只读：逐条查询主图并打印 JSON；不连数据库、不写任何东西。"""
+    from playwright.sync_api import sync_playwright
+    out = []
+    with sync_playwright() as p:
+        c = p.chromium.launch_persistent_context(PROFILE, headless=True, viewport={"width": 1440, "height": 1000}, locale="en-US")
+        try:
+            finder = page_finder(open_lookup_page(c))
+            for lid in ids:
+                t = time.time()
+                try: u = finder(lid); out.append({"listing_id": lid, "status": "not_found" if u is None else "done", "image_url": u or None, "seconds": round(time.time() - t, 1)})
+                except LoginExpired as e: out.append({"listing_id": lid, "status": "login_expired", "error": str(e)}); break
+                except Exception as e: out.append({"listing_id": lid, "status": "error", "error": str(e)[:200]})
+        finally: c.close()
+    print(json.dumps(out, ensure_ascii=False, indent=1)); return out
 
 def fake_scrape(path, start_rank=1, end_rank=10**9):
     for r in json.load(open(path)):
@@ -386,22 +512,34 @@ def login(url):
     print("登录窗口已关闭，profile 已保存", flush=True)
 
 WORDS_TTL = int(os.environ.get("SEL_WORDS_TTL", "300"))
+LOOKUPS_ON = os.environ.get("EHUNT_WEB_LOOKUPS", "1") != "0"   # 预筛选主图查询开关
 def main(argv=None):
     ap = argparse.ArgumentParser(); ap.add_argument("--once", action="store_true"); ap.add_argument("--fake", help="回放 JSON，代替真实抓取")
     ap.add_argument("--login", action="store_true", help="一次性人工登录 EHunt（有头浏览器，box 显示器）")
     ap.add_argument("--login-url", default="https://ehunt.ai/etsy-product-research")
+    ap.add_argument("--lookup-dry", help="逗号分隔 listing id：真实查询主图并打印，不连数据库（测试用）")
     a = ap.parse_args(argv); logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if a.login: return login(a.login_url)
+    if a.lookup_dry: return lookup_dry([int(x) for x in a.lookup_dry.split(",") if x.strip()])
     store = Store(); last_purge = 0; last_words = 0
     while True:
         if time.time() - last_purge > 86400:  # 启动时 + 每 24 小时：DB 3 天清理（pg_cron 不可用时的兜底）+ 本地排除日志清理
             try: log.info("purge db=%s local=%s", store.purge(), purge_local())
             except Exception: log.warning("purge failed", exc_info=True)
+            try: log.info("purge lookups=%s", store.lookup_purge())
+            except Exception: log.warning("lookup purge failed (migration 033 not applied?)")
             last_purge = time.time()
         if time.time() - last_words > WORDS_TTL:  # 排除词表：后台 sel_exclude_words，5 分钟刷新；表不可用 → 内置兜底
             try: rows = store.exclude_words(); log.info("exclude words: %s (%d rows)", C.set_words(rows), len(rows))
             except Exception: log.warning("exclude words load failed, using built-in", exc_info=True); C.set_words(None)
             last_words = time.time()
+        lookups = LOOKUPS_ON and not a.fake
+        if lookups:   # 预筛选主图查询优先于选品（很快：每条约 3-5 秒）；表未部署（033 未执行）→ 本进程内关闭
+            try: serve_lookups_browser(store)
+            except urllib.error.HTTPError as e:
+                if e.code in (404, 400): log.warning("ehunt_lookup_requests unavailable (HTTP %s), lookups disabled", e.code); globals()["LOOKUPS_ON"] = False
+                else: log.warning("lookups failed", exc_info=True)
+            except Exception: log.warning("lookups failed", exc_info=True)
         run = store.claim()
         if run:
             log.info("claimed run %s kw=%s status=%s", run["id"], run["keyword"], run["status"])
@@ -417,7 +555,8 @@ def main(argv=None):
                     try:
                         s0 = b["offset_start"] + int(b.get("scraped_count") or 0)   # 继续本批：跳过已落定的行
                         if b.get("scraped_count"): log.info("resume batch %s from rank %s", b["batch_no"], s0)
-                        sc = fake_scrape(a.fake, s0, b["offset_end"]) if a.fake else scrape_ehunt(run["keyword"], run.get("params") or {}, s0, b["offset_end"])
+                        sc = fake_scrape(a.fake, s0, b["offset_end"]) if a.fake else scrape_ehunt(run["keyword"], run.get("params") or {}, s0, b["offset_end"],
+                                                                                       between=(lambda c: serve_lookups_browser(store, c)) if lookups and LOOKUPS_ON else None)
                         process_batch(store, run, b, sc)
                     except Exception as e:
                         log.exception("batch failed"); store.patch_batch(b["id"], status="failed", finished_at=NOW())

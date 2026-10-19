@@ -159,7 +159,7 @@ def main(argv=None):
         return store
     store = SupabaseStore(cfg.supabase_url, cfg.supabase_key, cfg.storage_bucket)
     cache = StoreCache(store)
-    make = lambda: (*build_providers(cfg, cache=cache), build_screenshot(cfg))  # noqa: E731
+    make = lambda: (*build_providers(cfg, cache=cache, store=store), build_screenshot(cfg))  # noqa: E731
     ids = worker_ids(cfg)
     first = make()
     stop_evt = threading.Event()

@@ -230,7 +230,14 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
         url = job["etsy_url"]
 
         step("analyze")
+        image_only = bool((prod.raw or {}).get("image_only")) or not (prod.title or "").strip()
+        if image_only:  # EHunt 网页回退只取了主图（无标题/标签/价格/销量）：识别只能靠豆包看图
+            log.info("job %s: listing %s has image only (EHunt web fallback); analysis relies on vision", jid, lid)
         an = llm.analyze_product(prod, reviews)
+        an.keywords = [k for k in (an.keywords or []) if isinstance(k, str) and k.strip()]
+        if not an.keywords:  # 空搜索词不能拿去搜亚马逊（仅主图且看图失败时会发生）
+            raise PermanentError("未能识别出亚马逊搜索词：EHunt 网页回退只取到主图，且看图识别失败（检查豆包 ARK 配置）"
+                                 if image_only else "未能识别出亚马逊搜索词")
         if not getattr(an, "keyword_items", None):  # 旧缓存/旧 provider：用纯字符串关键词兜底（来源 title + 原标题短语）
             an.keyword_items = build_keywords([], prod.title, fallback=an.keywords)
         ev = an.audience_evidence
@@ -252,7 +259,8 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
         trace.append({"step": "identify", "title": "识别产品",
                       "input": {"listing_id": lid, "标题": prod.title, "标签": prod.tags, "价格": prod.price, **etsy_metrics},
                       "output": {"产品": an.product_summary, "类目": an.category},
-                      "reasoning": f"依据 Etsy 标题、标签、描述（{type(llm).__name__}）"})
+                      "reasoning": (f"仅依据 Etsy 主图（EHunt 网页回退，无标题/标签/价格/销量；{type(llm).__name__} + 豆包看图）"
+                                    if image_only else f"依据 Etsy 标题、标签、描述（{type(llm).__name__}）")})
         trace.append({"step": "audience", "title": "判断人群",
                       "input": {"评论": review_count_text(ev) if ev.get("source") == "reviews" or ev.get("no_text_provider") else "无评论，改用商品文字",
                                 "本商品评论": ev.get("listing_reviews_used", 0), "同店补充评论": ev.get("shop_reviews_used", 0),
@@ -290,6 +298,9 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
                           if hasattr(amazon, "usage_text") else "")})
 
         step("match")
+        if image_only and not (prod.description or "").strip():
+            # 同款判定的 Etsy 侧只有图：用看图识别出的产品描述代替标题/描述（只在内存里，不回写 etsy_products）
+            prod.description = f"（无 Etsy 标题，仅主图识别）{an.product_summary or ''} {an.category or ''}".strip()
         ranked = llm.rank_similarity(prod, items)
         matches = classify(ranked)[:max_results]
         ni = sum(1 for m in matches if m.match_type == "identical")
@@ -307,7 +318,8 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
         trace.append({"step": "conclusion", "title": "结论",
                       "input": {"竞争": LEVEL[a.competition_level], "需求": LEVEL[a.demand_level]},
                       "output": {"结论": a.verdict, "机会分": a.opportunity_score},
-                      "reasoning": f"{audience_summary(ev, an.target_audience)}；{a.reasoning[1]}；{a.reasoning[2]}" + (f"；{a.reasoning[-1]}" if a.reasoning[-1].startswith("证据薄弱") else "") + "。" + sales_source_note(matches)})
+                      "reasoning": "；".join([audience_summary(ev, an.target_audience), *a.reasoning[1:3]] + (  # 无匹配时 reasoning 只有 1 条
+                          [a.reasoning[-1]] if a.reasoning[-1].startswith("证据薄弱") or len(a.reasoning) == 1 else [])) + "。" + sales_source_note(matches)})
 
         step("snapshots")
         from concurrent.futures import ThreadPoolExecutor

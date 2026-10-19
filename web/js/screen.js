@@ -48,7 +48,8 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     const rj = V.rej.has(it.id) || it.screen_state === "rejected", done = it.screen_state === "rejected";
     const failed = it.status === "failed" && it.screen_state !== "kept";
     const left = (it.max_attempts ?? 3) - (it.attempts ?? 0);
-    const head = it.title ? esc(it.title) : blocked(it) ? `<span class="sc-anom" title="${esc(it.error || "")}">EHunt 服务异常（${esc(anomalyReason(anomaly(it) ? it.error : getStatus()?.reason))}）<span class="hint">${it.status === "failed" ? " · 可一键刷新" : " · 已暂停，恢复后自动重试"}</span></span>` : waiting(it) ? "等待 EHunt 额度（明日自动继续）" : it.status === "failed" ? (left > 0 ? "取数失败" : `取数失败（已重试 ${it.attempts ?? 3} 次，已停止）`) : "读取 Etsy 数据中…";
+    // EHunt 网页回退（ETSY_PROVIDER=ehunt_web）只取主图：没有标题/价格 → 显示 listing id，不当作“读取中”
+    const head = it.title ? esc(it.title) : hasData(it) ? `Etsy #${esc(it.listing_id || "")} <span class="hint">· 仅主图</span>` : blocked(it) ? `<span class="sc-anom" title="${esc(it.error || "")}">EHunt 服务异常（${esc(anomalyReason(anomaly(it) ? it.error : getStatus()?.reason))}）<span class="hint">${it.status === "failed" ? " · 可一键刷新" : " · 已暂停，恢复后自动重试"}</span></span>` : waiting(it) ? "等待 EHunt 额度（明日自动继续）" : it.status === "failed" ? (left > 0 ? "取数失败" : `取数失败（已重试 ${it.attempts ?? 3} 次，已停止）`) : "读取 Etsy 数据中…";
     const img = hasData(it) && imgUrl(it.image_url)
       ? `<img src="${imgUrl(thumb(it.image_url))}" alt="" data-sid="${esc(it.id)}" class="${V.imgOk.has(it.id) ? "on" : ""}">` : "";
     const ph = `<div class="sc-ph">${blocked(it) ? "⚠" : waiting(it) ? "⏳" : it.status === "failed" ? "!" : hasData(it) && !it.image_url ? "无图" : '<span class="spin"></span>'}</div>`;
@@ -60,7 +61,7 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     return `<div class="sc-card${rj ? " rej" : ""}${hasData(it) ? "" : " wait"}" data-skey="${esc(it.id)}">
       <a class="sc-img" href="${esc(it.etsy_url)}" target="_blank" rel="noopener">${ph}${img}${rj ? '<span class="sc-tag">已排除</span>' : it.screen_state === "kept" ? '<span class="sc-tag sc-kept">已进入分析</span>' : ""}</a>${act}
       <div class="sc-info"><div class="sc-title" title="${esc(it.title || "")}">${head}</div>
-      <div class="sc-meta"><b>${esc(price)}</b><span class="hint">#${esc(it.listing_id || "")}</span></div></div></div>`;
+      <div class="sc-meta"><b>${esc(price)}</b>${it.title ? `<span class="hint">#${esc(it.listing_id || "")}</span>` : ""}</div></div></div>`;
   }
 
   function render() {
@@ -201,6 +202,17 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
       [50, 51, 52, 53].forEach((k) => { const it = V.items[k]; if (it) Object.assign(it, { status: "queued", screen_state: null, title: null, image_url: null, error: "EHunt 服务异常（查询失败: 'daily_limit'），已暂停取数，自动重试", attempts: 0, max_attempts: 3 }); });
       const it = V.items[20]; if (it) Object.assign(it, { status: "failed", screen_state: null, title: null, image_url: null, error: "商品不存在或已下架（EHunt 未返回 listing）", attempts: 3, max_attempts: 3 });
     }
+    if (shot === "ehuntweb") { // EHunt 网页回退：只有主图（无标题/价格）；前 5 条为 2026-10-19 box 实测取到的真实主图
+      const real = { 603690215: "10483440/r/il/510f63/1464094458/il_570xN.1464094458_rses.jpg", 1084985134: "12905279/r/il/ec7387/3390356664/il_570xN.3390356664_cj3w.jpg",
+        761418342: "8121651/r/il/819371/8233320967/il_570xN.8233320967_47vk.jpg", 4527292345: "61497210/r/il/7d7f0a/8221478505/il_570xN.8221478505_enx8.jpg",
+        1766735966: "43514590/r/il/e0f23e/6256738411/il_570xN.6256738411_frjz.jpg" };
+      const ids = Object.keys(real);
+      V.items.forEach((it, i) => { it.title = null; it.price = null; if (i < ids.length) { it.listing_id = Number(ids[i]); it.etsy_url = `https://www.etsy.com/listing/${ids[i]}`; it.image_url = `https://i.etsystatic.com/${real[ids[i]]}`; } });
+      [6, 7, 8].forEach((k) => { const it = V.items[k]; if (it) Object.assign(it, { status: "queued", screen_state: null, image_url: null, error: "EHunt 网页取数排队中（box 处理中），稍后自动继续" }); });
+      const nf = V.items[9]; if (nf) Object.assign(nf, { status: "failed", screen_state: null, image_url: null, error: "商品不存在或已下架（EHunt 网页搜不到 listing 1900000009）", attempts: 1, max_attempts: 3 });
+    }
+    if (shot === "ehuntlogin") V.items.forEach((it, i) => { if (i % 2) Object.assign(it, { status: "queued", screen_state: null, title: null, image_url: null, price: null,
+      error: "EHunt 服务异常（EHunt 未登录：需要在 box 上运行 deploy/box-selection-worker.sh login 重新登录），已暂停取数，自动重试" }); else { it.title = null; it.price = null; } });
     if (shot === "excluded") [1, 4, 7, 9, 12, 53, 58, 61].forEach((k) => { const it = V.items[k]; if (it) { it.status = "canceled"; it.screen_state = "rejected"; } });
     if (shot === "rejected" || shot === "confirm" || shot === "bottom") [1, 4, 7, 9, 12, 53, 58].forEach((k) => V.rej.add(V.items[k].id));
     render();
