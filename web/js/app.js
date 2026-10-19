@@ -1,9 +1,9 @@
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
 import { computeVelocity, computeManualVelocity, cmpVelocity, velocityBadge, loadReviewDates, demoReviewDates, loadScrapeInfo } from "./velocity.js";
 import { amzBlock, amzUrls, openAll, applyEdit, kwList, MAX_KW, DIR_SELECT_HTML } from "./amzsearch.js";
-import { createScreen, ANOMALY_PREFIX, anomalyReason } from "./screen.js?v=de278e3e";
-import { createExWords } from "./exwords.js?v=8a6d2bc1";
-import { createSelScreen } from "./selscreen.js?v=322e596c";
+import { createScreen, ANOMALY_PREFIX, anomalyReason } from "./screen.js?v=1cd5e187";
+import { createExWords } from "./exwords.js?v=9a29a30f";
+import { createSelScreen } from "./selscreen.js?v=2b8bc643";
 
 // ?demo=1：纯前端示例数据，不登录、不连 Supabase，仅用于预览界面（&offline=1 / &quota=1 预览横幅）
 const QS = new URLSearchParams(location.search);
