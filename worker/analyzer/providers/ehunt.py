@@ -33,6 +33,30 @@ class EHuntRateLimited(Exception):
     rate_limited = True
 
 
+class EHuntServiceError(Exception):
+    """EHunt 账号/服务异常：响应体 code >= 500、"查询失败"、daily_limit 字段异常，或 body 401/403（key 被拒）。
+    这类错误与具体商品无关，重试单条没有意义 → pipeline 全局熔断一段时间（EHUNT_ANOMALY_RETRY_MINUTES），
+    任务回队列且不消耗尝试次数；熔断到期后由下一条任务自动探测，恢复即自动继续。"""
+    service_anomaly = True
+
+    def __init__(self, msg, detail=""):
+        super().__init__(msg)
+        self.detail = detail
+
+
+ANOMALY_PREFIX = "EHunt 服务异常"
+_ANOMALY_RE = re.compile(r"查询失败|daily_limit|internal server error|服务(器)?(异常|错误|繁忙)", re.I)
+
+
+def is_service_anomaly(code, message):
+    """响应体层面的账号/服务异常判断（HTTP 200 + body code 非 200）。"""
+    try:
+        c = int(code)
+    except (TypeError, ValueError):
+        c = None
+    return (c is not None and (c >= 500 or c in (401, 403))) or bool(_ANOMALY_RE.search(str(message or "")))
+
+
 NOT_FOUND = "商品不存在或已下架"
 DAILY_LIMIT = 200
 
@@ -141,12 +165,18 @@ class EHuntEtsy(EtsyProvider):
                 _sleep(BACKOFF[attempt])
         else:
             raise EHuntRateLimited(f"EHunt 限速（429，非额度用完），稍后自动重试：{detail[:200]}")
+        code, message = (d or {}).get("code"), _scrub((d or {}).get("message"), self.key)
+        if code != 200:
+            # 失败响应不计入 calls（provider_usage_daily 只统计 code 200 的真实调用），也不覆盖已知额度
+            log.warning("EHunt listing %s: code=%s message=%r quota=%r", listing_id, code, message[:200], (d or {}).get("quota"))
+            if is_service_anomaly(code, message):
+                detail = f"{'拒绝访问：' if code in (401, 403) else ''}{message or f'code {code}'}"[:200]
+                raise EHuntServiceError(f"{ANOMALY_PREFIX}（{detail}）", detail)
+            raise HttpError(f"EHunt 错误 {code}: {message}")
         self.calls += 1
         q = (d or {}).get("quota") or {}
         self.used_today, self.remaining = q.get("used_today"), q.get("remaining_today")
         log.info("EHunt listing %s: used_today=%s remaining_today=%s", listing_id, self.used_today, self.remaining)
-        if (d or {}).get("code") != 200:
-            raise HttpError(f"EHunt 错误 {d.get('code')}: {d.get('message')}")
         items = ((d.get("data") or {}).get("list")) or []
         # 只接受 product_url 中 listing id 完全一致的条目；绝不回退到搜索第一条（会分析成别的商品）
         pat = re.compile(rf"/listing/{int(listing_id)}(?!\d)")

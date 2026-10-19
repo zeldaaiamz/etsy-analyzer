@@ -1,7 +1,7 @@
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
 import { computeVelocity, computeManualVelocity, cmpVelocity, velocityBadge, loadReviewDates, demoReviewDates, loadScrapeInfo } from "./velocity.js";
 import { amzBlock, amzUrls, openAll, applyEdit, kwList, MAX_KW, DIR_SELECT_HTML } from "./amzsearch.js";
-import { createScreen } from "./screen.js?v=c4015382";
+import { createScreen, ANOMALY_PREFIX, anomalyReason } from "./screen.js?v=d4ad762d";
 import { createExWords } from "./exwords.js?v=8a6d2bc1";
 import { createSelScreen } from "./selscreen.js?v=322e596c";
 
@@ -102,7 +102,9 @@ async function boot() {
       const fx = d.fixtures(), shift = Date.now() - new Date(fx.now || Date.now()).getTime();
       fx.jobs.forEach((j) => ["created_at", "queued_at", "started_at", "finished_at", "reviewed_at"].forEach((k) => { if (j[k]) j[k] = new Date(new Date(j[k]).getTime() + shift).toISOString(); }));
       if (QS.has("flash")) S.flash = new Set(fx.jobs.filter((j) => j.status === "queued" || j.status === "running").map((j) => j.id));
-      S.status = QS.has("quota") ? { ehunt_paused_until: nextUtcMidnight(), ehunt_remaining: 0, ehunt_used_today: 200, ehunt_daily_limit: 200, ehunt_quota_at: new Date().toISOString(), reason: "EHunt 今日额度已用完，额度刷新后自动继续" }
+      S.status = QS.has("ehunt") ? { ehunt_paused_until: new Date(Date.now() + 30 * 60e3).toISOString(), ehunt_remaining: null, ehunt_used_today: null, ehunt_daily_limit: 200, ehunt_quota_at: new Date().toISOString(), reason: "EHunt 服务异常（查询失败: 'daily_limit'）" }
+        : QS.has("stale") ? { ehunt_remaining: 103, ehunt_used_today: 97, ehunt_daily_limit: 200, ehunt_quota_at: new Date(Date.now() - 4 * 864e5).toISOString() }
+        : QS.has("quota") ? { ehunt_paused_until: nextUtcMidnight(), ehunt_remaining: 0, ehunt_used_today: 200, ehunt_daily_limit: 200, ehunt_quota_at: new Date().toISOString(), reason: "EHunt 今日额度已用完，额度刷新后自动继续" }
         : { ehunt_remaining: Number(QS.get("rem") ?? 193), ehunt_used_today: 200 - Number(QS.get("rem") ?? 193), ehunt_daily_limit: 200, ehunt_quota_at: new Date().toISOString() };
       if (QS.has("quota")) { const base = fx.jobs.find((j) => j.status === "queued") || fx.jobs[0];
         for (let i = 0; i < (Number(QS.get("waiting")) || 5); i++) fx.jobs.unshift({ ...base, id: `demo-wait-${i}`, status: "queued", stage: null, started_at: null, finished_at: null, etsy_listing_id: 1800000000 + i,
@@ -421,16 +423,19 @@ async function loadStatus() {
 }
 // ---------- EHunt 每日额度 ----------
 const bjTime = (t) => new Date(t).toLocaleTimeString("zh-CN", { timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", hour12: false });
+// EHunt 服务异常熔断（worker 写 reason = 'EHunt 服务异常（…）'）与“今日额度用完”不同：额度未知，不能显示 0 或 200
+const ehuntAnomaly = (st = S.status || {}) => String(st.reason || "").startsWith(ANOMALY_PREFIX) && (ts(st.ehunt_paused_until) || 0) > Date.now();
 function quota() {
   const st = S.status || {}, limit = st.ehunt_daily_limit || EHUNT_LIMIT, now = Date.now(), pu = ts(st.ehunt_paused_until);
-  const exhausted = !!(pu && pu > now);
+  const anomaly = ehuntAnomaly(st), exhausted = !!(pu && pu > now) && !anomaly;
   let used = st.ehunt_used_today ?? (st.ehunt_remaining != null ? limit - st.ehunt_remaining : null);
-  // 记录早于今天 UTC 0 点且未熔断 → 视为已刷新
+  // 额度记录早于今天 UTC 0 点：今天还没从 EHunt 拿到过额度 → 未知（以前当作 0，EHunt 全部失败时会误显示 0/200）
   const q = ts(st.ehunt_quota_at), mid = new Date(); mid.setUTCHours(0, 0, 0, 0);
-  if (!exhausted && q && q < mid.getTime()) used = 0;
+  const stale = !q || q < mid.getTime();
   if (exhausted) used = limit;
-  const remaining = used == null ? null : Math.max(0, limit - used);
-  return { limit, used, remaining, exhausted, resetAt: exhausted ? pu : (() => { const d = new Date(mid); d.setUTCDate(d.getUTCDate() + 1); return d.getTime(); })() };
+  else if (anomaly || stale) used = null;
+  const unknown = !exhausted && used == null, remaining = used == null ? null : Math.max(0, limit - used);
+  return { limit, used, remaining, exhausted, anomaly, unknown, stale, resetAt: exhausted ? pu : (() => { const d = new Date(mid); d.setUTCDate(d.getUTCDate() + 1); return d.getTime(); })() };
 }
 // 提交 n 条时的排程说明（已排队的任务先占用今天额度；缓存命中不耗额度，所以是“约”）
 function quotaPlan(n, justAdded = 0) {
@@ -445,7 +450,14 @@ function quotaPlan(n, justAdded = 0) {
 }
 function renderQuota() {
   const el = $("quotaMeter"), q = quota();
-  if (q.used == null) return el.classList.add("hidden");
+  if (!S.status) return el.classList.add("hidden");
+  if (q.unknown) {
+    el.className = `qmeter ${q.anomaly ? "qm-bad" : "qm-unk"}`;
+    el.title = q.anomaly ? `EHunt 服务异常：${anomalyReason(S.status.reason)}；额度未知` : "今天还没有从 EHunt 拿到额度数据（最近一次响应没有额度信息或记录已过期）";
+    el.innerHTML = `<span class="qm-t">今日 EHunt 额度</span><span class="qm-bar"><i style="width:0%"></i></span><span class="qm-n"><span class="qm-u">已用 </span><b>${q.anomaly ? "异常" : "未知"}</b> / ${q.limit}</span>`;
+    return;
+  }
+  el.title = "";
   const pct = Math.min(100, Math.round(q.used / q.limit * 100));
   el.className = `qmeter${q.exhausted ? " qm-bad" : pct >= 80 ? " qm-warn" : ""}`;
   el.innerHTML = `<span class="qm-t">今日 EHunt 额度</span><span class="qm-bar"><i style="width:${pct}%"></i></span><span class="qm-n"><span class="qm-u">已用 </span><b>${q.used}</b> / ${q.limit}</span>`;
@@ -457,15 +469,18 @@ function renderBanners() {
   if (S.statusLoaded && (!last || now - last > OFFLINE_MS))
     out.push(`<div class="banner banner-bad"><b>分析服务离线</b>　${last ? `最后心跳 ${dur(now - last)} 前` : "暂无心跳"}；排队任务会保留，服务恢复后自动继续。</div>`);
   const pu = ts(S.status?.ehunt_paused_until);
-  if (pu && pu > now) { const n = [...S.jobs.values()].filter((j) => j.status === "queued").length, lim = S.status.ehunt_daily_limit || EHUNT_LIMIT;
+  if (ehuntAnomaly()) { const n = [...S.jobs.values()].filter((j) => j.status === "queued").length;
+    out.push(`<div class="banner banner-bad"><b>EHunt 服务异常</b>（${esc(anomalyReason(S.status.reason))}）：Etsy 取数已暂停，约 北京时间 ${esc(bjTime(pu))} 自动重试${n ? `，${n} 个排队任务保留` : ""}<span class="banner-sub">与额度无关、不消耗重试次数；EHunt 恢复后自动继续。持续出现请检查 EHunt 账号/套餐状态</span></div>`); }
+  else if (pu && pu > now) { const n = [...S.jobs.values()].filter((j) => j.status === "queued").length, lim = S.status.ehunt_daily_limit || EHUNT_LIMIT;
     out.push(`<div class="banner banner-warn"><b>今日额度已用完（${lim}/${lim}）</b>，剩余 ${n} 个任务将在额度刷新后（约 北京时间 ${esc(bjTime(pu))}）自动继续<span class="banner-sub">已缓存（24 小时内分析过）的商品不耗额度，会照常处理</span></div>`); }
   renderQuota();
   $("banners").innerHTML = out.join("");
+  try { SCR.rerender(); } catch { /* 预筛选视图尚未初始化 */ }
   const u = Object.fromEntries((S.usage || []).map((r) => [r.provider, r]));
   const kfmt = (n) => n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
   const parts = [u.ehunt && `Etsy 数据 <b>${u.ehunt.calls}</b> 次${u.ehunt.cache_hits ? `（缓存 ${u.ehunt.cache_hits}）` : ""}`,
     u.keepamore && `亚马逊数据 <b>${u.keepamore.units}</b> 点`, u.deepseek && `AI <b>${kfmt(u.deepseek.units)}</b> 字`].filter(Boolean);
-  const rem = S.status?.ehunt_remaining, el = $("usage");
+  const rem = quota().remaining, el = $("usage");
   el.innerHTML = parts.length || rem != null ? `今日用量：${parts.join(" · ") || "0"}${rem != null ? ` · Etsy 额度剩余 <b>${rem}</b>` : ""}` : "";
   el.title = "Etsy 数据 = EHunt（每条新商品 1 次，缓存命中不计）\n亚马逊数据 = Keepamore（Keepa 数据点）\nAI = DeepSeek（tokens，约等于字数）\n按 UTC 日统计（北京时间 8:00 刷新）";
 }
@@ -923,7 +938,7 @@ function renderLibrary() {
   $("libGrid").innerHTML = `<div class="card empty lib-empty"><div class="ico">★</div><h3>${totalAll ? (L.q || L.reason ? "没有匹配的产品" : `「${L.stage === "all" ? "全部" : STAGE_NAME[L.stage]}」里还没有产品`) : "产品库还是空的"}</h3>
     <p class="muted">${totalAll ? (L.stage === "candidate" || L.stage === "all" ? "在任务中点“☆ 加入产品库”会进入备选" : "在备选中选择产品移到这里") : "在已完成任务上点“☆ 加入产品库”，或勾选多个任务批量加入"}</p></div>`;
 }
-const SCR = createScreen({ $, esc, imgUrl, toast, getSb: () => sb, DEMO, QS, confirmDialog });
+const SCR = createScreen({ $, esc, imgUrl, toast, getSb: () => sb, DEMO, QS, confirmDialog, getStatus: () => S.status });
 // 获取链接 → 预筛选：直接复用任务页的提交路径（batches + jobs.prescreen=true），超过单次上限自动分组插入
 async function sendToPrescreen(urls) {
   const list = []; const seen = new Set();
@@ -1055,7 +1070,7 @@ function rowHtml(j) {
       <div class="c-main">
         <a class="title" href="${safeUrl(j.etsy_url)}" target="_blank" rel="noopener">${esc(e.title || `Etsy #${j.etsy_listing_id || ""}`)}</a>
         <div class="sub">${esc(a.product_summary || (j.status === "succeeded" || j.status === "failed" ? "" : j.status === "paused" ? "已暂停，点击继续后重新排队" : j.status === "queued" && quota().exhausted ? "等待额度刷新" : "等待分析…"))}</div>
-        <div class="meta">${pill(stText + (j.status === "running" && STAGE[j.stage] ? " · " + STAGE[j.stage] : "") + (j.cancel_requested && j.status === "running" ? " · 停止中" : ""), stCls)}${j.status === "queued" && quota().exhausted ? '<span class="pill pill-warn">等待额度刷新</span>' : ""}${S.flash.has(j.id) ? '<span class="pill pill-new">新提交</span>' : ""}
+        <div class="meta">${pill(stText + (j.status === "running" && STAGE[j.stage] ? " · " + STAGE[j.stage] : "") + (j.cancel_requested && j.status === "running" ? " · 停止中" : ""), stCls)}${j.status === "queued" && quota().exhausted ? '<span class="pill pill-warn">等待额度刷新</span>' : ""}${j.status === "queued" && quota().anomaly ? '<span class="pill pill-bad">EHunt 服务异常 · 已暂停</span>' : ""}${S.flash.has(j.id) ? '<span class="pill pill-new">新提交</span>' : ""}
           ${e.price ? `<span class="chip">$${esc(e.price)}</span>` : ""}${ehuntChips(e)}${kwChips(a.keywords)}</div>
         ${errText ? `<div class="err">${errText}</div>` : ""}
         <div class="timing"><span data-tick="${esc(j.id)}">${j.status === "queued" || j.status === "running" ? "" : esc(timeText(j))}</span>${j.status === "succeeded" && !j.reviewed_at ? ' <span class="pill pill-warn">待我处理</span>' : ""}${S.keep.has(j.id) && j.reviewed_at ? ' <span class="pill pill-ok" title="已标记为已查看，刷新页面后移到“已完成”">✓ 已查看</span>' : ""}</div>

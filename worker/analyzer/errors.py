@@ -16,7 +16,7 @@ _CODE = re.compile(r"HTTP (\d{3})")
 
 def is_retryable(e, attempts=1):
     """返回 True 表示值得重试（仍受 max_attempts 限制）。"""
-    if isinstance(e, (PermanentError, JobCanceled)) or type(e).__name__ == "EHuntQuotaError":
+    if isinstance(e, (PermanentError, JobCanceled)) or type(e).__name__ in ("EHuntQuotaError", "EHuntServiceError"):
         return False
     if type(e).__name__ == "HttpError":
         m = _CODE.search(str(e))

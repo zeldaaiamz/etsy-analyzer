@@ -1,4 +1,5 @@
 import logging
+import os
 from dataclasses import asdict, fields as dc_fields
 from .models import EtsyProduct
 from .etsy_url import parse_listing_id, parse_slug, is_short, resolve_short
@@ -47,6 +48,7 @@ def _bump(store, name, before, after):
 
 PROBE_RETRY = timedelta(hours=1)
 RATE_LIMIT_RETRY = timedelta(seconds=60)
+ANOMALY_RETRY = timedelta(minutes=float(os.environ.get("EHUNT_ANOMALY_RETRY_MINUTES", "30")))
 
 
 def _job_gone(store, jid, e):
@@ -64,10 +66,19 @@ def _check_ehunt_remaining(store, etsy, threshold, before_calls=None):
     """每次真实 EHunt 调用后写入最新额度（前端额度条）；剩余 ≤ 阈值则熔断到次日 UTC 0 点。
     真实调用成功且仍有余量 → 清除已过期的熔断（自动恢复）。缓存命中不改状态。"""
     rem = getattr(etsy, "remaining", None)
-    if rem is None or getattr(etsy, "name", "") != "ehunt":
+    if getattr(etsy, "name", "") != "ehunt":
         return
     if before_calls is not None and getattr(etsy, "calls", 0) == before_calls:
         return  # 本任务未发生真实调用（缓存命中/失败），状态不变
+    if rem is None:
+        if before_calls is None:
+            return
+        try:  # 真实调用成功（code 200）但响应没带 quota：EHunt 已恢复 → 解除熔断，额度记为未知（前端显示“未知”）
+            store.set_service_status(ehunt_paused_until=None, reason=None, ehunt_remaining=None,
+                                     ehunt_used_today=None, ehunt_quota_at=_now())
+        except Exception:  # noqa: BLE001
+            log.warning("set_service_status failed", exc_info=True)
+        return
     try:
         f = {"ehunt_remaining": rem, "ehunt_used_today": getattr(etsy, "used_today", None), "ehunt_quota_at": _now()}
         if rem <= threshold:
@@ -325,6 +336,17 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
             log.warning("job %s: %s; requeued", jid, e)
             store.update_job(jid, status="queued", stage=None, error=str(e)[:500], locked_by=None,
                              attempts=max(0, attempts - 1), run_after=_now() + RATE_LIMIT_RETRY)
+            return False
+        if getattr(e, "service_anomaly", False):  # EHunt 账号/服务异常：全局熔断 ANOMALY_RETRY，不计尝试次数，不判永久失败
+            until = _now() + ANOMALY_RETRY
+            log.warning("job %s: %s; EHunt circuit open until %s (service anomaly)", jid, e, until)
+            try:  # 额度未知：清空 used/remaining，前端额度条显示“异常”而不是 0
+                store.set_service_status(ehunt_paused_until=until, ehunt_remaining=None, ehunt_used_today=None,
+                                         ehunt_quota_at=_now(), reason=str(e)[:300])
+            except Exception:  # noqa: BLE001
+                log.warning("set_service_status failed", exc_info=True)
+            store.update_job(jid, status="queued", stage=None, error=f"{str(e)[:400]}，已暂停取数，自动重试",
+                             locked_by=None, attempts=max(0, attempts - 1), run_after=until)
             return False
         if getattr(e, "breaker", False):  # EHunt 429：全局熔断到次日（UTC），本任务回到队列且不计入尝试次数
             until = breaker_until(store)

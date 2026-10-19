@@ -2,13 +2,21 @@
 // → 每批“分析剩余数据”或底部“全部已加载”一键确认 → 只有保留的进入 DeepSeek / Keepamore / 截图（017 screen_confirm）
 export const BATCH = 50;
 const POLL_MS = 3000;
+// EHunt 账号/服务异常（与商品本身无关）：新 worker 写 'EHunt 服务异常（原因）'；旧 worker 写 'EHunt 错误 500: 查询失败: …'
+export const EHUNT_ANOMALY_RE = /EHunt 服务异常|EHunt 错误 5\d\d|查询失败|daily_limit/;
+export const ANOMALY_PREFIX = "EHunt 服务异常";
+export function anomalyReason(err) {
+  const s = String(err || ""), m = s.match(/EHunt 服务异常（(.*?)）(?:，|$)/) || s.match(/EHunt 错误 \d{3}:\s*(.*)$/);
+  return (m ? m[1] : s).trim().slice(0, 120);
+}
 
-export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDialog }) {
+export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDialog, getStatus = () => null }) {
   const V = { loadErr: null, items: [], batch: null, tab: "all", rej: new Set(), imgOk: new Set(), busy: new Set(), loaded: false, timer: null, demo: null };
   const thumb = (u) => (/^https:\/\/i\.etsystatic\.com\//.test(u || "") ? u.replace(/\/il_[0-9a-zA-Z]+x[0-9a-zA-Z]+\./, "/il_570xN.") : u);
   const hasData = (it) => it.status === "screening" || it.screen_state === "rejected" || it.screen_state === "kept";
   const fetchingIt = (it) => (it.status === "queued" || it.status === "running") && it.screen_state !== "kept";
-  const waiting = (it) => fetchingIt(it) && it.status === "queued" && /额度/.test(it.error || "");
+  const anomaly = (it) => (it.status === "failed" || it.status === "queued") && it.screen_state !== "kept" && EHUNT_ANOMALY_RE.test(it.error || "");
+  const waiting = (it) => fetchingIt(it) && it.status === "queued" && /额度/.test(it.error || "") && !anomaly(it);
   const ready = (it) => !hasData(it) || !it.image_url || V.imgOk.has(it.id); // 无图或失败也算加载完成
   const batches = () => { const out = []; for (let i = 0; i < V.items.length; i += BATCH) out.push(V.items.slice(i, i + BATCH)); return out; };
   const pendingOf = (b) => b.filter((it) => it.status === "screening");
@@ -37,10 +45,10 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     const rj = V.rej.has(it.id) || it.screen_state === "rejected", done = it.screen_state === "rejected";
     const failed = it.status === "failed" && it.screen_state !== "kept";
     const left = (it.max_attempts ?? 3) - (it.attempts ?? 0);
-    const head = it.title ? esc(it.title) : waiting(it) ? "等待 EHunt 额度（明日自动继续）" : it.status === "failed" ? (left > 0 ? "取数失败" : `取数失败（已重试 ${it.attempts ?? 3} 次，已停止）`) : "读取 Etsy 数据中…";
+    const head = it.title ? esc(it.title) : anomaly(it) ? `<span class="sc-anom" title="${esc(it.error || "")}">EHunt 服务异常（${esc(anomalyReason(it.error))}）<span class="hint">${it.status === "failed" ? " · 可一键刷新" : " · 已暂停，恢复后自动重试"}</span></span>` : waiting(it) ? "等待 EHunt 额度（明日自动继续）" : it.status === "failed" ? (left > 0 ? "取数失败" : `取数失败（已重试 ${it.attempts ?? 3} 次，已停止）`) : "读取 Etsy 数据中…";
     const img = hasData(it) && imgUrl(it.image_url)
       ? `<img src="${imgUrl(thumb(it.image_url))}" alt="" data-sid="${esc(it.id)}" class="${V.imgOk.has(it.id) ? "on" : ""}">` : "";
-    const ph = `<div class="sc-ph">${waiting(it) ? "⏳" : it.status === "failed" ? "!" : hasData(it) && !it.image_url ? "无图" : '<span class="spin"></span>'}</div>`;
+    const ph = `<div class="sc-ph">${anomaly(it) ? "⚠" : waiting(it) ? "⏳" : it.status === "failed" ? "!" : hasData(it) && !it.image_url ? "无图" : '<span class="spin"></span>'}</div>`;
     const act = failed ? ""
       : done ? `<button class="sc-x sc-undo" data-srestore="${esc(it.id)}" title="恢复为待确认">恢复</button>`
       : it.status === "screening" ? (rj ? `<button class="sc-x sc-undo" data-sundo="${esc(it.id)}" title="撤销排除">撤销</button>`
@@ -59,16 +67,19 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     const nPend = V.items.filter((it) => it.status === "screening").length;
     const nFetch = V.items.filter(fetchingIt).length;
     const nWait = V.items.filter(waiting).length;
+    const anom = V.items.filter(anomaly), st = getStatus() || {};
+    const svcAnom = String(st.reason || "").startsWith(ANOMALY_PREFIX) && Date.parse(st.ehunt_paused_until || "") > Date.now();
+    const banner = anom.length || svcAnom ? `<div class="banner banner-bad sc-banner" data-sbanner="1"><b>EHunt 服务异常</b>（${esc(anomalyReason(svcAnom ? st.reason : anom[0].error))}）：Etsy 取数已暂停${svcAnom ? `，约 北京时间 ${esc(new Date(st.ehunt_paused_until).toLocaleTimeString("zh-CN", { timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", hour12: false }))} 自动重试` : ""}<span class="banner-sub">${anom.length ? `${anom.length} 条受影响（排队 ${anom.filter((it) => it.status === "queued").length} · 失败 ${anom.filter((it) => it.status === "failed").length}）。` : ""}这与商品本身无关，不消耗重试次数；EHunt 恢复后，失败项可点“一键刷新”重新取数（已达 3 次上限的也可以）。</span></div>` : "";
     $("screenSum").innerHTML = tot ? `共 <b>${tot}</b> 条 · ${bs.length} 批 · 待确认 <b>${nPend}</b> · 已排除 ${nRej}${nFetch ? ` · 取数中 ${nFetch}` : ""}${nWait ? ` · <span class="warn">${nWait} 条等待明日 EHunt 额度</span>` : ""}` : "";
     $("screenTabs").innerHTML = [["all", "全部"], ["pending", "待确认"], ["rejected", "已排除"]].map(([k, n]) =>
       `<button class="fchip${V.tab === k ? " active" : ""}" data-stab="${k}">${n}<span class="fchip-n">${k === "all" ? tot : k === "pending" ? nPend - V.items.filter((it) => it.status === "screening" && V.rej.has(it.id)).length : nRej}</span></button>`).join("")
     const nDone = V.items.filter((it) => it.screen_state === "rejected").length; // 只算已确认排除的（未确认的 ✕ 可直接撤销）
     const nRetry = V.items.filter(canRefetch).length;
     const nDead = V.items.filter(deadFailed).length;
-    $("screenTabs").innerHTML += `<span class="spacer"></span>${nRetry ? `<button class="btn btn-primary btn-sm" data-srefall="1" ${V.busy.has("refall") ? "disabled" : ""} title="重新取数所有失败且未达 3 次上限的条目">${V.busy.has("refall") ? '<span class="spin"></span>' : ""}一键刷新（${nRetry} 条失败）</button>` : ""}${nDead ? `<button class="btn btn-danger-ghost btn-sm" data-sdelfail="1" title="永久删除已重试 3 次仍失败的条目（不可恢复）">🗑 一键删除失败（${nDead} 条）</button>` : ""}${nDone ? `<button class="btn btn-danger-ghost btn-sm" data-shide="1" title="永久删除全部已排除条目（不可恢复，不消耗 EHunt 额度）">🗑 删除所有已排除 (${nDone})</button>` : ""}`;
+    $("screenTabs").innerHTML += `<span class="spacer"></span>${nRetry ? `<button class="btn btn-primary btn-sm" data-srefall="1" ${V.busy.has("refall") ? "disabled" : ""} title="重新取数所有失败且未达 3 次上限的条目（EHunt 服务异常导致的失败不受上限限制）">${V.busy.has("refall") ? '<span class="spin"></span>' : ""}一键刷新（${nRetry} 条失败）</button>` : ""}${nDead ? `<button class="btn btn-danger-ghost btn-sm" data-sdelfail="1" title="永久删除已重试 3 次仍失败的条目（不可恢复）">🗑 一键删除失败（${nDead} 条）</button>` : ""}${nDone ? `<button class="btn btn-danger-ghost btn-sm" data-shide="1" title="永久删除全部已排除条目（不可恢复，不消耗 EHunt 额度）">🗑 删除所有已排除 (${nDone})</button>` : ""}`;
     if (V.loadErr && !tot) { box.innerHTML = `<div class="card empty"><div class="ico">!</div><h3>加载失败</h3><p class="muted">${esc(V.loadErr)}</p><button class="btn btn-primary btn-sm" data-sreload="1">刷新</button></div>`; $("screenFoot").innerHTML = ""; return; }
     if (!tot) { box.innerHTML = `<div class="card empty"><div class="ico">◎</div><h3>${!DEMO && !V.loaded ? "加载中…" : "没有待筛选的链接"}</h3><p class="muted">在“任务”页粘贴链接并勾选“先预筛选”，取到 EHunt 数据后会出现在这里</p></div>`; $("screenFoot").innerHTML = ""; return; }
-    box.innerHTML = bs.map((b, i) => {
+    box.innerHTML = banner + bs.map((b, i) => {
       const st = batchState(b), pend = pendingOf(b), keep = pend.filter((it) => !V.rej.has(it.id)).length, rj = pend.length - keep;
       const nReady = b.filter((it) => hasData(it) && ready(it)).length;
       const show = b.filter((it) => V.tab === "all" || (V.tab === "pending" ? it.status === "screening" && !V.rej.has(it.id) : V.rej.has(it.id) || it.screen_state === "rejected"));
@@ -105,8 +116,9 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     toast(`✓ ${res.kept} 条进入分析${res.rejected ? `，${res.rejected} 条已排除` : ""}`, "ok", [{ label: "查看任务", href: "#/" }], 4000);
     render(); if (!DEMO) load();
   }
-  const canRefetch = (it) => it.status === "failed" && it.screen_state !== "kept" && (it.attempts ?? 0) < (it.max_attempts ?? 3);
-  const deadFailed = (it) => it.status === "failed" && it.screen_state !== "kept" && (it.attempts ?? 0) >= (it.max_attempts ?? 3);
+  // EHunt 服务异常导致的失败：即使已达上限也可刷新（032 会把 attempts 归零），且不算“已停止”
+  const canRefetch = (it) => it.status === "failed" && it.screen_state !== "kept" && ((it.attempts ?? 0) < (it.max_attempts ?? 3) || anomaly(it));
+  const deadFailed = (it) => it.status === "failed" && it.screen_state !== "kept" && (it.attempts ?? 0) >= (it.max_attempts ?? 3) && !anomaly(it);
   async function deleteFailed() {
     const ids = V.items.filter(deadFailed).map((it) => it.id), n = ids.length; if (!n) return;
     let res = { deleted: n, ids };
@@ -119,7 +131,7 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     V.busy.add("refall"); render();
     let n = list.length;
     if (!DEMO) { const { data, error } = await getSb().rpc("screen_refetch_all", V.batch ? { p_batch: V.batch } : {}); V.busy.delete("refall"); if (error) { render(); return toast(`刷新失败：${error.message}`, "bad"); } n = data || 0; }
-    else { V.busy.delete("refall"); list.forEach((it) => { it.status = "queued"; it.error = null; }); }
+    else { V.busy.delete("refall"); list.forEach((it) => { if (anomaly(it)) it.attempts = 0; it.status = "queued"; it.error = null; }); }
     if (!n) { toast("无法刷新（已达重试上限或状态已变化）", "bad"); return DEMO ? render() : load(); }
     toast(`已重新排队取数 ${n} 条`, "ok"); render(); if (!DEMO) load();
   }
@@ -178,6 +190,11 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     }
     V.items.forEach(fill);
     if (shot === "failed") [2, 5, 8].forEach((k, j) => { const it = V.items[k]; if (it) { it.status = "failed"; it.screen_state = null; it.title = it.image_url = null; it.error = "EHunt 取数失败"; it.attempts = j === 2 ? 3 : j + 1; it.max_attempts = 3; } });
+    if (shot === "ehunt") { // EHunt 服务异常：前 6 条为旧 worker 已达上限的失败项，第 2 批 4 条为新 worker 熔断中排队
+      [0, 3, 6, 9, 12, 15].forEach((k) => { const it = V.items[k]; if (it) Object.assign(it, { status: "failed", screen_state: null, title: null, image_url: null, error: "EHunt 错误 500: 查询失败: 'daily_limit'", attempts: 3, max_attempts: 3 }); });
+      [50, 51, 52, 53].forEach((k) => { const it = V.items[k]; if (it) Object.assign(it, { status: "queued", screen_state: null, title: null, image_url: null, error: "EHunt 服务异常（查询失败: 'daily_limit'），已暂停取数，自动重试", attempts: 0, max_attempts: 3 }); });
+      const it = V.items[20]; if (it) Object.assign(it, { status: "failed", screen_state: null, title: null, image_url: null, error: "商品不存在或已下架（EHunt 未返回 listing）", attempts: 3, max_attempts: 3 });
+    }
     if (shot === "excluded") [1, 4, 7, 9, 12, 53, 58, 61].forEach((k) => { const it = V.items[k]; if (it) { it.status = "canceled"; it.screen_state = "rejected"; } });
     if (shot === "rejected" || shot === "confirm" || shot === "bottom") [1, 4, 7, 9, 12, 53, 58].forEach((k) => V.rej.add(V.items[k].id));
     render();
@@ -193,5 +210,6 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     show(batch) { V.batch = batch || null; if (DEMO) { if (!V.demo) { V.demo = true; demo(Number(QS.get("screen")) || 300); } else render(); return; } render(); load(); },
     hide() { clearTimeout(V.timer); },
     reload: load,
+    rerender: () => { if (visible()) render(); }, // service_status 变化（EHunt 熔断/恢复）时刷新横幅
   };
 }
