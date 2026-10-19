@@ -98,7 +98,7 @@ UI_DEFAULTS = {
     # Element Plus 弹窗（el-overlay 遮罩）会拦截所有点击：营销弹窗关掉即可；登录提示弹窗 = 账号已退出登录，关掉也搜不了（关键词不生效）
     "overlay": ".el-overlay", "overlay_close": ".el-dialog__headerbtn, .el-message-box__headerbtn, [aria-label='Close this dialog']",
     "login_dialog": ".login-tip-dialog, .el-overlay-dialog[aria-label='Unlock more EHunt features For Free!']",
-    "header_login": ".EtsyHunt-navbar li.nav-item.login, .navbar :text-is('Login')",   # 已登录时顶栏是头像，没有 Login/Register
+    "header_login": ".EtsyHunt-navbar a:text-is('Login'), .navbar a:text-is('Login')",   # 只认文字 Login；li.nav-item.login 登录后也在（放邮箱菜单），不能用
     "search_input": "input[placeholder^='Enter a product name, tag, product ID']",
     "search_btn": ".el-input-group__append >> text=Search",   # 不能用 button:has-text('Search')：会命中 “Batch search” 弹窗
     "price_dd": "span.truncate:text-is('Price(USD)')",
