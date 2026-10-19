@@ -7,7 +7,7 @@
       python -m selection.ehunt_worker --fake list.json --once   # 不开浏览器，用回放 JSON 模拟抓取（测试）
 环境：SUPABASE_URL、SUPABASE_SERVICE_ROLE_KEY、ARK_API_KEY（分类也在 box 上跑）、EHUNT_PROFILE_DIR（默认 ~/.local/share/etsy-selection/ehunt-profile）；可选 EHUNT_UI（界面选择器 JSON）、EHUNT_FILTERS（筛选值 JSON）
 """
-import argparse, json, os, socket, sys, time, logging, urllib.request, urllib.parse
+import argparse, json, os, socket, sys, time, logging, urllib.request, urllib.error, urllib.parse
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools" / "etsy_selection"))
 import classify as C  # noqa: E402  审定默认：convertible + optional-custom=keep + temperature 0 + 3 次投票
@@ -19,16 +19,38 @@ PROFILE = os.environ.get("EHUNT_PROFILE_DIR", os.path.expanduser("~/.local/share
 LOGDIR = os.environ.get("SEL_LOG_DIR", os.path.expanduser("~/.local/share/etsy-selection/logs"))
 NOW = lambda: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
+# ---- 瞬时网络错误重试（2026-10-19 23:01：Supabase PATCH RemoteDisconnected 直接让整批失败） ----
+import random, http.client, socket as _socket
+RETRIES = max(1, int(os.environ.get("SEL_HTTP_RETRIES", "5")))
+BACKOFF_BASE = float(os.environ.get("SEL_HTTP_BACKOFF", "1.0"))
+_sleep = time.sleep
+def is_transient(e):
+    if isinstance(e, urllib.error.HTTPError): return e.code == 429 or e.code >= 500
+    if isinstance(e, (http.client.RemoteDisconnected, http.client.IncompleteRead, ConnectionError, TimeoutError, _socket.timeout)): return True
+    if isinstance(e, urllib.error.URLError): return True      # DNS / 连接被拒 / 超时（reason 为 OSError）
+    return False
+def _brief(e): return f"HTTP {e.code}" if isinstance(e, urllib.error.HTTPError) else f"{type(e).__name__}: {str(e)[:120]}"
+
 class Store:
     """最小 PostgREST 客户端（service_role，只在 box 的 worker.env 中；绝不打印）。只写：run/batch 汇总数 + 符合要求的 sel_items。"""
     def __init__(self):
         self.u = os.environ["SUPABASE_URL"].rstrip("/"); self.k = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
-    def _req(self, method, path, body=None, prefer="return=representation"):
-        r = urllib.request.Request(self.u + path, None if body is None else json.dumps(body, default=str).encode(), method=method,
-                                   headers={"apikey": self.k, "Authorization": "Bearer " + self.k, "Content-Type": "application/json", "Prefer": prefer})
-        with urllib.request.urlopen(r, timeout=60) as f:
-            t = f.read(); return json.loads(t) if t else None
-    def claim(self): r = self._req("POST", "/rest/v1/rpc/sel_claim_run", {"p_worker": WID}); return r if r and r.get("id") else None
+    def _req(self, method, path, body=None, prefer="return=representation", retries=None):
+        """瞬时网络错误（断连/超时/5xx/429）指数退避重试，默认共 RETRIES 次；PATCH/幂等插入可安全重试。
+        非幂等的认领（sel_claim_run / ehunt_lookup_claim）传 retries=1：重试可能多认领一条，交给超时回收。"""
+        data = None if body is None else json.dumps(body, default=str).encode()
+        tries = retries or RETRIES
+        for a in range(tries):
+            r = urllib.request.Request(self.u + path, data, method=method,
+                                       headers={"apikey": self.k, "Authorization": "Bearer " + self.k, "Content-Type": "application/json", "Prefer": prefer})
+            try:
+                with urllib.request.urlopen(r, timeout=60) as f:
+                    t = f.read(); return json.loads(t) if t else None
+            except Exception as e:
+                if not is_transient(e) or a == tries - 1: raise
+                d = min(30, BACKOFF_BASE * 2 ** a) + random.random() * BACKOFF_BASE
+                log.warning("supabase %s %s: %s, retry %d/%d in %.1fs", method, path.split("?")[0], _brief(e), a + 1, tries - 1, d); _sleep(d)
+    def claim(self): r = self._req("POST", "/rest/v1/rpc/sel_claim_run", {"p_worker": WID}, retries=1); return r if r and r.get("id") else None
     def run(self, rid): return (self._req("GET", f"/rest/v1/sel_runs?id=eq.{rid}&select=*") or [{}])[0]
     def patch_run(self, rid, **kw): self._req("PATCH", f"/rest/v1/sel_runs?id=eq.{rid}", kw, "return=minimal")
     def open_batch(self, rid):
@@ -40,7 +62,7 @@ class Store:
     def exclude_words(self): return self._req("GET", "/rest/v1/sel_exclude_words?select=category,word,enabled&enabled=eq.true") or []
     def purge(self): return self._req("POST", "/rest/v1/rpc/sel_purge_older_than", {})
     # 033 预筛选主图查询（ECS ehunt_web provider 写请求，本 worker 认领并写回主图）
-    def lookup_claim(self, n): return self._req("POST", "/rest/v1/rpc/ehunt_lookup_claim", {"p_worker": WID, "p_limit": n}) or []
+    def lookup_claim(self, n): return self._req("POST", "/rest/v1/rpc/ehunt_lookup_claim", {"p_worker": WID, "p_limit": n}, retries=1) or []
     def lookup_patch(self, lid, **kw): self._req("PATCH", f"/rest/v1/ehunt_lookup_requests?listing_id=eq.{int(lid)}", kw, "return=minimal")
     def lookup_purge(self): return self._req("POST", "/rest/v1/rpc/ehunt_lookup_purge", {})
 
@@ -413,6 +435,26 @@ def classify_parallel(o):
         return C.classify_one(o, runs)
     finally: _TL.img = _TL.pre = None
 
+def close_scraper(scraper):
+    """根因（2026-10-19 23:01）：scrape_ehunt 是生成器，内部 `with sync_playwright()`。消费方（process_batch）中途抛异常时，
+    生成器停在 yield 处没有被关闭 —— Playwright 的 asyncio 事件循环仍处于“运行中”并挂在主线程上，
+    之后本进程每次 sync_playwright() 都报 “Playwright Sync API inside the asyncio loop”，直到重启。
+    这里显式 close()：在 yield 处抛 GeneratorExit → finally 关闭浏览器上下文 → sync_playwright 正常退出。可重复调用。"""
+    close = getattr(scraper, "close", None)
+    if close:
+        try: close()
+        except Exception: log.warning("closing scraper failed", exc_info=True)
+
+ASYNCIO_LOOP_MSG = "Playwright Sync API inside the asyncio loop"
+EXIT_RECYCLE = 75   # deploy/box-selection-worker.sh 的守护循环看到任何退出码都会重启进程
+class PlaywrightPoisoned(RuntimeError): pass
+def playwright_leaked():
+    """本线程是否残留了运行中的事件循环（sync_playwright 未正常退出的痕迹）。"""
+    import asyncio
+    try: return asyncio._get_running_loop() is not None
+    except Exception: return False
+def is_poisoned(e): return isinstance(e, PlaywrightPoisoned) or ASYNCIO_LOOP_MSG in str(e)
+
 SEEN = {}  # run_id → 本进程已见过的 listing（含被排除的，只在内存）；跨批去重
 def process_batch(store, run, batch, scraper):
     """抓取顺序进行；规则通过的条目丢进视觉线程池，不阻塞翻页。结果按抓取顺序（rank）在主线程依次落定：计数/进度/入库都只在主线程，天然线程安全。"""
@@ -478,7 +520,18 @@ def process_batch(store, run, batch, scraper):
                 pend.append((row, "rule", r) if r else (row, "vision", pool.submit(vision_task, o)))   # ② 规则通过 → 豆包视觉×3（并发）
             drain()
         drain(block=True)
-    finally: pool.shutdown(wait=True)
+    except BaseException:
+        # 失败：已落定的计数尽量写回（继续本批从 offset_start + scraped_count 接着读），未落定的豆包任务取消
+        for prow, k, v in pend:
+            if k == "vision": v.cancel()
+            if k != "dup": seen.discard(str(prow["listing_id"]))
+        pend.clear()
+        try: flush()
+        except Exception: log.warning("flush after failure failed", exc_info=True)
+        raise
+    finally:
+        pool.shutdown(wait=True, cancel_futures=True)
+        close_scraper(scraper)   # 关键：生成器里的 with sync_playwright() 必须立即退出，否则事件循环残留（见 close_scraper）
     flush()
     # 本批完成：只在这里更新“还剩 N 条未读”
     run = store.run(rid); remaining = max(0, (run.get("max_rows") or 0) - batch["offset_end"])
@@ -539,30 +592,56 @@ def main(argv=None):
             except urllib.error.HTTPError as e:
                 if e.code in (404, 400): log.warning("ehunt_lookup_requests unavailable (HTTP %s), lookups disabled", e.code); globals()["LOOKUPS_ON"] = False
                 else: log.warning("lookups failed", exc_info=True)
-            except Exception: log.warning("lookups failed", exc_info=True)
+            except Exception as e:
+                if is_poisoned(e): log.critical("Playwright poisoned during lookups; exiting %s for restart", EXIT_RECYCLE); recycle()
+                log.warning("lookups failed", exc_info=True)
         run = store.claim()
         if run:
             log.info("claimed run %s kw=%s status=%s", run["id"], run["keyword"], run["status"])
-            if run["status"] == "counting":
-                try:
-                    n = len(json.load(open(a.fake))) if a.fake else count_ehunt(run["keyword"], run.get("params") or {})
-                    store.patch_run(run["id"], status="counted", total_count=n, counted_at=NOW(), heartbeat_at=NOW())
-                except Exception as e:
-                    log.exception("count failed"); store.patch_run(run["id"], status="failed", error=str(e)[:300], finished_at=NOW())
-            else:
-                b = store.open_batch(run["id"])
-                if b:
-                    try:
-                        s0 = b["offset_start"] + int(b.get("scraped_count") or 0)   # 继续本批：跳过已落定的行
-                        if b.get("scraped_count"): log.info("resume batch %s from rank %s", b["batch_no"], s0)
-                        sc = fake_scrape(a.fake, s0, b["offset_end"]) if a.fake else scrape_ehunt(run["keyword"], run.get("params") or {}, s0, b["offset_end"],
-                                                                                       between=(lambda c: serve_lookups_browser(store, c)) if lookups and LOOKUPS_ON else None)
-                        process_batch(store, run, b, sc)
-                    except Exception as e:
-                        log.exception("batch failed"); store.patch_batch(b["id"], status="failed", finished_at=NOW())
-                        store.patch_run(run["id"], status="failed", error=str(e)[:300], finished_at=NOW())
-                else: store.patch_run(run["id"], status="failed", error="没有待读批次", finished_at=NOW())
+            handle_run(store, run, a, lookups)
+        if playwright_leaked():   # 兜底自检：任何路径漏关了 sync_playwright → 立即换新进程（守护脚本重启），绝不带病继续
+            log.critical("asyncio loop still running after run (Playwright not closed); exiting %s for restart", EXIT_RECYCLE); recycle()
         if a.once: break
         time.sleep(POLL)
+
+def recycle(): logging.shutdown(); os._exit(EXIT_RECYCLE)
+
+def handle_run(store, run, a, lookups):
+    """处理一条认领到的 run。Playwright 被污染（asyncio loop 报错）→ 把 run 放回队列后退出进程，由守护脚本重启；
+    其他失败：查询数量 → failed（用户重新查询）；抓取批次 → 本批标记“已停止”+原因，网页「继续本批」从断点接着读。"""
+    if run["status"] == "counting":
+        try:
+            n = len(json.load(open(a.fake))) if a.fake else count_ehunt(run["keyword"], run.get("params") or {})
+            store.patch_run(run["id"], status="counted", total_count=n, counted_at=NOW(), heartbeat_at=NOW())
+        except Exception as e:
+            if is_poisoned(e):
+                log.critical("Playwright poisoned during count; requeue run %s and exit for restart", run["id"])
+                _safe(store.patch_run, run["id"], status="count_queued", locked_by=None, error=None); recycle()
+            log.exception("count failed"); _safe(store.patch_run, run["id"], status="failed", error=str(e)[:300], finished_at=NOW())
+        return
+    b = store.open_batch(run["id"])
+    if not b: return store.patch_run(run["id"], status="failed", error="没有待读批次", finished_at=NOW())
+    sc = None
+    try:
+        s0 = b["offset_start"] + int(b.get("scraped_count") or 0)   # 继续本批：跳过已落定的行
+        if b.get("scraped_count"): log.info("resume batch %s from rank %s", b["batch_no"], s0)
+        sc = fake_scrape(a.fake, s0, b["offset_end"]) if a.fake else scrape_ehunt(run["keyword"], run.get("params") or {}, s0, b["offset_end"],
+                                                                               between=(lambda c: serve_lookups_browser(store, c)) if lookups and LOOKUPS_ON else None)
+        process_batch(store, run, b, sc)
+    except Exception as e:
+        close_scraper(sc)
+        if is_poisoned(e):
+            log.critical("Playwright poisoned during batch; requeue run %s and exit for restart", run["id"])
+            _safe(store.patch_batch, b["id"], status="queued"); _safe(store.patch_run, run["id"], status="queued", locked_by=None); recycle()
+        log.exception("batch failed")
+        msg = f"读取中断（{_brief(e) if is_transient(e) else str(e)[:200]}），已读部分已保留，可点「继续本批」接着读"
+        _safe(store.patch_batch, b["id"], status="canceled", finished_at=NOW())          # 029 sel_resume 只恢复“已停止”的批次
+        _safe(store.patch_run, run["id"], status="canceled", error=msg[:300], finished_at=NOW())
+    finally:
+        close_scraper(sc)
+
+def _safe(fn, *a, **kw):
+    try: return fn(*a, **kw)
+    except Exception: log.warning("%s failed", getattr(fn, "__name__", "call"), exc_info=True)
 
 if __name__ == "__main__": main()
