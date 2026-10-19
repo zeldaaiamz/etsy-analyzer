@@ -6,6 +6,8 @@ const DEMO_WORDS = [
   ...["personali[sz]ed?", "personalisation", "personalization", "custom(i[sz]ed)?", "your (name|text|photo|logo)", "with (name|photo|names)", "name", "names", "photo(?!\\s*(booths?|props?)\\b)", "monogram\\w*", "initials?", "engraved", "any text", "logo", "return address", "address"].map((w) => ["custom", w]),
   ...["disney", "marvel", "pokemon", "star wars", "harry potter", "hello kitty", "barbie", "nfl", "taylor swift", "bluey", "stitch", "grinch", "snoopy", "paw patrol"].map((w) => ["ip", w]),
 ].map(([category, word], i) => ({ id: i + 1, category, word, enabled: true, note: /address/.test(word) ? "v2 新增" : null }));
+// 排除词太宽：匹配空串或随便一个单词 → 拼成 \b(…)\b 后命中所有标题（worker 侧 classify.too_broad 同样会忽略）
+export function tooBroad(word) { try { const rx = new RegExp(`^(?:${word})$`, "i"); return ["", "zqxjv", "qq"].some((t) => rx.test(t)); } catch { return false; } }
 export function createExWords({ $, esc, toast, getSb, DEMO, confirmDialog }) {
   const W = { rows: null, admin: false, open: false, cat: "custom", err: "" };
   async function load() {
@@ -20,6 +22,8 @@ export function createExWords({ $, esc, toast, getSb, DEMO, confirmDialog }) {
     if (!word) return toast("排除词不能为空", "bad");
     if (NEVER.includes(word.toLowerCase())) return toast("wholesale / bulk / vintage 不排除", "bad");
     try { new RegExp(word); } catch { return toast("格式不对（正则片段无效）", "bad"); }
+    if (tooBroad(word)) return toast("这个词太宽（会匹配空白或任意单词，例如 a|、.*、\\w+），会把所有商品都排除", "bad");
+    if (W.rows.some((x) => x.id !== id && x.category === next.category && x.word.toLowerCase() === word.toLowerCase())) return toast(`「${word}」已经在${CAT[next.category]}词表里了`, "bad");
     if (DEMO) { if (id) Object.assign(r, next, { word }); else W.rows.push({ ...next, word, id: Date.now() }); return render(); }
     const { error } = await getSb().rpc("sel_upsert_exclude_word", { p_id: id || null, p_category: next.category, p_word: word, p_enabled: next.enabled ?? true, p_note: next.note || null });
     if (error) return toast(error.message, "bad"); toast("已保存，worker 5 分钟内生效", "ok"); load();

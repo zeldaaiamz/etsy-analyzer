@@ -32,6 +32,7 @@ class FakeSelStore:
         if "heartbeat_at" in kw and self.fail > 0:
             self.fail -= 1; raise http.client.RemoteDisconnected("Remote end closed connection without response")
         self.run_patches.append(kw)
+    def patch_run_if(self, rid, expect, **kw): self.patch_run(rid, **kw)   # QA 2026-10-19：查询结果只在仍为 counting 时写回
     def patch_batch(self, bid, **kw):
         self.batch_patches.append(kw)
         if self.batch: self.batch.update(kw)

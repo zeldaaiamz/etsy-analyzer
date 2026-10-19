@@ -53,10 +53,15 @@ class Store:
     def claim(self): r = self._req("POST", "/rest/v1/rpc/sel_claim_run", {"p_worker": WID}, retries=1); return r if r and r.get("id") else None
     def run(self, rid): return (self._req("GET", f"/rest/v1/sel_runs?id=eq.{rid}&select=*") or [{}])[0]
     def patch_run(self, rid, **kw): self._req("PATCH", f"/rest/v1/sel_runs?id=eq.{rid}", kw, "return=minimal")
+    def patch_run_if(self, rid, expect, **kw):  # 只在仍是 expect 时更新（查询中被用户取消 → 不再改回“待抓取”）；同一次请求，不多一次往返
+        self._req("PATCH", f"/rest/v1/sel_runs?id=eq.{rid}&status=eq.{expect}", kw, "return=minimal")
     def open_batch(self, rid):
         r = self._req("GET", f"/rest/v1/sel_batches?run_id=eq.{rid}&status=in.(queued,running)&order=batch_no&limit=1"); return r[0] if r else None
     def patch_batch(self, bid, **kw): self._req("PATCH", f"/rest/v1/sel_batches?id=eq.{bid}", kw, "return=minimal")
-    def new_batch(self, body): self._req("POST", "/rest/v1/sel_batches", body, "return=minimal")
+    def new_batch(self, body):
+        try: self._req("POST", "/rest/v1/sel_batches", body, "return=minimal")
+        except urllib.error.HTTPError as e:
+            if e.code != 409: raise   # 409 = 同一批已存在（上一次请求其实成功了，重试撞唯一键）→ 视为成功
     def passed_ids(self, rid): return {str(x["etsy_listing_id"]) for x in (self._req("GET", f"/rest/v1/sel_items?run_id=eq.{rid}&select=etsy_listing_id") or [])}
     def insert_item(self, body): self._req("POST", "/rest/v1/sel_items?on_conflict=run_id,etsy_listing_id", body, "return=minimal,resolution=ignore-duplicates")
     def exclude_words(self): return self._req("GET", "/rest/v1/sel_exclude_words?select=category,word,enabled&enabled=eq.true") or []
@@ -544,8 +549,14 @@ def process_batch(store, run, batch, scraper):
         store.patch_run(rid, status="succeeded", finished_at=NOW(), **upd)
     elif run.get("read_all"):  # 一键读取全部剩余：自动排下一批
         s0 = batch["offset_end"] + 1; e0 = min(batch["offset_end"] + (run.get("batch_size") or 1000), run["max_rows"])
-        store.new_batch({"run_id": rid, "user_id": run["user_id"], "batch_no": bno + 1, "offset_start": s0, "offset_end": e0, "page_start": (s0 + 19) // 20, "page_end": (e0 + 19) // 20})
-        store.patch_run(rid, status="queued", current_batch=bno + 1, **upd)
+        try:
+            store.new_batch({"run_id": rid, "user_id": run["user_id"], "batch_no": bno + 1, "offset_start": s0, "offset_end": e0, "page_start": (s0 + 19) // 20, "page_end": (e0 + 19) // 20})
+            store.patch_run(rid, status="queued", current_batch=bno + 1, **upd)
+        except urllib.error.HTTPError as e:
+            # 例：024 的 batch_no ≤ 5 约束（先读 200 条再一键读取全部 4,800 → 第 6 批插不进去）。本批已完成，不能让外层把它改成“已停止”，
+            # 否则「继续本批」会重排一个已读完的批次并再次失败。→ 本批完成 + 提示手动继续（035 去掉该约束后不再发生）
+            log.warning("auto-queue batch %s failed: HTTP %s", bno + 1, e.code)
+            store.patch_run(rid, status="batch_done", read_all=False, error=f"自动排第 {bno + 1} 批失败（HTTP {e.code}），本批结果已保存，可点「读取下一批」继续", **upd)
     else:
         store.patch_run(rid, status="batch_done", **upd)
     return "done"
@@ -612,12 +623,12 @@ def handle_run(store, run, a, lookups):
     if run["status"] == "counting":
         try:
             n = len(json.load(open(a.fake))) if a.fake else count_ehunt(run["keyword"], run.get("params") or {})
-            store.patch_run(run["id"], status="counted", total_count=n, counted_at=NOW(), heartbeat_at=NOW())
+            store.patch_run_if(run["id"], "counting", status="counted", total_count=n, counted_at=NOW(), heartbeat_at=NOW())
         except Exception as e:
             if is_poisoned(e):
                 log.critical("Playwright poisoned during count; requeue run %s and exit for restart", run["id"])
                 _safe(store.patch_run, run["id"], status="count_queued", locked_by=None, error=None); recycle()
-            log.exception("count failed"); _safe(store.patch_run, run["id"], status="failed", error=str(e)[:300], finished_at=NOW())
+            log.exception("count failed"); _safe(store.patch_run_if, run["id"], "counting", status="failed", error=str(e)[:300], finished_at=NOW())
         return
     b = store.open_batch(run["id"])
     if not b: return store.patch_run(run["id"], status="failed", error="没有待读批次", finished_at=NOW())

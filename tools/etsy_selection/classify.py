@@ -46,14 +46,19 @@ NEVER_EXCLUDE={'wholesale','bulk','vintage'}  # Hongyan 明确不排除：即使
 def _rx(words):
     ws=[w for w in words if w and w.strip().lower() not in NEVER_EXCLUDE]
     return r'\b('+'|'.join(sorted(ws,key=len,reverse=True))+r')\b' if ws else r'(?!x)x'
+def too_broad(rx):
+    """排除词能匹配空串或任意普通单词 → 拼进 \\b(…)\\b 后会命中所有标题。只在加载词表时检查（每 5 分钟一次），不影响逐行速度。"""
+    if isinstance(rx,str): rx=re.compile(rx,re.I)
+    return any(rx.fullmatch(t) for t in ('','zqxjv','qq'))
 def set_words(rows=None):
     """rows: [{'category':'custom|ip','word':正则片段,'enabled':bool}]；None/空 → 内置兜底。返回生效来源。"""
     global CUSTOM,IP
     by={'custom':[],'ip':[]}; src='builtin'
     for r in rows or []:
         if r.get('enabled',True) and r.get('category') in by:
-            try: re.compile(r['word'])
+            try: rx=re.compile(r['word'],re.I)
             except re.error: continue
+            if too_broad(rx): continue   # 如 “a|”、“.*”、“\\w+”：会把所有标题都排除（QA 2026-10-19）
             by[r['category']].append(r['word'])
     if any(by.values()): src='table'
     CUSTOM=_rx(by['custom'] if src=='table' else CUSTOM_WORDS); IP=_rx(by['ip'] if src=='table' else IP_WORDS)

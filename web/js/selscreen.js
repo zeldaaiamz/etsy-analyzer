@@ -4,9 +4,37 @@
 // ⑤ >1000 分批，每批 1000，最多 5 批 / 5,000；“还剩 N 条未读”只在每批完成后更新 ⑥ 只有符合要求的入库，保留 3 天 ⑦ 网页无搜索，查询找序猿
 const BATCH = 1000, MAX_ROWS = 5000; // 每批 1000，最多读到 EHunt 第 5,000 条（分批次数不再单独限制，第 1 批可能不足 1000）
 const RORDER = ["定制", "IP", "材质", "素材/数字文件", "7天销量≤3", "其他"];
+// ---- 纯函数（web/tests/selscreen.test.mjs）----
+// 关键词：去首尾空格、连续空白合成一个（EHunt 的 Keyword 标签按单空格显示）
+export const normKw = (s) => String(s ?? "").replace(/\s+/g, " ").trim();
+// 下载文件名：保留中日韩/字母数字（原来 [^\w-] 会把中文关键词变成 ___）
+export const safeName = (s) => (String(s ?? "").replace(/[^\p{L}\p{N}_-]+/gu, "_").replace(/^_+|_+$/g, "").slice(0, 60) || "links");
+// worker 原始英文报错 → 给人看的中文（原文放 tooltip）
+export function friendlyErr(e) {
+  const t = String(e || "");
+  if (!t) return "";
+  if (/Playwright Sync API inside the asyncio loop/i.test(t)) return "box 抓取进程异常（上一次失败后浏览器没有释放），需要重启 box 上的抓取进程后再试";
+  if (/Remote end closed|RemoteDisconnected|Connection reset|URLError|timed out|Temporary failure in name resolution/i.test(t)) return "box 与数据库的连接中断（网络抖动），可点“重试本批”或重新查询";
+  if (/EHunt 登录已失效|EHunt 未登录/.test(t)) return "EHunt 登录已失效：需要在 box 上重新人工登录 EHunt";
+  if (/Timeout \d+ms exceeded|翻页到第 \d+ 页超时/i.test(t)) return "EHunt 页面响应超时（网页卡住或改版），请稍后重试";
+  if (/关键词未生效|筛选未生效|排序不是/.test(t)) return t;
+  return /[\u4e00-\u9fff]/.test(t) ? t : `抓取出错：${t.slice(0, 120)}`;
+}
+// 最近 3 天标签的副文字：按状态显示（原来全部显示“符合 0 条”）
+export function chipText(r) {
+  const n = (v) => (v || 0).toLocaleString();
+  if (["count_queued", "counting"].includes(r.status)) return "查询中";
+  if (r.status === "counted") return r.total_count == null ? "待抓取" : `待抓取 · 共 ${n(r.total_count)} 条`;
+  if (["queued", "running"].includes(r.status)) return `读取中 · 已符合 ${n(r.passed_count)} 条`;
+  if (r.status === "failed") return r.total_count == null ? "查询失败" : `失败 · 符合 ${n(r.passed_count)} 条`;
+  if (r.status === "canceled") return `已停止 · 符合 ${n(r.passed_count)} 条`;
+  return `符合 ${n(r.passed_count)} 条`;
+}
+// 等待了多久（box 暂停时排队会很久，给出提示，不是卡死）
+export const waitedMin = (iso, now = Date.now()) => (iso ? Math.max(0, Math.floor((now - Date.parse(iso)) / 60000)) : 0);
 export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sendToPrescreen }) {
   const QSP = new URLSearchParams(location.search);
-  const V = { addErr: "", run: null, batches: [], links: {}, open: new Set(), timer: null, fx: null, demoRuns: {}, recent: null, limErr: "" };
+  const V = { addErr: "", run: null, batches: [], links: {}, open: new Set(), timer: null, fx: null, demoRuns: {}, recent: null, limErr: "", busy: new Set(), seq: 0, lastSt: null };
   const FILTERS = { price_min: 8, price_max: 40, min_sales: 100, min_sales_7d: 4, sort: "↓7-day sales" };
   const active = (r) => r && ["count_queued", "counting", "queued", "running"].includes(r.status);
   // 实测数（全部筛选含 7 天销量 Min 4，2026-10-16）。其他词在演示里会生成数字并标“演示数字”
@@ -14,12 +42,16 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
   const DEMO_ONLY = { "acrylic sign": 3260, "no results": 0 }; // 演示数字（用于演示多批 / 一键读取全部剩余），界面标“演示数字”
   const demoTotal = (kw) => MEASURED[kw.toLowerCase()]?.[0] ?? DEMO_ONLY[kw.toLowerCase()] ?? (40 + [...kw].reduce((a, c) => a + c.charCodeAt(0) * 7, 0) % 900);
   const sumReasons = (o) => RORDER.filter((k) => o?.[k]).map((k) => `${k} ${o[k]}`).join("、");
+  const FIN = ["done", "canceled", "failed"]; // 批次已结束（停止/失败的批次也保留已通过的链接）
+  const KW_MAX = 200;
+  // 防重复点击：同一动作进行中再点/回车直接忽略（QA 2026-10-19 #1：连点“查询数量”会建 2 个任务）
+  async function guard(key, fn) { if (V.busy.has(key)) return; V.busy.add(key); try { return await fn(); } finally { V.busy.delete(key); } }
 
   // ---------- 演示（不连 Supabase） ----------
   function demoCount(kw) {
     const id = `demo-${Date.now()}`, run = { id, keyword: kw, status: "counting", total_count: null, batch_size: BATCH, current_batch: 0, remaining_count: null, measured: !!MEASURED[kw.toLowerCase()] };
     V.demoRuns[id] = { run, batches: [], links: {} }; location.hash = `#/selscreen/${id}`;
-    setTimeout(() => { run.status = "counted"; run.total_count = demoTotal(kw); refresh(); }, Number(QSP.get("countms")) || 1000);
+    setTimeout(() => { if (run.status === "canceled") return; run.status = "counted"; run.total_count = demoTotal(kw); refresh(); }, Number(QSP.get("countms")) || 1000);
   }
   const demoLinks = (run, bno, n) => { const seed = run.keyword.length * 7919 + bno * 104729; return Array.from({ length: n }, (_, i) => `https://www.etsy.com/listing/${9000000000 + ((seed + i * 7121) % 99999999)}`); };
   function demoBatch(run, bno, resume, s0) {
@@ -32,6 +64,9 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
     const tick = () => {
       if (run.status === "canceled") { b.status = "canceled"; D.links[b.id] = demoLinks(run, bno, Math.round(b.scraped_count * 0.35)); b.passed_count = D.links[b.id].length; return refresh(); }
       b.scraped_count = Math.min(total, b.scraped_count + step);
+      if (QSP.has("failat") && b.scraped_count >= Number(QSP.get("failat")) && !b.failedOnce) { // 演示：批次中途失败（如 box 与数据库连接中断）
+        b.failedOnce = true; Object.assign(b, { status: "failed" }); Object.assign(run, { status: "failed", error: "Remote end closed connection without response" });
+        D.links[b.id] = demoLinks(run, bno, Math.round(b.scraped_count * 0.35)); b.passed_count = D.links[b.id].length; return refresh(); }
       if (b.scraped_count < total) { refresh(); return setTimeout(tick, Number(QSP.get("speed")) || 120); }
       if (real) { // 回放数据：20 行 → 规则排除 13（定制 11、IP 1、素材 1）→ 7 条过豆包 → 保留 6 + 待确认 1
         const items = V.fx.items["demo-run"].filter((x) => x.sales_7d >= FILTERS.min_sales_7d);
@@ -57,10 +92,19 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
   }
   // ---------- 动作 ----------
   async function count() {
-    const kw = $("ssKw").value.trim(); if (!kw) return toast("请输入关键词", "bad");
+    const kw = normKw($("ssKw").value); if (!kw) return toast("请输入关键词", "bad");
+    if (kw.length > KW_MAX) return toast(`关键词太长（${kw.length} 字），最多 ${KW_MAX} 字`, "bad");
+    $("ssKw").value = kw; const btn = $("ssCount"); if (btn) btn.disabled = true;
     if (DEMO) return demoCount(kw);
     const { data, error } = await getSb().rpc("sel_count", { p_keyword: kw, p_params: FILTERS });
-    if (error) return toast(`查询失败：${error.message}`, "bad");
+    if (error) {
+      if (btn) btn.disabled = false;
+      if (/已有进行中的任务/.test(error.message)) { // 带过去看正在进行的那个，而不是只报错
+        const a = await getSb().from("sel_runs").select("id,keyword").in("status", ["count_queued", "counting", "queued", "running"]).order("created_at", { ascending: false }).limit(1).maybeSingle();
+        if (a.data?.id) { toast(`已有进行中的任务「${a.data.keyword}」，已为你打开；可以先停止它`, "bad"); location.hash = `#/selscreen/${a.data.id}`; return; }
+      }
+      return toast(`查询失败：${error.message}`, "bad");
+    }
     location.hash = `#/selscreen/${data}`;
   }
   function limitError() {
@@ -74,7 +118,8 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
     if (err) { const el = $("ssLimErr"); if (el) el.textContent = err; $("ssLimit")?.classList.add("input-bad"); $("ssLimit")?.focus(); return; }
     const r = V.run, lim = Number($("ssLimit").value);
     if (DEMO) { r.max_rows = lim; return demoBatch(r, 1); }
-    const { error } = await getSb().rpc("sel_start", { p_run: r.id, p_limit: lim }); if (error) return toast(`开始失败：${error.message}`, "bad"); load(r.id);
+    const { data, error } = await getSb().rpc("sel_start", { p_run: r.id, p_limit: lim }); if (error) return toast(`开始失败：${error.message}`, "bad");
+    if (data === false) toast("任务状态已变化（可能在另一个标签页已经开始），已刷新", "bad"); load(r.id);
   }
   // 已读到第几条（只看已有批次的 offset_end，不重读）；还能读多少（EHunt 最多前 5,000 条）
   const readEnd = () => V.batches.reduce((a, b) => Math.max(a, b.offset_end || 0), 0);
@@ -94,21 +139,27 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
   async function next(all) {
     const r = V.run, err = addError(); V.addErr = err;
     if (err) { const el = $("ssAddErr"); if (el) el.textContent = err; $("ssAdd")?.classList.add("input-bad"); $("ssAdd")?.focus(); return; }
+    // “读取下一批”只排 1 批，但计划条数按填写的保留（原来传 min(填写,1000)，读完第 2 批就被当成“全部完成”）
     const add = Number($("ssAdd").value), s = readEnd() + 1, n = all ? add : Math.min(add, BATCH), nb = Math.ceil(n / BATCH);
     if (all && nb > 1 && !await confirmDialog({ title: "一键读取全部？", ok: `读取 ${n.toLocaleString()} 条`, body: `<p>将从第 <b>${s.toLocaleString()}</b> 条开始连续读取 <b>${n.toLocaleString()}</b> 条（${nb} 批，每批 1000），已读的 1–${(s - 1).toLocaleString()} 条不会重读。每批完成后结果自动出现在下方；标题规则先筛，只有通过规则的才调用豆包。</p><p class="hint">EHunt 最多只显示前 5,000 条。</p>` })) return;
-    if (DEMO) { Object.assign(r, { read_all: all, max_rows: s - 1 + n }); return demoBatch(r, (V.batches.at(-1)?.batch_no || 0) + 1, null, s); }
-    const { error } = await getSb().rpc("sel_extend", { p_run: r.id, p_add: n, p_all: all }); if (error) return toast(`继续读取失败：${error.message}`, "bad"); load(r.id);
+    if (DEMO) { Object.assign(r, { read_all: all, max_rows: s - 1 + add }); return demoBatch(r, (V.batches.at(-1)?.batch_no || 0) + 1, null, s); }
+    const { data, error } = await getSb().rpc("sel_extend", { p_run: r.id, p_add: add, p_all: all }); if (error) return toast(/batch_no_check/.test(error.message) ? "继续读取失败：批次数超过数据库上限 5（需要后台更新 035）" : `继续读取失败：${error.message}`, "bad");
+    if (!data) toast("没有可继续读取的条数，或任务状态已变化，已刷新", "bad"); load(r.id);
   }
   async function cancel() {
-    const cur = V.batches.find((b) => b.status === "running" || b.status === "queued");
-    if (!await confirmDialog({ title: "停止读取？", ok: "停止", body: `<p>停止后，已读到的部分和已通过的链接会保留${cur ? `（第 ${cur.batch_no} 批已读 ${(cur.scraped_count || 0).toLocaleString()} 条）` : ""}，之后可以点「继续本批」从断点接着读。</p>` })) return;
+    const cur = V.batches.find((b) => b.status === "running" || b.status === "queued"), counting = V.run && V.run.total_count == null;
+    if (counting) { if (!await confirmDialog({ title: "取消查询？", ok: "取消查询", body: "<p>取消后可以马上换个关键词重新查询（box 暂停时查询会一直排队，取消不影响别的数据）。</p>" })) return; }
+    else if (!await confirmDialog({ title: "停止读取？", ok: "停止", body: `<p>停止后，已读到的部分和已通过的链接会保留${cur ? `（第 ${cur.batch_no} 批已读 ${(cur.scraped_count || 0).toLocaleString()} 条）` : ""}，之后可以点「继续本批」从断点接着读。</p>` })) return;
     if (DEMO) { V.run.status = "canceled"; return refresh(); }
-    const { error } = await getSb().rpc("sel_cancel", { p_run: V.run.id }); if (error) return toast(error.message, "bad"); load(V.run.id);
+    const { data, error } = await getSb().rpc("sel_cancel", { p_run: V.run.id }); if (error) return toast(error.message, "bad");
+    if (!data) toast("任务已经结束，无需停止", "bad"); load(V.run.id);
   }
+  const lastStopped = () => [...V.batches].reverse().find((x) => x.status === "canceled" || x.status === "failed");
   async function resume() {
-    const b = [...V.batches].reverse().find((x) => x.status === "canceled"); if (!b) return;
+    const b = lastStopped(); if (!b) return;
     if (DEMO) { V.run.status = "running"; return demoBatch(V.run, b.batch_no, b); }
-    const { error } = await getSb().rpc("sel_resume", { p_run: V.run.id }); if (error) return toast(`继续失败：${error.message}`, "bad"); load(V.run.id);
+    const { data, error } = await getSb().rpc("sel_resume", { p_run: V.run.id }); if (error) return toast(`继续失败：${error.message}`, "bad");
+    if (data === false) toast(b.status === "failed" ? "暂时不能重试失败的批次（需要后台更新 035），请重新查询数量后再抓取" : "任务状态已变化，已刷新", "bad"); load(V.run.id);
   }
   // 复制/下载全部时按链接去重（EHunt 实时排序，批次之间可能有重复）
   function linksOf(bid) {
@@ -126,14 +177,14 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
     const { list, dup } = linksOf(bid);
     try { await navigator.clipboard.writeText(list.join("\n")); } catch { return toast("复制失败，请手动选择", "bad"); }
     toast(`已复制 ${list.length} 条链接${dup ? `（已去重 ${dup} 条）` : ""}`, "ok");
-    const bs = bid === "all" ? V.batches : V.batches.filter((b) => b.id === bid);
+    const bs = (bid === "all" ? V.batches : V.batches.filter((b) => b.id === bid)).filter((b) => FIN.includes(b.status)); // 还在读的批次不标“已复制”
     for (const b of bs) { b.copied_at = new Date().toISOString(); V.open.delete(b.id); if (!DEMO) await getSb().rpc("sel_mark_copied", { p_batch: b.id }); }
     render();
   }
   function download(bid) {
     const { list, dup } = linksOf(bid); if (!list.length) return;
     if (dup) toast(`已去重 ${dup} 条`, "ok");
-    const kw = (V.run?.keyword || "links").replace(/[^\w-]+/g, "_"), tag = bid === "all" ? "all" : `b${V.batches.find((b) => b.id === bid)?.batch_no}`;
+    const kw = safeName(V.run?.keyword), tag = bid === "all" ? "all" : `b${V.batches.find((b) => b.id === bid)?.batch_no}`;
     const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([list.join("\n") + "\n"], { type: "text/plain" }));
     a.download = `etsy_${kw}_${tag}_${list.length}.txt`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
   }
@@ -153,7 +204,7 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
     const el = $("ssRecent"); if (!el) return; const L = V.recent || [];
     const ST = { count_queued: "查询中", counting: "查询中", counted: "待抓取", queued: "排队中", running: "读取中", batch_done: "本批完成", succeeded: "完成", failed: "失败", canceled: "已停止" };
     const t = (iso) => { const d = new Date(iso); return `${d.getMonth() + 1}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };
-    el.innerHTML = !L.length ? "" : `<div class="ss-recent"><span class="hint">最近 3 天：</span>${L.map((r) => `<a class="ss-rchip${V.run?.id === r.id ? " active" : ""}" href="#/selscreen/${esc(r.id)}" title="${esc(ST[r.status] || r.status)}"><b>${esc(r.keyword)}</b> <span class="hint">${t(r.created_at)} · 符合 ${(r.passed_count || 0).toLocaleString()} 条</span></a>`).join("")}</div>`;
+    el.innerHTML = !L.length ? "" : `<div class="ss-recent"><span class="hint">最近 3 天：</span>${L.map((r) => `<a class="ss-rchip${V.run?.id === r.id ? " active" : ""}" href="#/selscreen/${esc(r.id)}" title="${esc(ST[r.status] || r.status)}"><b>${esc(r.keyword)}</b> <span class="hint">${t(r.created_at)} · ${esc(chipText(r))}</span></a>`).join("")}</div>`;
   }
   // ---------- 数据 ----------
   function refresh() { if (DEMO && V.run) { const D = V.demoRuns[V.run.id]; if (D) { V.batches = D.batches; V.links = D.links; } } render(); }
@@ -173,25 +224,39 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
   async function load(runId) {
     if (DEMO) { V.fx ||= (await import("./demo-selection.js")).selectionFixtures(); demoRecentRun(runId); loadRecent(); V.run = V.demoRuns[runId]?.run || null; return refresh(); }
     const sb = getSb(); if (!sb) return;
-    if (!V.recent || !active(V.run)) loadRecent();
-    if (!runId) { V.run = null; return render(); }
-    const r = await sb.from("sel_runs").select("*").eq("id", runId).maybeSingle();
-    if (r.error) { $("ssBody").innerHTML = `<div class="card empty">数据表未就绪（需要迁移 024）：${esc(r.error.message)}</div>`; return; }
-    V.run = r.data; const b = await sb.from("sel_batches").select("*").eq("run_id", runId).order("batch_no"); V.batches = b.data || [];
-    const it = await sb.from("sel_items").select("batch_id,etsy_url,rank").eq("run_id", runId).order("rank"); V.links = {};
-    (it.data || []).forEach((x) => (V.links[x.batch_id] ||= []).push(x.etsy_url));
+    const seq = ++V.seq, stale = () => seq !== V.seq; // 快速切换标签/轮询时，旧请求晚到不能覆盖当前任务
+    if (!runId) { V.run = null; V.batches = []; V.links = {}; loadRecent(); return render(); }
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(runId)) { V.run = null; V.batches = []; V.links = {}; loadRecent(); render(); $("ssBody").innerHTML = '<div class="card empty"><h3>链接里的任务编号无效</h3><p class="muted">请从上方“最近 3 天”重新打开，或输入关键词重新查询</p></div>'; return; }
+    const r = await sb.from("sel_runs").select("*").eq("id", runId).maybeSingle(); if (stale()) return;
+    if (r.error) { $("ssBody").innerHTML = `<div class="card empty">读取任务失败：${esc(r.error.message)}</div>`; return; }
+    if (!r.data) { V.run = null; V.batches = []; V.links = {}; loadRecent(); render(); $("ssBody").innerHTML = '<div class="card empty"><h3>没有找到这个任务</h3><p class="muted">可能已超过 3 天被自动清理，或不属于当前账号</p></div>'; return; }
+    if (!V.recent || V.lastSt !== `${runId}:${r.data.status}`) loadRecent(); // 状态变化时刷新“最近 3 天”（原来进行中不刷新，标签一直显示旧状态）
+    V.lastSt = `${runId}:${r.data.status}`;
+    const b = await sb.from("sel_batches").select("*").eq("run_id", runId).order("batch_no"); if (stale()) return;
+    // sel_items 分页读取：PostgREST 默认一次最多返回 1,000 行，>1000 条符合要求时原来会静默少显示/少复制
+    const links = {}; let rows = [];
+    for (let off = 0; ; off += 1000) {
+      const it = await sb.from("sel_items").select("batch_id,etsy_url,rank").eq("run_id", runId).order("rank").order("id").range(off, off + 999); if (stale()) return;
+      if (it.error) { toast(`读取链接失败：${it.error.message}`, "bad"); break; }
+      rows = rows.concat(it.data || []); if ((it.data || []).length < 1000) break;
+    }
+    rows.forEach((x) => (links[x.batch_id] ||= []).push(x.etsy_url));
+    V.run = r.data; V.batches = b.data || []; V.links = links;
     render(); schedule();
   }
   // ---------- 界面 ----------
   function countPanel(r) {
     const locked = `<div class="ss-form"><label class="hint">最多读取 <input class="input input-sm ss-thr" type="number" disabled placeholder="—"> 条</label><button class="btn btn-primary" disabled title="先查询数量">抓取 →</button><span class="hint">先查询数量，显示结果数后才能抓取</span></div>`;
-    if (!r || r.total_count == null) return `<div class="ss-count">${r && active(r) ? `<span><span class="spin"></span> 正在读取 EHunt「${esc(r.keyword)}」的结果数…</span>` : ""}${locked}</div>`;
+    if (!r || r.total_count == null) {
+      const w = r && active(r) ? waitedMin(r.created_at) : 0;
+      return `<div class="ss-count">${r && active(r) ? `<div class="ss-prog-row"><span><span class="spin"></span> ${r.status === "count_queued" ? "排队等待 box 查询" : "正在读取"} EHunt「${esc(r.keyword)}」的结果数…</span>${w >= 2 ? `<span class="warn">已等待 ${w} 分钟（box 可能暂停，恢复后自动继续；也可以取消后重试）</span>` : ""}<button class="btn btn-ghost btn-sm" id="ssStop">取消查询</button></div>` : ""}${locked}</div>`;
+    }
     const n = r.total_count, nb = Math.ceil(Math.min(n, MAX_ROWS) / BATCH);
     const label = DEMO ? (MEASURED[r.keyword.toLowerCase()] ? `<span class="pill pill-ok">EHunt 实测（10-16 ${esc(MEASURED[r.keyword.toLowerCase()][1])}）</span>` : '<span class="pill pill-bad">演示数字，非实测</span>') : "";
     const tip = n > BATCH ? `<span class="pill pill-info">超过 1000：分批读取，每批 1000，共 ${nb} 批${n > MAX_ROWS ? "（EHunt 最多显示前 5,000 条）" : ""}</span>` : "";
     const head = `<div class="ss-count-n"><b>${esc(r.keyword)}</b>：<span class="ss-n ss-n-info">${n.toLocaleString()}</span> 条 ${tip}${label}</div>
       <p class="hint">筛选：$8–40 · 总销量 ≥100 · 7 天销量 >3 · 按 7 天销量降序</p>`;
-    if (r.status === "counted" && n === 0) return `<div class="ss-count">${head}<div class="ss-form"><button class="btn btn-primary" disabled>抓取 →</button><span class="warn">0 条：建议放宽关键词或换个词再查</span></div></div>`;
+    if (r.status === "counted" && n === 0) return `<div class="ss-count">${head}<div class="ss-form"><button class="btn btn-primary" disabled>抓取 →</button><span class="warn">0 条：${/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/.test(r.keyword) ? "EHunt 只收录英文标题，请改用英文关键词再查" : "建议放宽关键词或换个词再查"}</span></div></div>`;
     if (r.status !== "counted") return `<div class="ss-count">${head}<p class="hint">本次最多读取 ${esc((r.max_rows ?? 0).toLocaleString())} 条（每页 20 条${(r.max_rows || 0) > BATCH ? `，每批 1000` : ""}）</p></div>`;
     return `<div class="ss-count">${head}<div class="ss-form"><label>最多读取 <input id="ssLimit" class="input input-sm ss-thr" type="number" min="1" max="${Math.min(n, MAX_ROWS)}" value="${esc(V.limErr && $("ssLimit") ? $("ssLimit").value : String(Math.min(n, MAX_ROWS)))}"> 条</label>
       <button class="btn btn-primary" id="ssGo">抓取 →</button><span id="ssLimErr" class="warn" role="alert">${esc(V.limErr)}</span>${n > BATCH ? '<span class="hint">先读第 1 批（1–1000），完成后可读下一批或一键读取全部剩余</span>' : ""}</div></div>`;
@@ -203,10 +268,13 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
     const tot = b.offset_end - b.offset_start + 1;
     const psBtn = `<button class="btn btn-primary btn-sm" data-ssps="${esc(b.id)}"${links.length ? "" : " disabled"}>送去预筛选（${links.length} 条）</button>`;
     const btns = `<button class="btn btn-ghost btn-sm" data-sscopy="${esc(b.id)}"${links.length ? "" : " disabled"}>复制本批</button><button class="btn btn-ghost btn-sm" data-ssdl="${esc(b.id)}"${links.length ? "" : " disabled"}>下载 TXT</button>${psBtn}`;
-    if (b.status === "canceled") return `<section class="ss-batch ss-batch-stop"><div class="ss-res-head"><h3>第 ${b.batch_no} 批（${range}）· <span class="pill pill-bad">已停止</span> 已读 ${(b.scraped_count || 0).toLocaleString()} / ${tot.toLocaleString()} 条，通过 <span class="ss-n ss-n-ok">${links.length}</span> 条</h3>${demo}<span class="spacer"></span>
-        ${V.run?.status === "canceled" && b === [...V.batches].reverse().find((x) => x.status === "canceled") ? '<button class="btn btn-primary btn-sm" id="ssResume">继续本批</button>' : ""}${btns}</div>
-      ${links.length ? `<pre class="ss-links">${esc(links.join("\n"))}</pre>` : ""}${exl}</section>`;
-    if (b.status !== "done") return `<div class="ss-batch ss-batch-run"><b>第 ${b.batch_no} 批（${range}）</b> <span class="hint">${b.status === "failed" ? "失败" : `读取中… 已读 ${(b.scraped_count || 0).toLocaleString()} 条，通过 ${b.passed_count || 0} 条`}</span></div>`;
+    if (b.status === "canceled" || b.status === "failed") { // 失败的批次也显示已通过的链接（原来只显示“失败”两个字，已入库的链接看不到也复制不了）
+      const f = b.status === "failed", canRe = V.run?.status === (f ? "failed" : "canceled") && b === lastStopped();
+      return `<section class="ss-batch ss-batch-stop"><div class="ss-res-head"><h3>第 ${b.batch_no} 批（${range}）· <span class="pill pill-bad">${f ? "失败" : "已停止"}</span> 已读 ${(b.scraped_count || 0).toLocaleString()} / ${tot.toLocaleString()} 条，通过 <span class="ss-n ss-n-ok">${links.length}</span> 条</h3>${demo}<span class="spacer"></span>
+        ${canRe ? `<button class="btn btn-primary btn-sm" id="ssResume">${f ? "重试本批（从断点）" : "继续本批"}</button>` : ""}${btns}</div>
+      ${links.length ? `<pre class="ss-links">${esc(links.join("\n"))}</pre>` : ""}${exl}</section>`; }
+    if (b.status !== "done") { const w = b.status === "queued" ? waitedMin(b.created_at) : 0;
+      return `<div class="ss-batch ss-batch-run"><b>第 ${b.batch_no} 批（${range}）</b> <span class="hint">${b.status === "queued" ? `排队中，等待 box 抓取进程${w >= 2 ? `（已等待 ${w} 分钟，box 可能暂停，恢复后自动开始）` : ""}` : `读取中… 已读 ${(b.scraped_count || 0).toLocaleString()} 条，通过 ${b.passed_count || 0} 条`}</span></div>`; }
     if (b.copied_at && !V.open.has(b.id)) return `<div class="ss-batch ss-batch-copied"><span class="pill pill-ok">✓ 已复制</span> <b>第 ${b.batch_no} 批（${range}）</b> 符合要求 ${links.length} 条 ${demo}<span class="spacer"></span>${psBtn}<button class="btn btn-link btn-sm" data-ssopen="${esc(b.id)}">展开</button></div>`;
     return `<section class="ss-batch"><div class="ss-res-head"><h3>第 ${b.batch_no} 批（${range}）· 符合要求 <span class="ss-n ss-n-ok">${links.length}</span> 条</h3>${demo}<span class="spacer"></span>
         ${b.copied_at ? `<button class="btn btn-link btn-sm" data-ssfold="${esc(b.id)}">收起</button>` : ""}
@@ -221,10 +289,10 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
     const prog = r && cur && active(r) ? (() => { const tot = cur.offset_end - cur.offset_start + 1, pct = Math.round(100 * (cur.scraped_count || 0) / tot);
       return `<div class="ss-prog-row"><span class="pill pill-info"><span class="spin"></span> 第 ${cur.batch_no} 批（${cur.offset_start.toLocaleString()}–${cur.offset_end.toLocaleString()}）${esc(ST[r.status])}</span>
         <span class="sc-prog ss-prog"><span style="width:${pct}%"></span></span><span class="hint">${pct}%</span><button class="btn btn-ghost btn-sm" id="ssStop">■ 停止</button></div>`; })()
-      : r && ["failed", "canceled"].includes(r.status) ? `<div class="ss-prog-row"><span class="pill pill-bad">${esc(ST[r.status])}</span>${r.error ? `<span class="warn">${esc(r.error)}</span>` : ""}</div>` : "";
-    $("ssStart").innerHTML = `<div id="ssRecent"></div><div class="card ss-start"><div class="ss-form"><input id="ssKw" class="input" placeholder="EHunt 关键词，例如 acrylic decoration" value="${esc($("ssKw")?.value || r?.keyword || "")}">
+      : r && ["failed", "canceled"].includes(r.status) ? `<div class="ss-prog-row"><span class="pill pill-bad">${esc(ST[r.status])}</span>${r.error ? `<span class="warn" title="${esc(r.error)}">${esc(friendlyErr(r.error))}</span>` : ""}</div>` : "";
+    $("ssStart").innerHTML = `<div id="ssRecent"></div><div class="card ss-start"><div class="ss-form"><input id="ssKw" class="input" maxlength="${KW_MAX}" placeholder="EHunt 关键词，例如 acrylic decoration" value="${esc($("ssKw")?.value || r?.keyword || "")}">
         <button class="btn btn-primary" id="ssCount"${active(r) ? " disabled" : ""}>查询数量</button></div>${countPanel(r)}${prog}</div>`; DEMO ? loadRecent() : renderRecent();
-    const done = V.batches.filter((b) => b.status === "done" || b.status === "canceled");
+    const done = V.batches.filter((b) => FIN.includes(b.status));
     const all = [...new Set(done.flatMap((b) => V.links[b.id] || []))], exAll = done.reduce((a, b) => a + (b.excluded_count || 0), 0);
     const exR = {}; done.forEach((b) => Object.entries(b.excluded_by_reason || {}).forEach(([k, v]) => exR[k] = (exR[k] || 0) + v));
     const left = r ? canRead(r) : 0;
@@ -232,7 +300,7 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
       const re = readEnd(), planned = Math.max(0, (r.max_rows || 0) - re), def = planned || left;
       const val = V.addErr && $("ssAdd") ? $("ssAdd").value : String(def), add = Math.min(Math.max(1, Math.floor(Number(val)) || def), left);
       const e = re + Math.min(add, BATCH), nb = Math.ceil(add / BATCH);
-      return `<div class="card ss-next"><div><b>已读 1–${re.toLocaleString()} 条，还可继续读 ${left.toLocaleString()} 条</b><p class="hint">共 ${(r.total_count || 0).toLocaleString()} 条${r.total_count > MAX_ROWS ? "，EHunt 最多显示前 5,000 条" : ""} · 从第 ${(re + 1).toLocaleString()} 条接着读，已读的不重读 · 每批 1000</p></div><span class="spacer"></span>
+      return `<div class="card ss-next"><div>${r.error ? `<p class="warn">${esc(friendlyErr(r.error))}</p>` : ""}<b>已读 1–${re.toLocaleString()} 条，还可继续读 ${left.toLocaleString()} 条</b><p class="hint">共 ${(r.total_count || 0).toLocaleString()} 条${r.total_count > MAX_ROWS ? "，EHunt 最多显示前 5,000 条" : ""} · 从第 ${(re + 1).toLocaleString()} 条接着读，已读的不重读 · 每批 1000</p></div><span class="spacer"></span>
         <label class="hint">再读取 <input id="ssAdd" class="input input-sm ss-thr" type="number" min="1" max="${left}" value="${esc(val)}"> 条</label>
         <button class="btn btn-primary" id="ssNext">读取下一批（${(re + 1).toLocaleString()}–${e.toLocaleString()}）</button><button class="btn btn-ghost${nb > 1 ? "" : " hidden"}" id="ssAll">一键读取全部（${add.toLocaleString()} 条，${nb} 批）</button><span id="ssAddErr" class="warn" role="alert">${esc(V.addErr)}</span></div>`; })() : "";
     const cum = done.length > 1 || (r && r.status !== "succeeded" && done.length) ? `<div class="card ss-cum"><b>累计符合要求 <span class="ss-n ss-n-ok">${all.length.toLocaleString()}</span> 条</b><span class="hint">（${done.length} 批 · 已读 ${done.reduce((a, b) => a + b.scraped_count, 0).toLocaleString()} 条）</span>${V.batches.some((b) => b.demo) ? '<span class="pill pill-bad">演示数字</span>' : ""}<span class="spacer"></span>
@@ -243,10 +311,10 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
   }
   document.addEventListener("click", (e) => {
     const t = e.target, id = t.id;
-    if (id === "ssCount") return count(); if (id === "ssGo") return start(); if (id === "ssStop") return cancel();
-    if (id === "ssResume") return resume();
+    if (id === "ssCount") return guard("count", count); if (id === "ssGo") return guard("start", start); if (id === "ssStop") return guard("cancel", cancel);
+    if (id === "ssResume") return guard("resume", resume);
     if (t.dataset?.ssps) return prescreen(t.dataset.ssps);
-    if (id === "ssNext") return next(false); if (id === "ssAll") return next(true);
+    if (id === "ssNext") return guard("next", () => next(false)); if (id === "ssAll") return guard("next", () => next(true));
     if (t.dataset?.sscopy) return copy(t.dataset.sscopy);
     if (t.dataset?.ssdl) return download(t.dataset.ssdl);
     if (t.dataset?.ssopen) { V.open.add(t.dataset.ssopen); return render(); }
@@ -254,9 +322,9 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
   });
   document.addEventListener("keydown", (e) => {
     if (e.key !== "Enter" || e.isComposing) return;
-    if (e.target.id === "ssKw" && !$("ssCount")?.disabled) { e.preventDefault(); count(); }
-    else if (e.target.id === "ssLimit") { e.preventDefault(); start(); }
-    else if (e.target.id === "ssAdd") { e.preventDefault(); next(false); }
+    if (e.target.id === "ssKw" && !$("ssCount")?.disabled) { e.preventDefault(); guard("count", count); }
+    else if (e.target.id === "ssLimit") { e.preventDefault(); guard("start", start); }
+    else if (e.target.id === "ssAdd") { e.preventDefault(); guard("next", () => next(false)); }
   });
   document.addEventListener("input", (e) => { if (e.target.id === "ssAdd") return addLabels(); if (e.target.id === "ssLimit") { V.limErr = ""; e.target.classList.remove("input-bad"); const el = $("ssLimErr"); if (el) el.textContent = ""; } });
   return { show: (runId) => load(runId), _state: V };
