@@ -1,4 +1,4 @@
-// 预筛选视图（#/screen[/<batch>]）：粘贴 → worker 只取 EHunt 数据 → 按发送批次分组看大图，✕ 排除 / 撤销
+// 预筛选视图（#/screen[/<batch>]）：粘贴 → worker 只取 EHunt 数据 → 按发送批次分组看大图，✕ 从列表删除（软隐藏+撤销）/ 排除所选仍本地标记
 // → 每批“分析剩余数据”或底部“全部已加载”一键确认 → 只有保留的进入 DeepSeek / Keepamore / 截图（017 screen_confirm）
 export const BATCH = 50;
 const POLL_MS = 3000;
@@ -20,6 +20,17 @@ export function dedupeItems(items) {
   for (const it of items || []) { const k = listingKey(it), o = best.get(k); if (!o || keepRank(it) < keepRank(o)) best.set(k, it); }
   const keep = new Set(best.values());
   return (items || []).filter((it) => keep.has(it));
+}
+
+
+// 卡片 ✕ / 删除所选：从本地列表拿掉（软隐藏）；undo 时把 removed 拼回
+export function applySoftHide(items, ids) {
+  const gone = new Set(ids || []);
+  const removed = (items || []).filter((it) => gone.has(it.id));
+  return { items: (items || []).filter((it) => !gone.has(it.id)), removed };
+}
+export function restoreSoftHide(items, removed) {
+  return (items || []).concat(removed || []).sort((a, b) => Number(a.listing_id) - Number(b.listing_id));
 }
 
 export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDialog, getStatus = () => null }) {
@@ -82,7 +93,7 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     const act = failed ? ""
       : done ? `<button class="sc-x sc-undo" data-srestore="${esc(it.id)}" title="恢复为待确认">恢复</button>`
       : it.status === "screening" ? (rj ? `<button class="sc-x sc-undo" data-sundo="${esc(it.id)}" title="撤销排除">撤销</button>`
-        : `<button class="sc-x" data-srej="${esc(it.id)}" title="排除（不再分析）" aria-label="排除">✕</button>`) : "";
+        : `<button class="sc-x" data-srej="${esc(it.id)}" title="从列表删除" aria-label="删除">✕</button>`) : "";
     const price = it.price != null ? `$${Number(it.price).toFixed(2)}` : "";
     const selBox = deletable(it) ? `<label class="sc-sel" title="选择"><input type="checkbox" data-ssel="${esc(it.id)}"${V.sel.has(it.id) ? " checked" : ""}></label>` : "";
     return `<div class="sc-card${rj ? " rej" : ""}${V.sel.has(it.id) ? " sel" : ""}${hasData(it) ? "" : " wait"}" data-skey="${esc(it.id)}">
@@ -114,7 +125,7 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     $("screenSum").innerHTML = tot ? `共 <b>${tot}</b> 条 · ${bs.length} 组 · 待确认 <b>${nPend}</b> · 已排除 ${nRej}${nFetch ? ` · 取数中 ${nFetch}` : ""}${nWait ? ` · <span class="warn">${nWait} 条等待明日 EHunt 额度</span>` : ""}` : "";
     $("screenTabs").innerHTML = [["all", "全部"], ["pending", "待确认"], ["rejected", "已排除"]].map(([k, n]) =>
       `<button class="fchip${V.tab === k ? " active" : ""}" data-stab="${k}">${n}<span class="fchip-n">${k === "all" ? tot : k === "pending" ? nPend - V.items.filter((it) => it.status === "screening" && V.rej.has(it.id)).length : nRej}</span></button>`).join("")
-    const nDone = V.items.filter((it) => it.screen_state === "rejected").length; // 只算已确认排除的（未确认的 ✕ 可直接撤销）
+    const nDone = V.items.filter((it) => it.screen_state === "rejected").length; // 只算「分析剩余数据」确认后的已排除（卡片 ✕ 已改软隐藏；本地排除仍靠「排除所选」）
     const nRetry = V.items.filter(canRefetch).length;
     const nDead = V.items.filter(deadFailed).length;
     $("screenTabs").innerHTML += `<span class="spacer"></span>${tot ? `<span class="hint sc-norefetch" title="除了获取失败，不重复获取：已获取成功、排队中、处理中的条目不会再获取第二次">仅失败项可重新获取 · 已获取成功，不再重复获取</span>` : ""}${nRetry ? `<button class="btn btn-primary btn-sm" data-srefall="1" ${V.busy.has("refall") ? "disabled" : ""} title="除了获取失败，不重复获取：只重新取数获取失败且未达 3 次上限的条目（EHunt 服务异常导致的失败不受上限限制）">${V.busy.has("refall") ? '<span class="spin"></span>' : ""}一键刷新（${nRetry} 条失败）</button>` : ""}${nDead ? `<button class="btn btn-danger-ghost btn-sm" data-sdelfail="1" title="永久删除已重试 3 次仍失败的条目（不可恢复）">🗑 一键删除失败（${nDead} 条）</button>` : ""}${nDone ? `<button class="btn btn-danger-ghost btn-sm" data-shide="1" title="永久删除全部已排除条目（不可恢复，不消耗 EHunt 额度）">🗑 删除所有已排除 (${nDone})</button>` : ""}`;
@@ -199,6 +210,29 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
 
   document.addEventListener("load", (ev) => { const t = ev.target; if (t.tagName === "IMG" && t.dataset?.sid) markImg(t); }, true);
   document.addEventListener("error", (ev) => { const t = ev.target; if (t.tagName === "IMG" && t.dataset?.sid) markImg(t, true); }, true);
+  // 卡片 ✕：与「删除所选」同一套 screen_hide_ids / screen_unhide（软隐藏）；乐观从列表移除，toast「撤销」恢复。本地 V.rej（排除所选）不变
+  async function hideOne(id) {
+    const it = V.items.find((x) => x.id === id); if (!it || V.busy.has("hidex")) return;
+    V.busy.add("hidex");
+    const { items, removed } = applySoftHide(V.items, [id]);
+    V.items = items; V.sel.delete(id); V.rej.delete(id); render();
+    try {
+      let ids = [id];
+      if (!DEMO) {
+        const r = await getSb().rpc("screen_hide_ids", { p_ids: [id] });
+        if (r.error) {
+          V.items = restoreSoftHide(V.items, removed);
+          return toast(/screen_hide_ids/.test(r.error.message) ? "删除失败：需要后台执行 040" : `删除失败：${r.error.message}`, "bad");
+        }
+        ids = r.data?.ids || [id];
+      }
+      toast(`已删除 ${ids.length} 条`, "ok", [{ label: "撤销", run: async () => {
+        if (!DEMO) { const r = await getSb().rpc("screen_unhide", { p_ids: ids }); if (r.error) return toast(`撤销失败：${r.error.message}`, "bad"); load(); }
+        else { V.items = restoreSoftHide(V.items, removed); render(); }
+      } }], 8000);
+    } finally { V.busy.delete("hidex"); render(); }
+  }
+
   // 删除所选（040 screen_hide_ids：一次调用、可跨批次；隐藏不删除，可用 screen_unhide 撤销）。确认框列出总数与各批数量；进行中禁用按钮防连点
   async function deleteSelected() {
     if (V.busy.has("seldel")) return;
@@ -227,7 +261,7 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
       render(); return; }
     const t = ev.target.closest("[data-srej],[data-sundo],[data-srestore],[data-sconfirm],[data-stab],[data-shide],[data-srefall],[data-sdelfail],[data-sreload]"); if (!t) return;
     ev.preventDefault();
-    if (t.dataset.srej) { V.rej.add(t.dataset.srej); toast("已排除，不会进入分析", "", [{ label: "撤销", run: () => { V.rej.delete(t.dataset.srej); render(); } }], 4000); render(); }
+    if (t.dataset.srej) hideOne(t.dataset.srej);
     else if (t.dataset.sundo) { V.rej.delete(t.dataset.sundo); render(); }
     else if (t.dataset.srestore) restore(t.dataset.srestore);
     else if (t.dataset.sconfirm) confirm(t.dataset.sconfirm);
