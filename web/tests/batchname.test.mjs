@@ -68,3 +68,13 @@ test("按实际发送批次分组：Gift 第一批 恰好 32 条，组数量 = �
   assert.equal(G.reduce((a, g) => a + g.items.length, 0), all.length); // 不多不少
   assert.equal(groupCount({ items: [1, 2], sent: null }), "2个"); // 拿不到发送数：只显示列表数
 });
+import { readFileSync } from "node:fs";
+test("预筛选组标题不再显示批次名与条数（分组本身保留）", () => {
+  const src = readFileSync(new URL("../js/screen.js", import.meta.url), "utf8");
+  assert.ok(!/sc-glabel|esc\(G\.label\)|groupCount\(G\)/.test(src), "组标题不渲染 G.label / 条数");
+  assert.ok(/data-sgroup=/.test(src) && /data-sselb=/.test(src), "仍按组分隔并保留全选本组");
+});
+test("批次芯片列表已移除，单批次链接保留返回全部入口", () => {
+  const src = readFileSync(new URL("../js/screen.js", import.meta.url), "utf8");
+  assert.ok(!/sc-bchip|获取链接批次/.test(src)); assert.ok(/href="#\/screen" data-sall/.test(src));
+});

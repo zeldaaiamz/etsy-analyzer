@@ -90,13 +90,12 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
   }
 
   // 预筛选批次列表：「<关键词> 第N批」，按关键词分组（最近发送的关键词在前），组内按发送顺序
-  function renderBatches() {
-    const el = $("screenBatches"); if (!el) return; const G = screenBatchGroups(V.sbatches || []);
-    if (!G.length) { el.innerHTML = ""; return; }
-    const demo = (V.sbatches || []).some((b) => b.demo) ? ' <span class="pill pill-bad">演示数字</span>' : "";
-    el.innerHTML = `<div class="sc-blist"><div class="sc-bgrp"><span class="sc-bkw">获取链接批次${demo}</span><a class="fchip sc-bchip${V.batch ? "" : " active"}" href="#/screen">全部</a></div>${G.map((g) =>
-      `<div class="sc-bgrp"><span class="sc-bkw">${esc(g.keyword)}</span>${g.items.map((it) => `<a class="fchip sc-bchip${V.batch === it.id ? " active" : ""}" href="#/screen/${esc(it.id)}">${esc(it.label)}</a>`).join("")}</div>`).join("")}</div>`;
+  function renderBatches() { // 批次芯片列表已移除；旧链接 #/screen/<批次> 仍只看该批次，并给出返回「全部」的入口
+    const el = $("screenBatches"); if (!el) return;
+    const demo = (V.sbatches || []).some((b) => b.demo) ? '<span class="pill pill-bad">演示数字</span>' : "";
+    el.innerHTML = V.batch || demo ? `<div class="sc-only hint">${V.batch ? `正在查看单个发送批次 · <a href="#/screen" data-sall="1">查看全部</a> ` : ""}${demo}</div>` : "";
   }
+
   function render() {
     V.bidx = batchIndex(V.sbatches || []); renderBatches();
     { const el = $("screenCounts"); if (el) {       const nSel = [...V.sel].filter((id) => V.items.some((it) => it.id === id)).length, demoTag = (V.sbatches || []).some((b) => b.demo) ? ' <span class="pill pill-bad">演示数字</span>' : "";
@@ -129,7 +128,7 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
       const allWait = st === "loading" && b.filter(fetchingIt).length && b.filter(fetchingIt).every(waiting) && !nReady;
       const prog = allWait ? `<span class="pill pill-warn">等待明日 EHunt 额度（${b.filter(waiting).length} 条）</span>` : st === "loading" ? `<span class="sc-prog"><span style="width:${Math.round((nReady / b.length) * 100)}%"></span></span><span class="hint">加载中 ${nReady}/${b.length}</span>`
         : st === "ready" ? `<span class="pill pill-info">可确认</span>` : "";
-      return `<section class="sc-batch sc-${st}" data-sbatch="${i}"><div class="sc-bh"><h3 class="sc-glabel">${esc(G.label)} <span class="hint" title="${G.sent != null && G.sent !== G.items.length ? `这次发送建了 ${G.sent} 条，列表中现有 ${G.items.length} 条（其余已进入分析、已删除或被去重）` : "列表中的条数 = 这次发送的条数"}">· ${groupCount(G)}${V.tab !== "all" ? ` · 当前显示 ${show.length}` : ""}</span>${i === 0 ? demoTag : ""}</h3><button type="button" class="btn btn-ghost btn-xs" data-sselb="${esc(G.ids.join(","))}"${G.items.some(deletable) ? "" : " disabled"}>全选本批</button>${prog}<span class="spacer"></span>${btn}</div>
+      return `<section class="sc-batch sc-${st}" data-sbatch="${i}" data-sgroup="${esc(G.key)}"><div class="sc-bh"><span class="sc-gdiv" aria-hidden="true"></span><button type="button" class="btn btn-ghost btn-xs" data-sselb="${esc(G.ids.join(","))}" aria-label="全选本组" title="选中本组所有可操作的链接"${G.items.some(deletable) ? "" : " disabled"}>全选本批</button>${prog}<span class="spacer"></span>${btn}</div>
         ${show.length ? `<div class="sc-grid">${show.map((it) => card(it, st)).join("")}</div>` : `<p class="hint sc-none">本批没有符合筛选的条目</p>`}</section>`;
     }).join("");
     const readyAll = bs.filter((b) => batchState(b) === "ready").flatMap(pendingOf), keepAll = readyAll.filter((it) => !V.rej.has(it.id)).length;

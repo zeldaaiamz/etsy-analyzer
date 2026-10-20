@@ -453,18 +453,11 @@ function quotaPlan(n, justAdded = 0) {
 function renderQuota() {
   const el = $("quotaMeter"), q = quota();
   if (!S.status) return el.classList.add("hidden");
-  if (q.unknown) { // 异常/未知：只显示状态文字（不画进度条、不显示 /200），细节放 tooltip
-    el.className = `qmeter ${q.anomaly ? "qm-bad" : "qm-unk"} qm-state`;
-    const last = lastGoodQuota(), pu = ts(S.status.ehunt_paused_until);
-    el.title = (q.anomaly
-      ? [`EHunt 服务异常：${anomalyReason(S.status.reason)}`, pu ? `约 北京时间 ${bjTime(pu)} 自动重试` : "", last]
-      : ["今天还没有从 EHunt 拿到额度数据（最近一次响应没有额度信息或记录已过期）", last]).filter(Boolean).join("\n");
-    el.innerHTML = `<span class="qm-n"><b>${q.anomaly ? "EHunt 服务异常" : "额度未知"}</b></span>`;
-    return;
-  }
+  // 读不到额度（032 的 异常/未知 状态）：右上角什么都不显示（EHunt 服务异常仍由页面横幅提示；worker 的 daily_limit 暂停逻辑不变）
+  if (q.unknown) { el.className = "qmeter hidden"; el.title = ""; el.innerHTML = ""; return; }
   el.title = "";
   const pct = Math.min(100, Math.round(q.used / q.limit * 100));
-  el.className = `qmeter${q.exhausted ? " qm-bad" : pct >= 80 ? " qm-warn" : ""}`;
+  el.classList.remove("hidden"); el.className = `qmeter${q.exhausted ? " qm-bad" : pct >= 80 ? " qm-warn" : ""}`;
   el.innerHTML = `<span class="qm-t">今日 EHunt 额度</span><span class="qm-bar"><i style="width:${pct}%"></i></span><span class="qm-n"><span class="qm-u">已用 </span><b>${q.used}</b> / ${q.limit}</span>`;
 }
 // 上次正常额度（worker 熔断时保留 used/remaining/quota_at）：如“上次正常 10-15 21:32 已用 97/200”
@@ -493,9 +486,8 @@ function renderBanners() {
   const kfmt = (n) => n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
   const parts = [u.ehunt && `Etsy 数据 <b>${u.ehunt.calls}</b> 次${u.ehunt.cache_hits ? `（缓存 ${u.ehunt.cache_hits}）` : ""}`,
     u.keepamore && `亚马逊数据 <b>${u.keepamore.units}</b> 点`, u.deepseek && `AI <b>${kfmt(u.deepseek.units)}</b> 字`].filter(Boolean);
-  const q = quota(), rem = q.remaining, el = $("usage");
-  const remTxt = rem != null ? ` · Etsy 额度剩余 <b>${rem}</b>` : !S.status ? "" : q.anomaly ? ` · <span class="u-bad">Etsy 额度：EHunt 服务异常</span>` : ` · <span class="u-unk">Etsy 额度未知</span>`;
-  el.innerHTML = parts.length || remTxt ? `今日用量：${parts.join(" · ") || "0"}${remTxt}` : "";
+  const el = $("usage"); // 今日用量不再显示 Etsy 额度（剩余 / 未知 / 异常）；各数据源用量照常
+  el.innerHTML = parts.length ? `今日用量：${parts.join(" · ")}` : "";
   el.title = "Etsy 数据 = EHunt（每条新商品 1 次，缓存命中不计）\n亚马逊数据 = Keepamore（Keepa 数据点）\nAI = DeepSeek（tokens，约等于字数）\n按 UTC 日统计（北京时间 8:00 刷新）";
 }
 
