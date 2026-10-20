@@ -30,3 +30,11 @@ test("每条链接已发送标记：只有实际发送（含去重算已发送�
   assert.deepEqual(linkSentFlags({ sent_to_screen_at: AT2, sent_count: null }, 2), [true, true]); // 038 旧标记 = 整批
   assert.deepEqual(linkSentFlags({ sent_to_screen_at: AT2, sent_count: 9 }, 2), [true, true]);
 });
+import { sentInfo as sentInfo2, historySendNos as hsn, linkSentFlags as lsf } from "../js/selscreen.js";
+test("044 自动发送：历史标签「已自动发送」；部分自动发送后的勾选仍按 sent_count", () => {
+  const runs = [{ id: "r", keyword: "Gift", sel_batches: [{ batch_no: 1, sent_to_screen_at: "2026-10-20T01:00:00Z", sent_count: 32, passed_count: 32, auto_sent_at: "2026-10-20T01:00:00Z" }] }];
+  assert.equal(sentInfo2(runs[0].sel_batches, "Gift", hsn(runs), "r").text, "Gift 第一批 · 已自动发送");
+  const b = { sent_to_screen_at: "2026-10-20T01:00:00Z", sent_count: 120, auto_sent_at: "2026-10-20T01:00:00Z", auto_pending: true };
+  const f = lsf(b, 341); assert.equal(f.filter(Boolean).length, 120); assert.ok(f[119] && !f[120]);
+  assert.equal(lsf({ ...b, sent_count: 341, auto_pending: false }, 341).every(Boolean), true); // 补发完成后全部勾选
+});
