@@ -68,6 +68,15 @@ export function sendPlan(batches, linksOf, single) {
 }
 // 等待了多久（box 暂停时排队会很久，给出提示，不是卡死）
 export const waitedMin = (iso, now = Date.now()) => (iso ? Math.max(0, Math.floor((now - Date.parse(iso)) / 60000)) : 0);
+
+// 043 关键词查询记录：提交前提示「该关键词在X月X日已经查询过」（日期按 Asia/Shanghai，新的在前，同日只列一次）
+const SH_MD = (t) => { const d = new Date(Date.parse(t) + 8 * 36e5); return `${d.getUTCMonth() + 1}月${d.getUTCDate()}日`; };
+export const kwKey = (s) => normKw(s).toLowerCase();
+export function seenDates(times) { const out = []; for (const t of [...(times || [])].sort((a, b) => Date.parse(b) - Date.parse(a))) { const m = SH_MD(t); if (!out.includes(m)) out.push(m); } return out; }
+export function seenWarn(times) { const d = seenDates(times); return d.length ? `该关键词在${d.join("、")}已经查询过` : ""; }
+export function kwLogCsv(rows) { const c = (v) => { let x = String(v ?? ""); if (/^[=+\-@\t\r]/.test(x)) x = "'" + x; return /[",\n]/.test(x) ? `"${x.replace(/"/g, '""')}"` : x; };
+  const fmt = (t) => new Date(Date.parse(t) + 8 * 36e5).toISOString().slice(0, 19).replace("T", " ");
+  return "\ufeff关键词,查询时间（北京时间）,来源\n" + (rows || []).map((r) => [r.keyword, fmt(r.queried_at), r.source].map(c).join(",")).join("\n") + "\n"; }
 export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
   const QSP = new URLSearchParams(location.search);
   const V = { addErr: "", run: null, batches: [], links: {}, open: new Set(), timer: null, fx: null, demoRuns: {}, recent: null, limErr: "", busy: new Set(), seq: 0, lastSt: null, sending: false };
@@ -83,6 +92,14 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
   const KW_MAX = 200;
   // 防重复点击：同一动作进行中再点/回车直接忽略（QA 2026-10-19 #1：连点“查询数量”会建 2 个任务）
   // 037 抓取队列（竖向列表，见 selqueue.js）：本页任务的状态被队列按钮改了 → 刷新本页
+  const DEMO_KWLOG = DEMO ? [ // 演示数字
+    { keyword: "acrylic decoration", queried_at: "2026-10-18T02:10:00Z", source: "sel_count" }, { keyword: "Acrylic  Decoration", queried_at: "2026-10-12T06:30:00Z", source: "sel_count" },
+    { keyword: "wedding sign", queried_at: "2026-10-09T03:00:00Z", source: "backfill_batches" }] : [];
+  async function exportKwLog() {
+    let rows = DEMO_KWLOG;
+    if (!DEMO) { const r = await getSb().from("sel_keyword_log").select("keyword,queried_at,source").order("queried_at", { ascending: false }).limit(10000); if (r.error) return toast(`导出失败：${r.error.message}`, "bad"); rows = r.data; }
+    const a = document.createElement("a"); a.href = URL.createObjectURL(new Blob([kwLogCsv(rows)], { type: "text/csv" })); a.download = `关键词查询记录_${rows.length}.csv`; document.body.appendChild(a); a.click(); setTimeout(() => { URL.revokeObjectURL(a.href); a.remove(); }, 500);
+  }
   const SQ = createSelQueue({ $, esc, toast, getSb, DEMO, confirmDialog, friendlyErr, onChange: (id) => { if (V.run?.id === id) load(id); } });
   async function guard(key, fn) { if (V.busy.has(key)) return; V.busy.add(key); try { return await fn(); } finally { V.busy.delete(key); } }
 
@@ -139,7 +156,12 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
     const kw = normKw($("ssKw").value); if (!kw) return toast("请输入关键词", "bad");
     if (kw.length > KW_MAX) return toast(`关键词太长（${kw.length} 字），最多 ${KW_MAX} 字`, "bad");
     $("ssKw").value = kw; const btn = $("ssCount"); if (btn) btn.disabled = true;
-    if (DEMO) return demoCount(kw);
+    // 043：一次索引查询；RPC 不存在（043 未执行）或出错时不拦提交
+    let seen = [];
+    if (DEMO) seen = DEMO_KWLOG.filter((r) => kwKey(r.keyword) === kwKey(kw)).map((r) => r.queried_at);
+    else { const s = await getSb().rpc("sel_keyword_seen", { p_keyword: kw }); if (!s.error && Array.isArray(s.data)) seen = s.data; }
+    if (seen.length && !await confirmDialog({ title: "这个关键词查询过", ok: "仍然查询", body: `<p class="warn ss-seen">${esc(seenWarn(seen))}</p><p class="hint">共 ${seen.length} 次（新的在前）。仍可继续查询。${DEMO ? "</p><p><span class=\"pill pill-bad\">演示数字</span>" : ""}</p>` })) { if (btn) btn.disabled = false; return; }
+    if (DEMO) { DEMO_KWLOG.unshift({ keyword: kw, queried_at: new Date().toISOString(), source: "sel_count" }); return demoCount(kw); }
     const { data, error } = await getSb().rpc("sel_count", { p_keyword: kw, p_params: FILTERS });
     if (error) {
       if (btn) btn.disabled = false;
@@ -482,7 +504,7 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
     const ST = { count_queued: "排队查询数量", counting: "读取结果数中", queued: "排队中（等待 box 抓取进程）", running: "读取 EHunt 列表页中", batch_done: "本批完成", succeeded: "全部完成", failed: "失败", canceled: "已停止" };
     const prog = progressPanel(r);
     $("ssStart").innerHTML = `<div id="ssRecent"></div><div class="card ss-start"><div class="ss-form"><input id="ssKw" class="input" maxlength="${KW_MAX}" placeholder="EHunt 关键词，例如 acrylic decoration" value="${esc($("ssKw")?.value || r?.keyword || "")}">
-        <button class="btn btn-primary" id="ssCount"${active(r) ? " disabled" : ""}>查询数量</button></div>${countPanel(r)}${prog}</div>`; DEMO ? loadRecent() : renderRecent();
+        <button class="btn btn-primary" id="ssCount"${active(r) ? " disabled" : ""}>查询数量</button><button class="btn btn-ghost btn-sm" id="ssKwLog" title="导出全部关键词查询记录（永久保留）">导出查询记录 CSV</button></div>${countPanel(r)}${prog}</div>`; DEMO ? loadRecent() : renderRecent();
     const done = V.batches.filter((b) => FIN.includes(b.status));
     const all = [...new Set(done.flatMap((b) => V.links[b.id] || []))], exAll = done.reduce((a, b) => a + (b.excluded_count || 0), 0);
     const exR = {}; done.forEach((b) => Object.entries(b.excluded_by_reason || {}).forEach(([k, v]) => exR[k] = (exR[k] || 0) + v));
@@ -502,6 +524,7 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
   }
   document.addEventListener("click", (e) => {
     const t = e.target, id = t.id;
+    if (id === "ssKwLog") return exportKwLog();
     if (id === "ssCount") return guard("count", count); if (id === "ssGo") return guard("start", start); if (id === "ssStop") return guard("cancel", cancel);
     if (id === "ssResume") return guard("resume", resume);
     const ps = t.closest?.("[data-ssps]"); if (ps) return guard("send", () => prescreen(ps.dataset.ssps));
