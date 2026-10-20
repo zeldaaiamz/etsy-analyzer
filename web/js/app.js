@@ -1,7 +1,7 @@
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
 import { computeVelocity, computeManualVelocity, cmpVelocity, velocityBadge, loadReviewDates, demoReviewDates, loadScrapeInfo } from "./velocity.js";
 import { amzBlock, amzUrls, openAll, applyEdit, kwList, MAX_KW, DIR_SELECT_HTML } from "./amzsearch.js";
-import { createScreen, ANOMALY_PREFIX, anomalyReason } from "./screen.js?v=207235c6";
+import { createScreen, ANOMALY_PREFIX, anomalyReason } from "./screen.js?v=fd831f79";
 import { createExWords } from "./exwords.js?v=c9174633";
 import { createSelScreen } from "./selscreen.js?v=2f5c9410";
 
