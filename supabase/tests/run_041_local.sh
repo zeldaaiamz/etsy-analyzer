@@ -7,7 +7,7 @@ trap '"$P/pg_ctl" -D "$D" stop -m fast >/dev/null; rm -rf "$D"' EXIT
 Q() { psql -h "$D" -p "$PORT" -U postgres -v ON_ERROR_STOP=1 -q -tA "$@"; }
 Q -f tests/039_stub.sql
 Q -c "alter type public.job_status add value 'screening'; alter table public.jobs add column screen_state text, add column screen_hidden_at timestamptz, add column error text;"
-for m in 024 029 030 034 035 037 038 039 041; do Q -f migrations/${m}_*.sql; done
+for m in 024 029 030 034 035 037 038 039; do Q -f migrations/${m}_*.sql; done
 Q -f tests/041_local_pg_test.sql 2>&1 | sed 's/^psql:[^ ]* NOTICE:  /  /'
 # 并发：3 个连接同时用旧网页路径（直接 insert jobs）发同样 20 条 → 列表里只有 20 条
 U=11111111-1111-1111-1111-111111111111
