@@ -470,7 +470,7 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
     const nums = `已读 <b>${n0(read)}</b> / 目标 <b>${n0(target)}</b> 条 · 已判断 ${n0(judged)}${vp ? ` · <span class="ss-pg-v">豆包判断中 ${n0(vp)}</span>` : ""} · 通过 <b class="ss-n-ok">${n0(passed)}</b> · 排除 ${n0(excl)}${overall}`;
     const range = `第 ${b.batch_no} 批（${b.offset_start.toLocaleString()}–${b.offset_end.toLocaleString()}）`;
     if (b.status === "failed" || r.status === "failed") {
-      const where = { read_setup: "打开 EHunt / 设置筛选", reading: `抓取中（第 ${P.page || "?"} 页）`, vision: "调豆包判断" }[P.stage] || "抓取";
+      const where = { read_setup: "打开 EHunt / 设置筛选", reading: `抓取中（第 ${P.page || "?"} 页）`, page_retry: `第 ${P.page || "?"} 页超时重试`, vision: "调豆包判断" }[P.stage] || "抓取";
       const numsF = nums.replace(/ · <span class="ss-pg-v">豆包判断中 [\d,]+<\/span>/, vp ? ` · 未判断 ${n0(vp)}` : "");   // 已停止：不再说“判断中”
       return wrap("ss-pg-bad", '<span class="pill pill-bad">失败</span>', `${range} · 停在「${where}」 ${pct}%${errH ? ` · ${errH}` : ""}`, bar(pctR, pctJ, "ss-pg-fail"), numsF);
     }
@@ -484,6 +484,8 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
       : P.stage === "vision" ? ["调豆包判断中", `列表已读完，剩 ${n0(vp || Math.max(0, read - judged))} 条等豆包判断`]
       : P.stage === "read_setup" || (!P.stage && !judged) ? ["打开 EHunt · 设置筛选中", P.page > 1 ? `从第 ${P.page} 页续读` : ""]
       : ["抓取中", P.page ? `第 ${P.page} 页${vp ? ` · 同时豆包判断 ${n0(vp)} 条` : ""}` : ""];
+    if (P.retry > 0 && (P.stage === "page_retry" || P.stage === "read_setup" || P.stage === "reading"))   // worker 单页超时自动重试中
+      stg[1] = `<span class="warn">第 ${P.page || "?"} 页读取超时，正在重新打开重试（第 ${P.retry}${P.retry_max ? `/${P.retry_max}` : ""} 次）</span>`;
     return wrap("ss-pg-run", `<span class="pill pill-info"><span class="spin"></span> ${stg[0]}</span>`, `${range} · <b>${pct}%</b>${stg[1] ? ` · ${stg[1]}` : ""}`, bar(pctR, pctJ), nums);
   }
   // ---------- 界面 ----------
