@@ -548,12 +548,12 @@ def process_batch(store, run, batch, scraper):
     pool = ThreadPoolExecutor(max_workers=VISION_CONC, thread_name_prefix="vision")
     try:
         for row in scraper:
-            if n_seen % 20 == 0 and store.run(rid).get("status") == "canceled":
+            if n_seen % 20 == 0 and (st_now := store.run(rid).get("status")) in ("canceled", "paused"):   # 037：暂停 = 停在断点，批次标记已停止，继续时从断点读
                 for prow, k, v in pend:
                     if k == "vision": v.cancel()
                     if k != "dup": seen.discard(str(prow["listing_id"]))   # 未落定的行：继续本批时要重新读
                 pool.shutdown(wait=True, cancel_futures=True); pend.clear()
-                store.patch_batch(batch["id"], status="canceled", finished_at=NOW()); flush(); tick(force=True, stage="canceled"); return "canceled"
+                store.patch_batch(batch["id"], status="canceled", finished_at=NOW()); flush(); tick(force=True, stage=st_now); return st_now
             n_seen += 1; lid = str(row["listing_id"])
             if lid in seen: pend.append((row, "dup", None))       # 跨批/同批重复：不重复调用、不重复入库
             else:
@@ -589,7 +589,8 @@ def process_batch(store, run, batch, scraper):
         s0 = batch["offset_end"] + 1; e0 = min(batch["offset_end"] + (run.get("batch_size") or 1000), run["max_rows"])
         try:
             store.new_batch({"run_id": rid, "user_id": run["user_id"], "batch_no": bno + 1, "offset_start": s0, "offset_end": e0, "page_start": (s0 + 19) // 20, "page_end": (e0 + 19) // 20})
-            store.patch_run(rid, status="queued", current_batch=bno + 1, **upd)
+            paused = run.get("status") == "paused"   # 037：本批最后 20 行内点了暂停 → 下一批排好但保持暂停
+            store.patch_run(rid, status="paused" if paused else "queued", current_batch=bno + 1, **upd)
         except urllib.error.HTTPError as e:
             # 例：024 的 batch_no ≤ 5 约束（先读 200 条再一键读取全部 4,800 → 第 6 批插不进去）。本批已完成，不能让外层把它改成“已停止”，
             # 否则「继续本批」会重排一个已读完的批次并再次失败。→ 本批完成 + 提示手动继续（035 去掉该约束后不再发生）

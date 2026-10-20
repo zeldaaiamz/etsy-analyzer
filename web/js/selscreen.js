@@ -2,6 +2,7 @@
 // ① 关键词 → 查 EHunt 结果数（价格 8–40 · 总销量 ≥100 · 7 天销量 >3 · 按 7 天销量降序）→ ② 填最多读取条数 → 抓取（box 上的 worker，不在阿里云）
 // ③ 标题规则先筛：排除的不调豆包、不显示、不入库（页面只一行汇总；原因写 box 本地日志 3 天）→ ④ 通过的调豆包视觉 → 显示符合要求 N 条 + 纯 Etsy 链接
 // ⑤ >1000 分批，每批 1000，最多 5 批 / 5,000；“还剩 N 条未读”只在每批完成后更新 ⑥ 只有符合要求的入库，保留 3 天 ⑦ 网页无搜索，查询找序猿
+import { createSelQueue } from "./selqueue.js?v=91487c42";
 const BATCH = 1000, MAX_ROWS = 5000; // 每批 1000，最多读到 EHunt 第 5,000 条（分批次数不再单独限制，第 1 批可能不足 1000）
 const RORDER = ["定制", "IP", "材质", "素材/数字文件", "7天销量≤3", "其他"];
 // ---- 纯函数（web/tests/selscreen.test.mjs）----
@@ -45,6 +46,8 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
   const FIN = ["done", "canceled", "failed"]; // 批次已结束（停止/失败的批次也保留已通过的链接）
   const KW_MAX = 200;
   // 防重复点击：同一动作进行中再点/回车直接忽略（QA 2026-10-19 #1：连点“查询数量”会建 2 个任务）
+  // 037 抓取队列（竖向列表，见 selqueue.js）：本页任务的状态被队列按钮改了 → 刷新本页
+  const SQ = createSelQueue({ $, esc, toast, getSb, DEMO, confirmDialog, friendlyErr, onChange: (id) => { if (V.run?.id === id) load(id); } });
   async function guard(key, fn) { if (V.busy.has(key)) return; V.busy.add(key); try { return await fn(); } finally { V.busy.delete(key); } }
 
   // ---------- 演示（不连 Supabase） ----------
@@ -248,6 +251,7 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
   }
   function schedule() { clearTimeout(V.timer); if (!DEMO && active(V.run) && location.hash.startsWith("#/selscreen")) V.timer = setTimeout(() => load(V.run.id), 3000); }
   async function load(runId) {
+    SQ.load();
     if (DEMO) { V.fx ||= (await import("./demo-selection.js")).selectionFixtures(); if (runId === "demo-prog" && !V.demoRuns[runId]) demoProgress(QSP.get("sprog") || "reading"); demoRecentRun(runId); loadRecent(); V.run = V.demoRuns[runId]?.run || null; return refresh(); }
     const sb = getSb(); if (!sb) return;
     const seq = ++V.seq, stale = () => seq !== V.seq; // 快速切换标签/轮询时，旧请求晚到不能覆盖当前任务
@@ -294,6 +298,7 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
       const w = waitedMin(r.created_at), wt = w >= 2 ? `<span class="warn">已等待 ${w} 分钟（box 可能暂停，恢复后自动继续；也可以取消后重试）</span>` : "";
       return wrap("ss-pg-run", `<span class="pill pill-info"><span class="spin"></span> ${i < 0 ? "排队查询数量（等待 box 抓取进程）" : "查询数量中"}</span>`, i < 0 ? wt : `第 ${i + 1}/3 步`, bar(pct, pct, "ss-pg-ind"), `<span class="ss-pg-steps">${steps}</span>`);
     }
+    if (r.status === "paused") return wrap("ss-pg-paused", '<span class="pill pill-warn">⏸ 已暂停</span>', "不会被抓取；在上方「抓取队列」点「继续」从断点接着读", "", "");
     // ② 抓取（本批）
     const b = cur || (["batch_done", "succeeded", "failed"].includes(r.status) ? last : null);
     if (!b) return r.status === "canceled" ? (r.error ? wrap("ss-pg-bad", '<span class="pill pill-bad">已停止</span>', errH, "", "") : "") : r.status === "failed" ? wrap("ss-pg-bad", '<span class="pill pill-bad">失败</span>', errH, "", "") : "";

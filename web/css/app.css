@@ -568,3 +568,15 @@ html,body{overflow-x:hidden}
 .ss-pg-sep{color:var(--text-3);margin:0 2px}
 @media (max-width:640px){.ss-pg{padding:10px 12px}.ss-pg-stats{font-size:12px}.ss-pg-top .spacer{display:none}}
 @media (prefers-reduced-motion:reduce){.ss-pg-ind .jd{animation:none}.ss-pg-bar i{transition:none}}
+/* 037 抓取队列（下载管理器式竖向列表） */
+.ss-queue{margin-top:12px}.ss-q-head{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.ss-q-sec{font-size:12px;color:var(--text-2);margin:12px 0 4px;font-weight:600;cursor:default}details.ss-q-endd>summary{cursor:pointer}
+.ss-q-list{list-style:none;margin:0;padding:0;border:1px solid var(--border);border-radius:var(--r);overflow:hidden}
+.ss-q-row{padding:9px 12px;border-top:1px solid var(--border);background:var(--surface)}.ss-q-row:first-child{border-top:0}
+.ss-q-running{background:var(--info-bg)}.ss-q-problem{background:var(--bad-bg)}.ss-q-paused{opacity:.85}
+.ss-q-main{display:flex;align-items:center;gap:8px;flex-wrap:wrap;min-height:30px}
+.ss-q-pos{width:22px;height:22px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-size:12px;background:var(--surface-2);color:var(--text-2);flex:none}
+.ss-q-kw{font-weight:600;color:var(--text)}.ss-q-acts{display:flex;gap:4px;flex-wrap:wrap}.ss-q-acts .btn{min-width:32px}
+.ss-q-row .ss-pg-bar{margin:6px 0 4px}.ss-q-row>.hint,.ss-q-row>.warn{font-size:12px;margin-left:30px}
+.pill-mute{background:var(--surface-2);color:var(--text-2)}.ss-q-del:hover{color:var(--bad)}.ss-q-off{margin:8px 0 0}
+@media (max-width:640px){.ss-q-acts{width:100%;justify-content:flex-end}.ss-q-row>.hint,.ss-q-row>.warn{margin-left:0}}

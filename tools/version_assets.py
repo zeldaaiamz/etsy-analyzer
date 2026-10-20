@@ -4,6 +4,8 @@
 import hashlib, pathlib, re
 web = pathlib.Path(__file__).resolve().parent.parent / "web"
 html = (web / "index.html").read_text()
+sel = web / "js" / "selscreen.js"   # selscreen.js 自己 import 的 selqueue.js：先打哈希进 selscreen.js
+sel.write_text(re.sub(r'"\./selqueue\.js(\?v=[0-9a-f]+)?"', f'"./selqueue.js?v={hashlib.sha1((web / "js" / "selqueue.js").read_bytes()).hexdigest()[:8]}"', sel.read_text()))
 app = web / "js" / "app.js"  # 子模块（screen.js）先打哈希进 app.js，再算 app.js 自己的哈希
 src = app.read_text()
 for mod in ("screen", "selscreen", "exwords"):   # app.js 直接 import 的子模块：改了任何一个都要换哈希，否则浏览器用旧缓存
