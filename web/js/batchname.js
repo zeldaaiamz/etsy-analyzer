@@ -53,3 +53,6 @@ export function deletePlan(selIds, items, batches) {
   const S = new Set(selIds), L = (items || []).filter((it) => S.has(it.id) && deletable(it));
   return { ids: L.map((it) => it.id), n: L.length, rows: batchCountRows(L, batches).map((r) => ({ label: r.label, n: r.n })).concat((() => { const M = batchIndex(batches), k = L.filter((it) => !M.has(it.batch_id)).length; return k ? [{ label: "其他", n: k }] : []; })()) };
 }
+// 条目来源标签：只按该任务自己的 jobs.batch_id（建任务的批次，之后从不改写）查批次列表，不看标题/关键词文字/位置。
+// 批次列表还没加载 → 空（不猜）；批次不是「获取链接」建的（任务页手动粘贴、重新分析）→「其他来源」
+export function sourceLabel(item, idx) { if (!idx || !item?.batch_id) return ""; const x = idx.get(item.batch_id); return x ? itemSrc(x) : "其他来源"; }

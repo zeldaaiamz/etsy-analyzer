@@ -40,3 +40,17 @@ test("删除所选：可选范围与确认框各批数量", () => {
   assert.equal(p.n, 4); assert.deepEqual(p.ids, [1, 2, 3, 5]);
   assert.deepEqual(p.rows, [{ label: "Alex kitchen 第一批", n: 1 }, { label: "reason 第一批", n: 2 }, { label: "其他", n: 1 }]);
 });
+import { sourceLabel, batchIndex as bIdx } from "../js/batchname.js";
+test("来源标签严格按 jobs.batch_id：与标题文字 / 位置无关", () => {
+  const B = [["reason", 1, "01"], ["Alex kitchen", 1, "02"], ["reason", 2, "03"], ["Alex kitchen", 2, "04"], ["reason", 3, "05"]]
+    .map(([k, n, t], i) => ({ id: `pb${i}`, name: `获取链接 ${k} 第${n}批 10-19 ${t}:00`, created_at: `2026-10-19T${t}:00:00Z` }));
+  const expect = { pb0: "reason", pb1: "Alex kitchen", pb2: "reason + reason 第二批", pb3: "Alex kitchen + Alex kitchen 第二批", pb4: "reason + reason 第三批" };
+  // 1–50 区域：50 条交错来自 5 个批次，标题故意写成别的关键词
+  const ids = Object.keys(expect), items = Array.from({ length: 50 }, (_, i) => ({ id: `j${i}`, batch_id: ids[(i * 7) % 5], title: i % 2 ? "reason gift" : "Alex kitchen sign" }));
+  const idx = bIdx(B); for (const it of items) assert.equal(sourceLabel(it, idx), expect[it.batch_id], `${it.id} → ${it.batch_id}`);
+  // 同一 listing 两个任务（重复 / 重发）：各自按建任务的批次显示
+  const dup = [{ id: "d1", batch_id: "pb0", listing_id: 1 }, { id: "d2", batch_id: "pb2", listing_id: 1 }];
+  assert.deepEqual(dup.map((it) => sourceLabel(it, idx)), ["reason", "reason + reason 第二批"]);
+  assert.equal(sourceLabel({ batch_id: "manual" }, idx), "其他来源");
+  assert.equal(sourceLabel({ batch_id: "pb0" }, null), ""); // 批次列表未加载：不猜
+});
