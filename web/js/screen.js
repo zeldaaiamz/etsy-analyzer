@@ -2,6 +2,7 @@
 // → 每批“分析剩余数据”或底部“全部已加载”一键确认 → 只有保留的进入 DeepSeek / Keepamore / 截图（017 screen_confirm）
 export const BATCH = 50;
 const POLL_MS = 3000;
+import { screenBatchGroups } from "./batchname.js";
 // EHunt 账号/服务异常（与商品本身无关）：新 worker 写 'EHunt 服务异常（原因）'；旧 worker 写 'EHunt 错误 500: 查询失败: …'
 export const EHUNT_ANOMALY_RE = /EHunt 服务异常|EHunt 错误 5\d\d|查询失败|daily_limit/;
 export const ANOMALY_PREFIX = "EHunt 服务异常";
@@ -11,7 +12,7 @@ export function anomalyReason(err) {
 }
 
 export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDialog, getStatus = () => null }) {
-  const V = { loadErr: null, items: [], batch: null, tab: "all", rej: new Set(), imgOk: new Set(), busy: new Set(), loaded: false, timer: null, demo: null };
+  const V = { loadErr: null, items: [], batch: null, tab: "all", rej: new Set(), imgOk: new Set(), busy: new Set(), loaded: false, timer: null, demo: null, sbatches: null };
   const thumb = (u) => (/^https:\/\/i\.etsystatic\.com\//.test(u || "") ? u.replace(/\/il_[0-9a-zA-Z]+x[0-9a-zA-Z]+\./, "/il_570xN.") : u);
   const hasData = (it) => it.status === "screening" || it.screen_state === "rejected" || it.screen_state === "kept";
   const fetchingIt = (it) => (it.status === "queued" || it.status === "running") && it.screen_state !== "kept";
@@ -33,7 +34,10 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
   async function load() {
     if (DEMO) return;
     const sb = getSb(); if (!sb) return;
-    const { data, error } = await sb.rpc("screen_list", V.batch ? { p_batch: V.batch } : {});
+    // 批次列表与 screen_list 并行请求（只在首次 / 切换时取，轮询不重复取），不增加等待时间
+    const bq = V.sbatches ? null : sb.from("batches").select("id,name,created_at").like("name", "获取链接 %").order("created_at", { ascending: true }).limit(1000);
+    const [{ data, error }, br] = await Promise.all([sb.rpc("screen_list", V.batch ? { p_batch: V.batch } : {}), bq]);
+    if (br && !br.error) V.sbatches = br.data || [];
     if (error) { V.loadErr = error.message; toast(`加载筛选列表失败：${error.message}`, "bad"); render(); return; }
     V.items = data || []; V.loaded = true; V.loadErr = null;
     render(); schedule();
@@ -64,7 +68,16 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
       <div class="sc-meta"><b>${esc(price)}</b>${it.title ? `<span class="hint">#${esc(it.listing_id || "")}</span>` : ""}</div></div></div>`;
   }
 
+  // 预筛选批次列表：「<关键词> 第N批」，按关键词分组（最近发送的关键词在前），组内按发送顺序
+  function renderBatches() {
+    const el = $("screenBatches"); if (!el) return; const G = screenBatchGroups(V.sbatches || []);
+    if (!G.length) { el.innerHTML = ""; return; }
+    const demo = (V.sbatches || []).some((b) => b.demo) ? ' <span class="pill pill-bad">演示数字</span>' : "";
+    el.innerHTML = `<div class="sc-blist"><div class="sc-bgrp"><span class="sc-bkw">获取链接批次${demo}</span><a class="fchip sc-bchip${V.batch ? "" : " active"}" href="#/screen">全部</a></div>${G.map((g) =>
+      `<div class="sc-bgrp"><span class="sc-bkw">${esc(g.keyword)}</span>${g.items.map((it) => `<a class="fchip sc-bchip${V.batch === it.id ? " active" : ""}" href="#/screen/${esc(it.id)}">${esc(it.label)}</a>`).join("")}</div>`).join("")}</div>`;
+  }
   function render() {
+    renderBatches();
     const box = $("screenBody"); if (!box) return;
     const bs = batches(), tot = V.items.length;
     const nRej = V.items.filter((it) => V.rej.has(it.id) || it.screen_state === "rejected").length;
@@ -183,6 +196,8 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     V.items = Array.from({ length: n }, (_, i) => ({ id: `demo-s-${i}`, batch_id: "demo", etsy_url: `https://www.etsy.com/listing/${1900000000 + i}/x`, status: "queued", screen_state: null,
       listing_id: 1900000000 + i, title: null, image_url: null, price: null, _t: `${names[i % names.length]}${i >= names.length ? ` · ${["Gift", "Set of 2", "Vintage Style", "Handmade"][i % 4]}` : ""}`, _img: svg(i), _p: 8 + ((i * 7.3) % 60) }));
     const shot = QS.get("sshot") || "";
+    { const t0 = Date.now() - 6 * 864e5, at = (h) => new Date(t0 + h * 36e5).toISOString(), nm = (kw, no, h) => `获取链接 ${kw} 第${no}批 ${new Date(t0 + h * 36e5 + 8 * 36e5).toISOString().slice(5, 16).replace("T", " ")}`; // 演示数字
+      V.sbatches = [["reason", 1, 1], ["Alex kitchen", 1, 2], ["reason", 2, 3], ["Alex kitchen", 2, 4], ["Alex kitchen", 2, 4], ["reason", 1, 5]].map(([k, no, h], i) => ({ id: `demo-pb-${i}`, name: nm(k, no, h), created_at: at(h) + "", demo: true })); }
     const quotaFrom = n > 200 ? 200 : n; // 200 条以后等待明日额度（演示额度队列）
     const fill = (it, i) => { if (i >= quotaFrom) { it.error = "EHunt 今日额度已用完，明日自动继续"; return; } it.status = "screening"; it.screen_state = "awaiting"; it.title = it._t; it.image_url = it._img; it.price = it._p; };
     if (shot === "loading") { // 第 1 批已加载完成可确认；第 2、3 批部分加载；其余仍在取数
