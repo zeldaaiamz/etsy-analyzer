@@ -30,12 +30,17 @@ export function chipText(r) {
   if (r.status === "canceled") return `已停止 · 符合 ${n(r.passed_count)} 条`;
   return `符合 ${n(r.passed_count)} 条`;
 }
+// 最近 3 天查找记录：最多 10 条、新的在前；折叠状态记在 localStorage（默认：桌面展开、手机 ≤560px 收起）
+export const RECENT_N = 10, RECENT_KEY = "sel.recentOpen";
+export function recentOpen(store, narrow) { const v = store?.getItem?.(RECENT_KEY); return v === "1" ? true : v === "0" ? false : !narrow; }
+export function recentList(rows, now = Date.now()) { const since = now - 3 * 864e5; return (rows || []).filter((r) => Date.parse(r.created_at) > since).sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, RECENT_N); }
 // 等待了多久（box 暂停时排队会很久，给出提示，不是卡死）
 export const waitedMin = (iso, now = Date.now()) => (iso ? Math.max(0, Math.floor((now - Date.parse(iso)) / 60000)) : 0);
 export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sendToPrescreen }) {
   const QSP = new URLSearchParams(location.search);
   const V = { addErr: "", run: null, batches: [], links: {}, open: new Set(), timer: null, fx: null, demoRuns: {}, recent: null, limErr: "", busy: new Set(), seq: 0, lastSt: null };
   const FILTERS = { price_min: 8, price_max: 40, min_sales: 100, min_sales_7d: 4, sort: "↓7-day sales" };
+  const ACTIVE_ST = ["count_queued", "counting", "queued", "running"];
   const active = (r) => r && ["count_queued", "counting", "queued", "running"].includes(r.status);
   // 实测数（全部筛选含 7 天销量 Min 4，2026-10-16）。其他词在演示里会生成数字并标“演示数字”
   const MEASURED = { "acrylic decoration": [20, "Find 20 products"], "sign": [1688, "共 1,688 条 / 85 页"] };
@@ -199,17 +204,40 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
       const since = Date.now() - 3 * 864e5, own = Object.values(V.demoRuns).filter((d) => !d.run.id.startsWith("demo-recent")).map((d) => ({ ...d.run, created_at: d.run.created_at || new Date(Number(d.run.id.slice(5))).toISOString(), passed_count: d.batches.reduce((a, b) => a + (b.passed_count || 0), 0) }));
       const fx = [{ id: "demo-recent-gift", keyword: "gift", status: "succeeded", created_at: new Date(Date.now() - 6 * 36e5).toISOString(), passed_count: 6 }, { id: "demo-recent-1", keyword: "acrylic decoration", status: "succeeded", created_at: new Date(Date.now() - 5 * 36e5).toISOString(), passed_count: 7 },
         { id: "demo-recent-2", keyword: "wedding sign", status: "batch_done", created_at: new Date(Date.now() - 30 * 36e5).toISOString(), passed_count: 312 }];
-      V.recent = [...own, ...fx].filter((r) => Date.parse(r.created_at) > since).sort((a, b) => b.created_at.localeCompare(a.created_at)); return renderRecent();
+      if (QSP.has("manyhist")) // 演示：14 条历史（只应显示最近 10 条），数字为演示数字
+        ["teacher gift", "dog mom", "nurse badge", "christmas ornament", "bookmark", "cake topper", "keychain", "door sign", "plant marker", "earrings", "magnet"].forEach((k, i) =>
+          fx.push({ id: `demo-recent-x${i}`, keyword: k, status: ["counted", "running", "succeeded", "canceled", "failed"][i % 5], created_at: new Date(Date.now() - (1 + i * 5) * 36e5).toISOString(), passed_count: 10 + i * 7, total_count: 100 + i * 37, demo: true }));
+      V.recentFx = Object.fromEntries(fx.map((r) => [r.id, r]));
+      V.recent = recentList([...own, ...fx].filter((r) => Date.parse(r.created_at) > since && !V.deleted?.has(r.id))); return renderRecent();
     }
     const sb = getSb(); if (!sb) return;
-    const { data, error } = await sb.from("sel_runs").select("id,keyword,status,created_at,passed_count,total_count").gte("created_at", new Date(Date.now() - 3 * 864e5).toISOString()).order("created_at", { ascending: false }).limit(20);
+    const { data, error } = await sb.from("sel_runs").select("id,keyword,status,created_at,passed_count,total_count").gte("created_at", new Date(Date.now() - 3 * 864e5).toISOString()).order("created_at", { ascending: false }).limit(RECENT_N);
     V.recent = error ? [] : data || []; renderRecent();
   }
   function renderRecent() {
     const el = $("ssRecent"); if (!el) return; const L = V.recent || [];
     const ST = { count_queued: "查询中", counting: "查询中", counted: "待抓取", queued: "排队中", running: "读取中", batch_done: "本批完成", succeeded: "完成", failed: "失败", canceled: "已停止" };
     const t = (iso) => { const d = new Date(iso); return `${d.getMonth() + 1}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };
-    el.innerHTML = !L.length ? "" : `<div class="ss-recent"><span class="hint">最近 3 天：</span>${L.map((r) => `<a class="ss-rchip${V.run?.id === r.id ? " active" : ""}" href="#/selscreen/${esc(r.id)}" title="${esc(ST[r.status] || r.status)}"><b>${esc(r.keyword)}</b> <span class="hint">${t(r.created_at)} · ${esc(chipText(r))}</span></a>`).join("")}</div>`;
+    if (!L.length) { el.innerHTML = ""; return; }
+    const open = recentOpen(globalThis.localStorage, globalThis.matchMedia?.("(max-width:560px)").matches), demo = L.some((r) => r.demo) ? ' <span class="pill pill-bad">演示数字</span>' : "";
+    el.innerHTML = `<div class="ss-recent${open ? " open" : ""}"><button type="button" class="ss-rhead" data-ssrtog aria-expanded="${open}"><b>最近 3 天查找记录（${L.length}）</b>${demo}<span class="spacer"></span><span class="ss-rtog">${open ? "收起 ▴" : "展开 ▾"}</span></button>
+      ${open ? `<div class="ss-rlist">${L.map((r) => { const busy = ACTIVE_ST.includes(r.status);
+        return `<div class="ss-rrow${V.run?.id === r.id ? " active" : ""}"><a class="ss-rlink" href="#/selscreen/${esc(r.id)}" title="${esc(ST[r.status] || r.status)}"${V.run?.id === r.id ? ' aria-current="true"' : ""}><b class="ss-rkw">${esc(r.keyword)}</b><span class="ss-rtime hint">${t(r.created_at)}</span><span class="ss-rst">${esc(chipText(r))}</span></a><button type="button" class="ss-rdel" data-ssrdel="${esc(r.id)}"${busy ? ' disabled title="进行中的任务不能删除，请先停止"' : ' title="删除这条记录"'} aria-label="删除 ${esc(r.keyword)}">🗑</button></div>`; }).join("")}</div>` : ""}</div>`;
+  }
+  // 删除一条查找记录（连同批次和链接）。进行中（查询中/排队中/读取中）的不能删：按钮禁用，需先停止（RPC 也会拒绝）
+  async function delRecent(id) {
+    const r = (V.recent || []).find((x) => x.id === id); if (!r) return;
+    if (ACTIVE_ST.includes(r.status)) return toast("进行中的任务不能删除，请先停止", "bad");
+    if (!await confirmDialog({ title: "删除这条查找记录？", ok: "删除", body: `<p>将删除「<b>${esc(r.keyword)}</b>」这次查找的全部结果（${esc(chipText(r))}），包括已通过的链接，删除后不能恢复。</p><p class="hint">已送去预筛选的任务不受影响。</p>` })) return;
+    if (DEMO) { (V.deleted ||= new Set()).add(id); delete V.demoRuns[id]; }
+    else {
+      const { data, error } = await getSb().rpc("sel_delete_run", { p_run: id });
+      if (error) return toast(/sel_delete_run|function .* does not exist|schema cache/i.test(error.message) ? "删除功能需要后台更新 038（尚未执行）" : `删除失败：${error.message}`, "bad");
+      if (!data) { toast("这条记录已不存在或已被删除", "bad"); }
+    }
+    toast(`已删除「${r.keyword}」`, "ok");
+    if (V.run?.id === id) { V.run = null; V.batches = []; V.links = {}; location.hash = "#/selscreen"; }
+    loadRecent();
   }
   // ---------- 数据 ----------
   function refresh() { if (DEMO && V.run) { const D = V.demoRuns[V.run.id]; if (D) { V.batches = D.batches; V.links = D.links; } } render(); }
@@ -220,6 +248,8 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
       const b = { id: `${id}-b1`, batch_no: 1, offset_start: 1, offset_end: 200, status: "done", scraped_count: 200, passed_count: 6, excluded_count: 194, excluded_by_reason: { "定制": 170, "IP": 14, "材质": 10 }, demo: true };
       V.demoRuns[id] = { run, batches: [b], links: { [b.id]: demoLinks(run, 1, 6) } }; return;
     }
+    const fxr = V.recentFx?.[id];
+    if (fxr && !["demo-recent-1", "demo-recent-2"].includes(id)) { V.demoRuns[id] = { run: { ...fxr, batch_size: BATCH, current_batch: 0, max_rows: null, remaining_count: null, measured: false }, batches: [], links: {} }; return; } // 演示历史：只显示数量
     const kw = id === "demo-recent-1" ? "acrylic decoration" : "wedding sign", n = id === "demo-recent-1" ? 20 : 1400;
     const run = { id, keyword: kw, status: id === "demo-recent-1" ? "succeeded" : "batch_done", total_count: n, max_rows: n, batch_size: BATCH, current_batch: 1, remaining_count: n - Math.min(n, BATCH), created_at: new Date(Date.now() - (id === "demo-recent-1" ? 5 : 30) * 36e5).toISOString() };
     const pass = id === "demo-recent-1" ? 7 : 312, b = { id: `${id}-b1`, batch_no: 1, offset_start: 1, offset_end: Math.min(n, BATCH), status: "done", scraped_count: Math.min(n, BATCH), passed_count: pass, excluded_count: Math.min(n, BATCH) - pass, excluded_by_reason: { "定制": Math.min(n, BATCH) - pass }, demo: true };
@@ -391,6 +421,9 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
     if (id === "ssNext") return guard("next", () => next(false)); if (id === "ssAll") return guard("next", () => next(true));
     if (t.dataset?.sscopy) return copy(t.dataset.sscopy);
     if (t.dataset?.ssdl) return download(t.dataset.ssdl);
+    const rd = t.closest?.("[data-ssrdel]"); if (rd) { e.preventDefault(); return guard("rdel", () => delRecent(rd.dataset.ssrdel)); }
+    const rt = t.closest?.("[data-ssrtog]");
+    if (rt) { const open = !rt.closest(".ss-recent").classList.contains("open"); try { localStorage.setItem(RECENT_KEY, open ? "1" : "0"); } catch {} return renderRecent(); }
     if (t.dataset?.ssopen) { V.open.add(t.dataset.ssopen); return render(); }
     if (t.dataset?.ssfold) { V.open.delete(t.dataset.ssfold); return render(); }
   });

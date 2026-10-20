@@ -32,3 +32,13 @@ test("排除词太宽", () => {
   for (const w of ["a|", ".*", "\\w+", "|name", "(x)?"]) assert.ok(tooBroad(w), w);
   for (const w of ["name", "personali[sz]ed?", "photo(?!\\s*(booths?|props?)\\b)", "super ?bowl", "monogram\\w*"]) assert.ok(!tooBroad(w), w);
 });
+test("最近 3 天查找记录：最多 10 条、新的在前、3 天外不显示；折叠默认桌面展开/手机收起，记住选择", async () => {
+  const { recentList, recentOpen, RECENT_N } = await import("../js/selscreen.js");
+  const now = Date.parse("2026-10-20T00:00:00Z"), rows = Array.from({ length: 14 }, (_, i) => ({ id: `r${i}`, created_at: new Date(now - i * 36e5).toISOString() }));
+  rows.push({ id: "old", created_at: new Date(now - 4 * 864e5).toISOString() });
+  const L = recentList([...rows].reverse(), now);
+  assert.equal(RECENT_N, 10); assert.equal(L.length, 10); assert.equal(L[0].id, "r0"); assert.equal(L[9].id, "r9"); assert.ok(!L.some((r) => r.id === "old"));
+  const st = (v) => ({ getItem: () => v });
+  assert.equal(recentOpen(st(null), false), true); assert.equal(recentOpen(st(null), true), false);
+  assert.equal(recentOpen(st("0"), false), false); assert.equal(recentOpen(st("1"), true), true); assert.equal(recentOpen(undefined, false), true);
+});

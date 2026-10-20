@@ -3,7 +3,7 @@ import { computeVelocity, computeManualVelocity, cmpVelocity, velocityBadge, loa
 import { amzBlock, amzUrls, openAll, applyEdit, kwList, MAX_KW, DIR_SELECT_HTML } from "./amzsearch.js";
 import { createScreen, ANOMALY_PREFIX, anomalyReason } from "./screen.js?v=1cd5e187";
 import { createExWords } from "./exwords.js?v=c9174633";
-import { createSelScreen } from "./selscreen.js?v=4dbb6a0d";
+import { createSelScreen } from "./selscreen.js?v=e519047a";
 
 // ?demo=1：纯前端示例数据，不登录、不连 Supabase，仅用于预览界面（&offline=1 / &quota=1 预览横幅）
 const QS = new URLSearchParams(location.search);
