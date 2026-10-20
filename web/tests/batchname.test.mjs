@@ -17,3 +17,11 @@ test("历史标签：同一关键词跨查找按发送顺序编号", () => {
   assert.equal(sentInfo(runs[1].sel_batches, "reason", nos, "r1").text, "reason 第一批");
   assert.equal(sentInfo([], "reason", nos, "r1").text, "未发送");
 });
+import { itemSrc, batchCounts } from "../js/batchname.js";
+test("条目来源与各批数量", () => {
+  const B = [["reason DEP", 1, "01"], ["reason DEP", 2, "02"]].map(([k, n, t], i) => ({ id: `b${i}`, name: `获取链接 ${k} 第${n}批 10-19 ${t}:00`, created_at: `2026-10-19T${t}:00:00Z` }));
+  assert.equal(itemSrc({ keyword: "reason DEP", n: 1, label: "reason DEP 第一批" }), "reason DEP");
+  assert.equal(itemSrc({ keyword: "reason DEP", n: 2, label: "reason DEP 第二批" }), "reason DEP + reason DEP 第二批");
+  const items = [...Array(12).fill({ batch_id: "b0" }), ...Array(8).fill({ batch_id: "b1" })];
+  assert.equal(batchCounts(items, B), "reason DEP 第一批 12个，reason DEP 第二批 8个");
+});

@@ -26,3 +26,16 @@ export function historySendNos(runs) {
   for (const L of per.values()) L.sort((a, b) => a.at - b.at).forEach((x, i) => out.set(x.id, i + 1));
   return out;
 }
+// batch_id → { keyword, n, label }（与批次列表同一套按关键词编号）
+export function batchIndex(batches) { const M = new Map(); for (const g of screenBatchGroups(batches)) for (const it of g.items) M.set(it.id, { keyword: g.keyword, n: it.n, label: batchLabel(g.keyword, it.n) }); return M; }
+// 条目框里的来源：第一批只显示关键词；第二批起「kw + kw 第N批」
+export const itemSrc = (x) => (!x ? "" : x.n === 1 ? x.keyword : `${x.keyword} + ${x.label}`);
+// 当前视图各批数量：「reason 第一批 12个，reason 第二批 8个」（按批次列表顺序；未知来源归「其他」）
+export function batchCounts(items, batches) {
+  const M = batchIndex(batches), order = [...M.keys()], c = new Map(); let other = 0;
+  for (const it of items || []) { if (M.has(it.batch_id)) { const k = M.get(it.batch_id).label; c.set(k, (c.get(k) || 0) + 1); } else other++; }
+  const seen = new Set(), out = [];
+  for (const id of order) { const l = M.get(id).label; if (c.has(l) && !seen.has(l)) { seen.add(l); out.push(`${l} ${c.get(l)}个`); } }
+  if (other && out.length) out.push(`其他 ${other}个`);
+  return out.join("，");
+}

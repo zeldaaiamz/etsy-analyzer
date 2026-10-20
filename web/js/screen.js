@@ -2,7 +2,7 @@
 // → 每批“分析剩余数据”或底部“全部已加载”一键确认 → 只有保留的进入 DeepSeek / Keepamore / 截图（017 screen_confirm）
 export const BATCH = 50;
 const POLL_MS = 3000;
-import { screenBatchGroups } from "./batchname.js";
+import { screenBatchGroups, batchIndex, itemSrc, batchCounts } from "./batchname.js";
 // EHunt 账号/服务异常（与商品本身无关）：新 worker 写 'EHunt 服务异常（原因）'；旧 worker 写 'EHunt 错误 500: 查询失败: …'
 export const EHUNT_ANOMALY_RE = /EHunt 服务异常|EHunt 错误 5\d\d|查询失败|daily_limit/;
 export const ANOMALY_PREFIX = "EHunt 服务异常";
@@ -65,6 +65,7 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     return `<div class="sc-card${rj ? " rej" : ""}${hasData(it) ? "" : " wait"}" data-skey="${esc(it.id)}">
       <a class="sc-img" href="${esc(it.etsy_url)}" target="_blank" rel="noopener">${ph}${img}${rj ? '<span class="sc-tag">已排除</span>' : it.screen_state === "kept" ? '<span class="sc-tag sc-kept">已进入分析</span>' : ""}</a>${act}
       <div class="sc-info"><div class="sc-title" title="${esc(it.title || "")}">${head}</div>
+      ${(() => { const src = itemSrc(V.bidx?.get(it.batch_id)); const stt = rj ? "已排除" : it.screen_state === "kept" ? "已进入分析" : failed ? "取数失败" : fetchingIt(it) ? "取数中" : it.status === "screening" ? (bstate === "ready" ? "可确认" : "待确认") : ""; return src || stt ? `<div class="sc-src">${src ? `<span class="sc-kw" title="${esc(src)}">${esc(src)}</span>` : ""}${stt ? `<span class="pill pill-info sc-st">${stt}</span>` : ""}</div>` : ""; })()}
       <div class="sc-meta"><b>${esc(price)}</b>${it.title ? `<span class="hint">#${esc(it.listing_id || "")}</span>` : ""}</div></div></div>`;
   }
 
@@ -77,7 +78,8 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
       `<div class="sc-bgrp"><span class="sc-bkw">${esc(g.keyword)}</span>${g.items.map((it) => `<a class="fchip sc-bchip${V.batch === it.id ? " active" : ""}" href="#/screen/${esc(it.id)}">${esc(it.label)}</a>`).join("")}</div>`).join("")}</div>`;
   }
   function render() {
-    renderBatches();
+    V.bidx = batchIndex(V.sbatches || []); renderBatches();
+    { const el = $("screenCounts"); if (el) { const t = batchCounts(V.items, V.sbatches || []); el.innerHTML = t ? `<div class="sc-counts"><b>本页各批数量：</b>${esc(t)}${(V.sbatches || []).some((b) => b.demo) ? ' <span class="pill pill-bad">演示数字</span>' : ""}</div>` : ""; } }
     const box = $("screenBody"); if (!box) return;
     const bs = batches(), tot = V.items.length;
     const nRej = V.items.filter((it) => V.rej.has(it.id) || it.screen_state === "rejected").length;
@@ -198,6 +200,7 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     const shot = QS.get("sshot") || "";
     { const t0 = Date.now() - 6 * 864e5, at = (h) => new Date(t0 + h * 36e5).toISOString(), nm = (kw, no, h) => `获取链接 ${kw} 第${no}批 ${new Date(t0 + h * 36e5 + 8 * 36e5).toISOString().slice(5, 16).replace("T", " ")}`; // 演示数字
       V.sbatches = [["reason", 1, 1], ["Alex kitchen", 1, 2], ["reason", 2, 3], ["Alex kitchen", 2, 4], ["Alex kitchen", 2, 4], ["reason", 1, 5]].map(([k, no, h], i) => ({ id: `demo-pb-${i}`, name: nm(k, no, h), created_at: at(h) + "", demo: true })); }
+    { const ids = ["demo-pb-0", "demo-pb-2", "demo-pb-0", "demo-pb-1", "demo-pb-3", "demo-pb-5", "demo-pb-0", "demo-pb-4"]; V.items.forEach((it, i) => { it.batch_id = ids[i % ids.length]; }); } // 演示数字
     const quotaFrom = n > 200 ? 200 : n; // 200 条以后等待明日额度（演示额度队列）
     const fill = (it, i) => { if (i >= quotaFrom) { it.error = "EHunt 今日额度已用完，明日自动继续"; return; } it.status = "screening"; it.screen_state = "awaiting"; it.title = it._t; it.image_url = it._img; it.price = it._p; };
     if (shot === "loading") { // 第 1 批已加载完成可确认；第 2、3 批部分加载；其余仍在取数
