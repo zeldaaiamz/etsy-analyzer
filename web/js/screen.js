@@ -66,6 +66,9 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     if (!DEMO && visible() && V.items.some(fetchingIt)) V.timer = setTimeout(load, POLL_MS);
   }
   const visible = () => location.hash.startsWith("#/screen");
+  // 回到前台 / 窗口重新获得焦点 / 获取链接刚发送（screen:dirty）→ 立即重新取一次（节流 2 秒），不只依赖定时轮询
+  let lastLoad = 0; const refetch = () => { if (DEMO || !visible() || Date.now() - lastLoad < 2000) return; lastLoad = Date.now(); V.sbatches = null; load(); };
+  if (typeof document !== "undefined") { document.addEventListener("visibilitychange", () => { if (!document.hidden) refetch(); }); window.addEventListener("focus", refetch); window.addEventListener("screen:dirty", () => { V.sbatches = null; }); }
 
   function card(it, bstate) {
     const rj = V.rej.has(it.id) || it.screen_state === "rejected", done = it.screen_state === "rejected";
@@ -298,7 +301,7 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
   }
 
   return {
-    show(batch) { V.batch = batch || null; if (DEMO) { if (!V.demo) { V.demo = true; demo(Number(QS.get("screen")) || 300); } else render(); return; } render(); load(); },
+    show(batch) { V.batch = batch || null; V.sbatches = null; V.noSrc = null; /* 每次进入预筛选都重新取批次列表（发送后新批次立即出现） */ if (DEMO) { if (!V.demo) { V.demo = true; demo(Number(QS.get("screen")) || 300); } else render(); return; } render(); load(); },
     hide() { clearTimeout(V.timer); },
     reload: load,
     rerender: () => { if (visible()) render(); }, // service_status 变化（EHunt 熔断/恢复）时刷新横幅

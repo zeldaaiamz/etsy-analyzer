@@ -77,6 +77,17 @@ export function seenWarn(times) { const d = seenDates(times); return d.length ? 
 export function kwLogCsv(rows) { const c = (v) => { let x = String(v ?? ""); if (/^[=+\-@\t\r]/.test(x)) x = "'" + x; return /[",\n]/.test(x) ? `"${x.replace(/"/g, '""')}"` : x; };
   const fmt = (t) => new Date(Date.parse(t) + 8 * 36e5).toISOString().slice(0, 19).replace("T", " ");
   return "\ufeff关键词,查询时间（北京时间）,来源\n" + (rows || []).map((r) => [r.keyword, fmt(r.queried_at), r.source].map(c).join(",")).join("\n") + "\n"; }
+
+// 送去预筛选结果 → 提示文案 + 跳转目标（044：被删除过的任务恢复显示 restored；sent=0 也跳到预筛选，避免“发送成功但看不到”）
+export function sendOutcome(res, left = 0) {
+  const sent = res?.sent || 0, dup = res?.dup || 0, reused = res?.reused || 0, rest = res?.restored || 0, hidden = Math.max(0, reused - rest);
+  const extra = (dup ? `；${dup} 条已在预筛选列表里` : "") + (rest ? `；${rest} 条之前在预筛选里删除过，已恢复显示（不重新获取）` : "")
+    + (hidden ? `；${hidden} 条已获取过但在预筛选里删除过，未恢复（需要后台执行 044）` : "");
+  const go = sent && res.first_screen_batch ? `#/screen/${res.first_screen_batch}` : (sent || rest || dup) ? "#/screen" : null;
+  if (!sent) return { kind: rest || dup ? "ok" : "bad", go, text: rest || dup || reused ? `没有需要新获取的链接${extra}` : "这些批次都已发送过，没有重复发送" };
+  if (res.limited) return { kind: "bad", go, text: `已发送 ${sent} 条（${res.screen_batches} 个预筛选批次）；还有 ${left} 条因为预筛选排队已满 1000 条没有发送，等预筛选跑完一些后点「发送剩余」${extra}` };
+  return { kind: "ok", go, text: `✓ 已发送 ${sent} 条到预筛选${res.screen_batches > 1 ? `（分成 ${res.screen_batches} 个批次，每个 ≤500 条）` : ""}${extra}` };
+}
 export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
   const QSP = new URLSearchParams(location.search);
   const V = { addErr: "", run: null, batches: [], links: {}, open: new Set(), timer: null, fx: null, demoRuns: {}, recent: null, limErr: "", busy: new Set(), seq: 0, lastSt: null, sending: false };
@@ -256,12 +267,8 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
       for (const r of res?.batches || []) { const b = V.batches.find((x) => x.id === r.batch_id); if (b && (r.sent || r.dup || r.reused)) Object.assign(b, { sent_to_screen_at: r.sent_at, sent_count: r.sent_count }); }
       render(); loadRecent();   // 先标记、刷新，再跳转（同一事务里已写好标记）
       const left = (res?.batches || []).reduce((a, r) => a + Math.max(0, r.total - r.sent_count), 0);
-      const dup = res?.dup || 0, reused = res?.reused || 0;
-      const extra = (dup ? `；${dup} 条已在预筛选里，已跳过` : "") + (reused ? `；${reused} 条已获取成功/处理中，不再重复获取（除了获取失败，不重复获取）` : "");
-      if (!res?.sent) return toast(dup || reused ? `没有需要新发送的链接${extra}` : "这些批次都已发送过，没有重复发送", dup || reused ? "ok" : "bad");
-      if (res.limited) return toast(`已发送 ${res.sent} 条（${res.screen_batches} 个预筛选批次）；还有 ${left} 条因为预筛选排队已满 1000 条没有发送，等预筛选跑完一些后点「发送剩余」${extra}`, "bad");
-      toast(`✓ 已发送 ${res.sent} 条到预筛选${res.screen_batches > 1 ? `（分成 ${res.screen_batches} 个批次，每个 ≤500 条）` : ""}${extra}`, "ok");
-      if (!DEMO && res.first_screen_batch) location.hash = `#/screen/${res.first_screen_batch}`;
+      const o = sendOutcome(res, left); toast(o.text, o.kind);
+      if (o.go) { window.dispatchEvent(new CustomEvent("screen:dirty")); if (!DEMO || QSP.has("sendgo")) location.hash = o.go; }
     } catch (e) { toast(`发送失败（没有发送任何链接）：${e.message || e}`, "bad"); }
     finally { V.sending = false; render(); }
   }
@@ -275,7 +282,7 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
         if (d0 + i < st.sent && d0 + i >= nFail) { seen.add(u); n++; reused++; continue; } /* 042：除了获取失败，不重复获取 */ if (cap <= 0) { limited = true; break; } if (!k || k >= 500) { nb++; k = 0; } seen.add(u); k++; n++; cap--; sent++; }
       reusedAll += reused; out.push({ batch_id: id, batch_no: b.batch_no, sent: n - reused, reused, sent_count: d0 + n, total: L.length, sent_at: n ? at : b.sent_to_screen_at }); }
     if (!sent && limited) throw new Error("预筛选排队中+运行中的任务已达上限 1000 条，请等预筛选跑完一些后再发送");
-    return { batches: out, sent, reused: reusedAll, screen_batches: nb, limited };
+    return { batches: out, sent, reused: reusedAll, ...(QSP.has("pre044") ? {} : { restored: reusedAll }), screen_batches: nb, limited }; // 演示：044 起被删除过的复用项恢复显示
   }
   async function copy(bid) {
     const { list, dup } = linksOf(bid);
