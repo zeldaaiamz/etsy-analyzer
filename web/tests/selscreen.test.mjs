@@ -42,3 +42,11 @@ test("最近 3 天查找记录：最多 10 条、新的在前、3 天外不显�
   assert.equal(recentOpen(st(null), false), true); assert.equal(recentOpen(st(null), true), false);
   assert.equal(recentOpen(st("0"), false), false); assert.equal(recentOpen(st("1"), true), true); assert.equal(recentOpen(undefined, false), true);
 });
+test("送去预筛选状态：按批次，显示最近发送的批次", async () => {
+  const { sentInfo, cnNum } = await import("../js/selscreen.js");
+  assert.deepEqual([1, 2, 5, 10, 12, 20, 23].map(cnNum), ["一", "二", "五", "十", "十二", "二十", "二十三"]);
+  assert.equal(sentInfo([]).text, "未发送"); assert.equal(sentInfo(undefined).sent, false); assert.equal(sentInfo([{ batch_no: 1, sent_to_screen_at: null }]).text, "未发送");
+  const s = sentInfo([{ batch_no: 1, sent_to_screen_at: "2026-10-20T01:00:00Z" }, { batch_no: 2, sent_to_screen_at: "2026-10-20T02:00:00Z" }, { batch_no: 3 }]);
+  assert.equal(s.text, "第二批已发送"); assert.equal(s.tip, "第一、二批已发送到预筛选");
+  assert.equal(sentInfo([{ batch_no: 2, sent_to_screen_at: "2026-10-20T01:00:00Z" }, { batch_no: 1, sent_to_screen_at: "2026-10-20T03:00:00Z" }]).text, "第一批已发送"); // 以最近一次发送为准
+});
