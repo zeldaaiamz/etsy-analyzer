@@ -208,12 +208,12 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
     if (V.sending) return;
     const fin = V.batches.filter((b) => FIN.includes(b.status) && (V.links[b.id] || []).length);
     const plan = sendPlan(all ? fin : fin.filter((b) => b.id === bid), (id) => V.links[id], !all); if (!plan || !plan.ids.length) return toast(all ? "所有批次都已发送过" : "本批没有可发送的链接", "bad");
-    const quota = "<p class=\"hint\">每条新 listing 消耗 1 次 EHunt 额度（24 小时内重复的走缓存）；每个预筛选批次最多 500 条，超过自动分成多个；预筛选排队+运行中最多 1000 条，超出的部分之后可以点「发送剩余」。</p>";
+    const quota = "<p class=\"hint\">每条新 listing 消耗 1 次 EHunt 额度（已获取成功的直接沿用，不再重复获取）；每个预筛选批次最多 500 条，超过自动分成多个；预筛选排队+运行中最多 1000 条，超出的部分之后可以点「发送剩余」。</p>";
     let title, ok, body;
     if (all) { title = "发送全部批次到预筛选？"; ok = `发送 ${plan.n.toLocaleString()} 条`;
       body = `<p>将发送以下批次（已发送过的跳过）：</p><ul class="ss-send-list">${plan.rows.map((x) => `<li>第 ${x.b.batch_no} 批：<b>${x.st.left.toLocaleString()}</b> 条${x.st.partial ? `（剩余，已发 ${x.st.sent}/${x.st.total}）` : ""}</li>`).join("")}</ul>${plan.skipped.length ? `<p class="hint">跳过已发送：${plan.skipped.map((x) => `第 ${x.b.batch_no} 批`).join("、")}</p>` : ""}<p>合计 <b>${plan.n.toLocaleString()}</b> 条（批次之间重复的链接只发一次）。</p>${quota}`; }
     else { const x = plan.rows[0];
-      if (x.st.full) { title = `第 ${x.b.batch_no} 批已发送过`; ok = `再发一次（${x.st.total} 条）`; body = `<p class="warn">这一批已于 <b>${esc(fmtAt(x.st.at))}</b> 发送过，确定要再发一次？</p><p>再发会在预筛选里新建一份（${x.st.total} 条）。</p>${quota}`; }
+      if (x.st.full) { title = `第 ${x.b.batch_no} 批已发送过`; ok = "再发一次（只重新获取失败的）"; body = `<p class="warn">这一批已于 <b>${esc(fmtAt(x.st.at))}</b> 发送过，确定要再发一次？</p><p><b>除了获取失败，不重复获取</b>：已获取成功、排队中、处理中的链接直接沿用原结果，不会再获取；只有之前获取失败的会重新获取。</p>${quota}`; }
       else if (x.st.partial) { title = `发送第 ${x.b.batch_no} 批剩余的链接？`; ok = `发送剩余 ${x.st.left} 条`; body = `<p>这一批已于 ${esc(fmtAt(x.st.at))} 发送了 ${x.st.sent}/${x.st.total} 条，将接着发送剩余 <b>${x.st.left}</b> 条。</p>${quota}`; }
       else { title = `把第 ${x.b.batch_no} 批送去预筛选？`; ok = `送去预筛选（${x.st.total} 条）`; body = `<p>将提交 <b>${x.st.total}</b> 条链接为预筛选任务，提交后跳到「预筛选」页。</p>${quota}`; } }
     if (!await confirmDialog({ title, ok, body })) return;
@@ -223,12 +223,13 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
       if (DEMO) res = await demoSend(plan.ids, plan.resend);
       else ({ data: res, error } = await getSb().rpc("sel_send_to_screen", { p_batches: plan.ids, p_resend: plan.resend }));
       if (error) return toast(/Could not find the function|does not exist/.test(error.message) ? "发送失败：需要后台先执行 039 迁移（没有发送任何链接）" : `发送失败（没有发送任何链接）：${error.message}`, "bad");
-      for (const r of res?.batches || []) { const b = V.batches.find((x) => x.id === r.batch_id); if (b && r.sent) Object.assign(b, { sent_to_screen_at: r.sent_at, sent_count: r.sent_count }); }
+      for (const r of res?.batches || []) { const b = V.batches.find((x) => x.id === r.batch_id); if (b && (r.sent || r.reused)) Object.assign(b, { sent_to_screen_at: r.sent_at, sent_count: r.sent_count }); }
       render(); loadRecent();   // 先标记、刷新，再跳转（039 在同一事务里已写好标记）
       const left = (res?.batches || []).reduce((a, r) => a + Math.max(0, r.total - r.sent_count), 0);
-      if (!res?.sent) return toast("这些批次都已发送过，没有重复发送", "bad");
-      if (res.limited) return toast(`已发送 ${res.sent} 条（${res.screen_batches} 个预筛选批次）；还有 ${left} 条因为预筛选排队已满 1000 条没有发送，等预筛选跑完一些后点「发送剩余」`, "bad");
-      toast(`✓ 已发送 ${res.sent} 条到预筛选${res.screen_batches > 1 ? `（分成 ${res.screen_batches} 个批次，每个 ≤500 条）` : ""}`, "ok");
+      const reused = res?.reused || 0, reuseTxt = reused ? `；${reused} 条已获取成功/处理中，不再重复获取（除了获取失败，不重复获取）` : "";
+      if (!res?.sent) return toast(reused ? `已获取成功，不再重复获取：${reused} 条都沿用原结果（除了获取失败，不重复获取）` : "这些批次都已发送过，没有重复发送", reused ? "ok" : "bad");
+      if (res.limited) return toast(`已发送 ${res.sent} 条（${res.screen_batches} 个预筛选批次）；还有 ${left} 条因为预筛选排队已满 1000 条没有发送，等预筛选跑完一些后点「发送剩余」${reuseTxt}`, "bad");
+      toast(`✓ 已发送 ${res.sent} 条到预筛选${res.screen_batches > 1 ? `（分成 ${res.screen_batches} 个批次，每个 ≤500 条）` : ""}${reuseTxt}`, "ok");
       if (!DEMO && res.first_screen_batch) location.hash = `#/screen/${res.first_screen_batch}`;
     } catch (e) { toast(`发送失败（没有发送任何链接）：${e.message || e}`, "bad"); }
     finally { V.sending = false; render(); }
@@ -236,12 +237,14 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
   // 演示：与 039 相同的规则（额度 ?sendcap=，耗时 ?sendms=），不连数据库
   async function demoSend(ids, resend) {
     await new Promise((r) => setTimeout(r, Number(QSP.get("sendms")) || 700));
-    let cap = QSP.has("sendcap") ? Number(QSP.get("sendcap")) : 1000; const seen = new Set(), out = []; let sent = 0, nb = 0, limited = false; const at = new Date().toISOString();
-    for (const id of ids) { const b = V.batches.find((x) => x.id === id), L = V.links[id] || [], st = sendState(b, L.length), d0 = resend ? 0 : st.sent; let n = 0, k = 0;
-      for (const u of L.slice(d0)) { if (seen.has(u)) { n++; continue; } if (cap <= 0) { limited = true; break; } if (!k || k >= 500) { nb++; k = 0; } seen.add(u); k++; n++; cap--; sent++; }
-      out.push({ batch_id: id, batch_no: b.batch_no, sent: n, sent_count: d0 + n, total: L.length, sent_at: n ? at : b.sent_to_screen_at }); }
+    let cap = QSP.has("sendcap") ? Number(QSP.get("sendcap")) : 1000; const seen = new Set(), out = []; let sent = 0, nb = 0, limited = false, reusedAll = 0; const at = new Date().toISOString();
+    const nFail = Number(QSP.get("demofail")) || 3; // 演示：之前发送过的链接里前 N 条“获取失败”，其余视为已获取成功
+    for (const id of ids) { const b = V.batches.find((x) => x.id === id), L = V.links[id] || [], st = sendState(b, L.length), d0 = resend ? 0 : st.sent; let n = 0, k = 0, reused = 0;
+      for (const [i, u] of L.slice(d0).entries()) { if (seen.has(u)) { n++; continue; }
+        if (d0 + i < st.sent && d0 + i >= nFail) { seen.add(u); n++; reused++; continue; } /* 042：除了获取失败，不重复获取 */ if (cap <= 0) { limited = true; break; } if (!k || k >= 500) { nb++; k = 0; } seen.add(u); k++; n++; cap--; sent++; }
+      reusedAll += reused; out.push({ batch_id: id, batch_no: b.batch_no, sent: n - reused, reused, sent_count: d0 + n, total: L.length, sent_at: n ? at : b.sent_to_screen_at }); }
     if (!sent && limited) throw new Error("预筛选排队中+运行中的任务已达上限 1000 条，请等预筛选跑完一些后再发送");
-    return { batches: out, sent, screen_batches: nb, limited };
+    return { batches: out, sent, reused: reusedAll, screen_batches: nb, limited };
   }
   async function copy(bid) {
     const { list, dup } = linksOf(bid);
@@ -443,7 +446,7 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
     const tot = b.offset_end - b.offset_start + 1;
     const st = sendState(b, links.length), busy = V.sending === b.id || V.sending === "all";
     const mark = st.full ? `<span class="pill pill-ok" title="${esc(fmtAt(st.at))} 已送去预筛选">✓ 已发送</span>` : st.partial ? `<span class="pill pill-warn" title="${esc(fmtAt(st.at))} 发送了 ${st.sent}/${st.total} 条">已发送（部分 ${st.sent}/${st.total}）</span>` : "";
-    const psBtn = `${mark}<button class="btn ${st.full ? "btn-ghost" : "btn-primary"} btn-sm" data-ssps="${esc(b.id)}"${links.length && !V.sending ? "" : " disabled"}${busy ? ' aria-busy="true"' : ""}>${busy ? '<span class="spin"></span> 发送中…' : st.full ? `再次送去预筛选（${links.length} 条）` : st.partial ? `发送剩余（${st.left} 条）` : `送去预筛选（${links.length} 条）`}</button>`;
+    const psBtn = `${mark}<button class="btn ${st.full ? "btn-ghost" : "btn-primary"} btn-sm" data-ssps="${esc(b.id)}"${st.full ? ' title="除了获取失败，不重复获取：已获取成功的不会再获取，只重新获取失败的"' : ""}${links.length && !V.sending ? "" : " disabled"}${busy ? ' aria-busy="true"' : ""}>${busy ? '<span class="spin"></span> 发送中…' : st.full ? `再次送去预筛选（${links.length} 条）` : st.partial ? `发送剩余（${st.left} 条）` : `送去预筛选（${links.length} 条）`}</button>`;
     const btns = `<button class="btn btn-ghost btn-sm" data-sscopy="${esc(b.id)}"${links.length ? "" : " disabled"}>复制本批</button><button class="btn btn-ghost btn-sm" data-ssdl="${esc(b.id)}"${links.length ? "" : " disabled"}>下载 TXT</button>${psBtn}`;
     if (b.status === "canceled" || b.status === "failed") { // 失败的批次也显示已通过的链接（原来只显示“失败”两个字，已入库的链接看不到也复制不了）
       const f = b.status === "failed", canRe = V.run?.status === (f ? "failed" : "canceled") && b === lastStopped();

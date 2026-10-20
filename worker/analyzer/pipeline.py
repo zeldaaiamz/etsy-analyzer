@@ -169,6 +169,14 @@ def fetch_stage(job, store, etsy, step, min_reviews=50, supplement_shop=False, e
     if not lid:
         raise PermanentError("无法从 URL 解析 Etsy listing id")
     step("fetch_etsy", status="running", etsy_listing_id=lid)
+    # 除了获取失败，不重复获取：任务被重新认领/重试（attempts > 1）时，上次已成功保存的取数结果直接复用。
+    # 首次认领不查库，不增加任何开销。
+    if (job.get("attempts") or 0) > 1:
+        saved = store.load_etsy_product(job)
+        if saved and saved.get("listing_id") and int(saved["listing_id"]) == int(lid) and (saved.get("image_url") or saved.get("title")):
+            prod, reviews = load_saved_product(store, etsy, job, min_reviews=min_reviews, supplement_shop=supplement_shop)
+            if prod is not None:
+                return prod, reviews
     c0 = getattr(etsy, "calls", 0)
     try:
         prod = _get_listing(etsy, lid, parse_slug(url))
