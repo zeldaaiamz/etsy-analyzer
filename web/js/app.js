@@ -486,9 +486,8 @@ function renderBanners() {
   const kfmt = (n) => n >= 1000 ? `${Math.round(n / 1000)}k` : String(n);
   const parts = [u.ehunt && `Etsy 数据 <b>${u.ehunt.calls}</b> 次${u.ehunt.cache_hits ? `（缓存 ${u.ehunt.cache_hits}）` : ""}`,
     u.keepamore && `亚马逊数据 <b>${u.keepamore.units}</b> 点`, u.deepseek && `AI <b>${kfmt(u.deepseek.units)}</b> 字`].filter(Boolean);
-  const q = quota(), rem = q.remaining, el = $("usage");
-  const remTxt = rem != null ? ` · Etsy 额度剩余 <b>${rem}</b>` : !S.status ? "" : q.anomaly ? ` · <span class="u-bad">Etsy 额度：EHunt 服务异常</span>` : ` · <span class="u-unk">Etsy 额度未知</span>`;
-  el.innerHTML = parts.length || remTxt ? `今日用量：${parts.join(" · ") || "0"}${remTxt}` : "";
+  const el = $("usage"); // 今日用量不再显示 Etsy 额度（剩余 / 未知 / 异常）；各数据源用量照常
+  el.innerHTML = parts.length ? `今日用量：${parts.join(" · ")}` : "";
   el.title = "Etsy 数据 = EHunt（每条新商品 1 次，缓存命中不计）\n亚马逊数据 = Keepamore（Keepa 数据点）\nAI = DeepSeek（tokens，约等于字数）\n按 UTC 日统计（北京时间 8:00 刷新）";
 }
 
