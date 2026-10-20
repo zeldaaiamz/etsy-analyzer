@@ -135,3 +135,22 @@ def test_supabase_claim_falls_back_when_v2_missing():
     assert s.claim_next_job("w")["id"] == "j1" and s.v2 is False
     assert s.claim_next_job("w")["id"] == "j1"
     assert seen == ["/rpc/claim_next_job_v2", "/rpc/claim_next_job", "/rpc/claim_next_job"]
+
+
+def test_reclaimed_job_reuses_saved_fetch_no_refetch():
+    """042 除了获取失败，不重复获取：取数已成功保存后任务被重新认领（attempts>1，如 worker 中断/超时回收），不再调 EHunt。"""
+    store, ids, etsy = setup(1)
+    clock = Clock(T0)
+    assert run(store, etsy, clock, ok)[0] == 1
+    j = store.jobs[ids[0]]
+    j.update(status="queued", stage=None, locked_by=None)            # 模拟重新排队/回收（attempts 已 = 1，下次认领 = 2）
+    etsy2 = EHuntEtsy("k")                                          # 无缓存：只能靠已保存的 etsy_products
+    calls, _ = run(store, etsy2, clock, AssertionError("refetch"))
+    assert calls == 0 and store.jobs[ids[0]]["status"] == "screening"
+
+
+def test_first_claim_does_not_read_saved_product():
+    """首次认领不多查一次库（不拖慢）。"""
+    store, ids, etsy = setup(1)
+    with mock.patch.object(store, "load_etsy_product", side_effect=AssertionError("extra read")):
+        assert run(store, etsy, Clock(T0), ok)[0] == 1
