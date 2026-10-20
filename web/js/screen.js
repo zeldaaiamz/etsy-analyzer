@@ -2,7 +2,7 @@
 // → 每批“分析剩余数据”或底部“全部已加载”一键确认 → 只有保留的进入 DeepSeek / Keepamore / 截图（017 screen_confirm）
 export const BATCH = 50;
 const POLL_MS = 3000;
-import { screenBatchGroups, batchIndex, itemSrc, batchCounts, batchCountRows } from "./batchname.js";
+import { screenBatchGroups, batchIndex, itemSrc, batchCounts, batchCountRows, deletable, deletePlan } from "./batchname.js";
 // EHunt 账号/服务异常（与商品本身无关）：新 worker 写 'EHunt 服务异常（原因）'；旧 worker 写 'EHunt 错误 500: 查询失败: …'
 export const EHUNT_ANOMALY_RE = /EHunt 服务异常|EHunt 错误 5\d\d|查询失败|daily_limit/;
 export const ANOMALY_PREFIX = "EHunt 服务异常";
@@ -62,7 +62,7 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
       : it.status === "screening" ? (rj ? `<button class="sc-x sc-undo" data-sundo="${esc(it.id)}" title="撤销排除">撤销</button>`
         : `<button class="sc-x" data-srej="${esc(it.id)}" title="排除（不再分析）" aria-label="排除">✕</button>`) : "";
     const price = it.price != null ? `$${Number(it.price).toFixed(2)}` : "";
-    const selBox = it.status === "screening" ? `<label class="sc-sel" title="选择"><input type="checkbox" data-ssel="${esc(it.id)}"${V.sel.has(it.id) ? " checked" : ""}></label>` : "";
+    const selBox = deletable(it) ? `<label class="sc-sel" title="选择"><input type="checkbox" data-ssel="${esc(it.id)}"${V.sel.has(it.id) ? " checked" : ""}></label>` : "";
     return `<div class="sc-card${rj ? " rej" : ""}${V.sel.has(it.id) ? " sel" : ""}${hasData(it) ? "" : " wait"}" data-skey="${esc(it.id)}">
       <a class="sc-img" href="${esc(it.etsy_url)}" target="_blank" rel="noopener">${ph}${img}${rj ? '<span class="sc-tag">已排除</span>' : it.screen_state === "kept" ? '<span class="sc-tag sc-kept">已进入分析</span>' : ""}</a>${selBox}${act}
       <div class="sc-info"><div class="sc-title" title="${esc(it.title || "")}">${head}</div>
@@ -83,7 +83,7 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     { const el = $("screenCounts"); if (el) { const rows = batchCountRows(V.items, V.sbatches || []), selOk = (it) => it.status === "screening";
       const nSel = [...V.sel].filter((id) => V.items.some((it) => it.id === id)).length, demoTag = (V.sbatches || []).some((b) => b.demo) ? ' <span class="pill pill-bad">演示数字</span>' : "";
       el.innerHTML = rows.length ? `<div class="sc-counts"><b>本页各批数量：</b>${rows.map((r, i) => `<span class="sc-cnt">${esc(r.label)} ${r.n}个 <button type="button" class="btn btn-ghost btn-xs" data-sselb="${esc(r.ids.join(","))}">全选本批</button></span>${i < rows.length - 1 ? "，" : ""}`).join("")}${demoTag}</div>
-        ${nSel ? `<div class="sc-selbar"><b>已选 ${nSel} 条</b><button type="button" class="btn btn-danger-ghost btn-sm" data-sselact="rej">✕ 排除所选</button><button type="button" class="btn btn-ghost btn-sm" data-sselact="undo">撤销排除</button><button type="button" class="btn btn-ghost btn-sm" data-sselact="clear">清除选择</button></div>` : ""}` : ""; } }
+        ${nSel ? `<div class="sc-selbar"><b>已选 ${nSel} 条</b><button type="button" class="btn btn-danger-ghost btn-sm" data-sselact="rej">✕ 排除所选</button><button type="button" class="btn btn-ghost btn-sm" data-sselact="undo">撤销排除</button><button type="button" class="btn btn-danger btn-sm" data-sselact="del"${V.busy.has("seldel") ? " disabled" : ""}>${V.busy.has("seldel") ? '<span class="spin"></span>' : "🗑 "}删除所选</button><button type="button" class="btn btn-ghost btn-sm" data-sselact="clear">清除选择</button></div>` : ""}` : ""; } }
     const box = $("screenBody"); if (!box) return;
     const bs = batches(), tot = V.items.length;
     const nRej = V.items.filter((it) => V.rej.has(it.id) || it.screen_state === "rejected").length;
@@ -179,13 +179,31 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
 
   document.addEventListener("load", (ev) => { const t = ev.target; if (t.tagName === "IMG" && t.dataset?.sid) markImg(t); }, true);
   document.addEventListener("error", (ev) => { const t = ev.target; if (t.tagName === "IMG" && t.dataset?.sid) markImg(t, true); }, true);
+  // 删除所选（040 screen_hide_ids：一次调用、可跨批次；隐藏不删除，可用 screen_unhide 撤销）。确认框列出总数与各批数量；进行中禁用按钮防连点
+  async function deleteSelected() {
+    if (V.busy.has("seldel")) return;
+    const plan = deletePlan([...V.sel], V.items, V.sbatches || []); if (!plan.n) return toast("所选条目中没有可删除的（取数中的需等取数结束）", "bad");
+    V.busy.add("seldel"); render();
+    try {
+      const skip = V.sel.size - plan.n;
+      const ok = await confirmDialog({ title: `删除所选（${plan.n} 条）？`, danger: true, ok: `删除 ${plan.n} 条`,
+        body: `<p>将从预筛选列表移除以下 <b>${plan.n}</b> 条：</p><ul class="ss-send-list">${plan.rows.map((r) => `<li>${esc(r.label)}：<b>${r.n}</b> 条</li>`).join("")}</ul>${skip > 0 ? `<p class="hint">另有 ${skip} 条正在取数，不会删除。</p>` : ""}<p class="hint">只是从列表隐藏，任务与 EHunt 数据保留、不消耗额度；删除后可在提示里点「撤销」恢复。</p>${(V.sbatches || []).some((b) => b.demo) ? '<p><span class="pill pill-bad">演示数字</span></p>' : ""}` });
+      if (!ok) return;
+      let ids = plan.ids;
+      if (!DEMO) { const r = await getSb().rpc("screen_hide_ids", { p_ids: plan.ids }); if (r.error) return toast(/screen_hide_ids/.test(r.error.message) ? "删除失败：需要后台执行 040" : `删除失败：${r.error.message}`, "bad"); ids = r.data?.ids || []; }
+      const gone = new Set(ids), removed = V.items.filter((it) => gone.has(it.id));
+      V.items = V.items.filter((it) => !gone.has(it.id)); ids.forEach((id) => { V.sel.delete(id); V.rej.delete(id); });
+      toast(`已删除 ${ids.length} 条`, "ok", [{ label: "撤销", run: async () => { if (!DEMO) { const r = await getSb().rpc("screen_unhide", { p_ids: ids }); if (r.error) return toast(`撤销失败：${r.error.message}`, "bad"); load(); } else { V.items = V.items.concat(removed).sort((a, b) => Number(a.listing_id) - Number(b.listing_id)); render(); } } }], 8000);
+    } finally { V.busy.delete("seldel"); render(); }
+  }
   document.addEventListener("click", (ev) => {
     if (!visible()) return;
     const cb = ev.target.closest("[data-ssel]"); if (cb) { ev.stopPropagation(); cb.checked ? V.sel.add(cb.dataset.ssel) : V.sel.delete(cb.dataset.ssel); render(); return; }
     const sb2 = ev.target.closest("[data-sselb],[data-sselact]");
     if (sb2) { ev.preventDefault();
-      if (sb2.dataset.sselb) { const ids = new Set(sb2.dataset.sselb.split(",")), L = V.items.filter((it) => ids.has(it.batch_id) && it.status === "screening"); L.forEach((it) => V.sel.add(it.id)); toast(`已选中本批 ${L.length} 条（可批量排除 / 撤销）`, "ok"); }
-      else { const a = sb2.dataset.sselact; if (a === "rej") V.sel.forEach((id) => V.rej.add(id)); if (a === "undo") V.sel.forEach((id) => V.rej.delete(id)); if (a !== "clear") toast(a === "rej" ? `已排除 ${V.sel.size} 条（确认前可撤销）` : `已撤销 ${V.sel.size} 条`, "ok"); V.sel.clear(); }
+      if (sb2.dataset.sselb) { const ids = new Set(sb2.dataset.sselb.split(",")), L = V.items.filter((it) => ids.has(it.batch_id) && deletable(it)); L.forEach((it) => V.sel.add(it.id)); toast(`已选中本批 ${L.length} 条（可批量排除 / 撤销 / 删除）`, "ok"); }
+      else if (sb2.dataset.sselact === "del") { deleteSelected(); return; }
+      else { const a = sb2.dataset.sselact; if (a === "rej") V.sel.forEach((id) => { if (V.items.find((it) => it.id === id)?.status === "screening") V.rej.add(id); }); if (a === "undo") V.sel.forEach((id) => V.rej.delete(id)); if (a !== "clear") toast(a === "rej" ? `已排除 ${V.sel.size} 条（确认前可撤销）` : `已撤销 ${V.sel.size} 条`, "ok"); V.sel.clear(); }
       render(); return; }
     const t = ev.target.closest("[data-srej],[data-sundo],[data-srestore],[data-sconfirm],[data-stab],[data-shide],[data-srefall],[data-sdelfail],[data-sreload]"); if (!t) return;
     ev.preventDefault();

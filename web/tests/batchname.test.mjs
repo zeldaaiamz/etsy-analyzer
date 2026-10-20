@@ -30,3 +30,13 @@ test("全选本批：按标签汇总 batch_id", () => {
   const B = [{ id: "a", name: "获取链接 reason 第1批 10-19 01:00", created_at: "2026-10-19T01:00:00Z" }, { id: "b", name: "获取链接 reason 第2批 10-19 02:00", created_at: "2026-10-19T02:00:00Z" }, { id: "c", name: "获取链接 reason 第2批 10-19 02:00", created_at: "2026-10-19T02:00:01Z" }];
   assert.deepEqual(batchCountRows([{ batch_id: "a" }, { batch_id: "b" }, { batch_id: "c" }], B), [{ label: "reason 第一批", ids: ["a"], n: 1 }, { label: "reason 第二批", ids: ["b", "c"], n: 2 }]);
 });
+import { deletable, deletePlan } from "../js/batchname.js";
+test("删除所选：可选范围与确认框各批数量", () => {
+  assert.ok(deletable({ status: "screening" }) && deletable({ status: "failed" }) && deletable({ status: "canceled", screen_state: "rejected" }));
+  assert.ok(!deletable({ status: "queued" }) && !deletable({ status: "running" }) && !deletable({ status: "succeeded", screen_state: "kept" }));
+  const B = [{ id: "a", name: "获取链接 reason 第1批 10-19 01:00", created_at: "2026-10-19T01:00:00Z" }, { id: "b", name: "获取链接 Alex kitchen 第1批 10-19 02:00", created_at: "2026-10-19T02:00:00Z" }];
+  const I = [{ id: 1, batch_id: "a", status: "screening" }, { id: 2, batch_id: "a", status: "failed" }, { id: 3, batch_id: "b", status: "screening" }, { id: 4, batch_id: "b", status: "running" }, { id: 5, batch_id: "z", status: "screening" }];
+  const p = deletePlan([1, 2, 3, 4, 5], I, B);
+  assert.equal(p.n, 4); assert.deepEqual(p.ids, [1, 2, 3, 5]);
+  assert.deepEqual(p.rows, [{ label: "Alex kitchen 第一批", n: 1 }, { label: "reason 第一批", n: 2 }, { label: "其他", n: 1 }]);
+});

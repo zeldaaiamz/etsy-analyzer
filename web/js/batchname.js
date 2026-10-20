@@ -46,3 +46,10 @@ export function batchCountRows(items, batches) {
   for (const it of items || []) { const x = M.get(it.batch_id); if (x) R.get(x.label).n++; }
   return [...R.values()].filter((r) => r.n);
 }
+// 「删除所选」可选范围（与 040 screen_hide_ids 一致）：待确认、取数失败、已确认排除；取数中（queued/running）与已进入分析的不可选
+export const deletable = (it) => !!it && it.screen_state !== "kept" && ["screening", "failed", "canceled"].includes(it.status);
+// 确认框内容：总数 + 各批数量（按批次列表顺序，未知来源归「其他」）
+export function deletePlan(selIds, items, batches) {
+  const S = new Set(selIds), L = (items || []).filter((it) => S.has(it.id) && deletable(it));
+  return { ids: L.map((it) => it.id), n: L.length, rows: batchCountRows(L, batches).map((r) => ({ label: r.label, n: r.n })).concat((() => { const M = batchIndex(batches), k = L.filter((it) => !M.has(it.batch_id)).length; return k ? [{ label: "其他", n: k }] : []; })()) };
+}
