@@ -10,6 +10,17 @@ export function anomalyReason(err) {
   return (m ? m[1] : s).trim().slice(0, 120);
 }
 
+// 预筛选列表去重：同一 listing（规范化：listing id，没有则取 URL 里 /listing/<数字>，忽略域名/查询串/结尾斜杠）只显示一条；
+// 优先保留有数据/已排除的，其次运行中、排队、失败；同级保留最早的（与 041 清理规则一致）
+export const listingKey = (it) => String(it.listing_id || (String(it.etsy_url || "").match(/\/listing\/(\d+)/) || [])[1] || it.etsy_url || it.id);
+const keepRank = (it) => (it.status === "screening" || it.status === "succeeded" || it.screen_state === "rejected" ? 0 : it.status === "running" ? 1 : it.status === "queued" ? 2 : 3);
+export function dedupeItems(items) {
+  const best = new Map();
+  for (const it of items || []) { const k = listingKey(it), o = best.get(k); if (!o || keepRank(it) < keepRank(o)) best.set(k, it); }
+  const keep = new Set(best.values());
+  return (items || []).filter((it) => keep.has(it));
+}
+
 export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDialog, getStatus = () => null }) {
   const V = { loadErr: null, items: [], batch: null, tab: "all", rej: new Set(), imgOk: new Set(), busy: new Set(), loaded: false, timer: null, demo: null };
   const thumb = (u) => (/^https:\/\/i\.etsystatic\.com\//.test(u || "") ? u.replace(/\/il_[0-9a-zA-Z]+x[0-9a-zA-Z]+\./, "/il_570xN.") : u);
@@ -35,7 +46,7 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     const sb = getSb(); if (!sb) return;
     const { data, error } = await sb.rpc("screen_list", V.batch ? { p_batch: V.batch } : {});
     if (error) { V.loadErr = error.message; toast(`加载筛选列表失败：${error.message}`, "bad"); render(); return; }
-    V.items = data || []; V.loaded = true; V.loadErr = null;
+    V.items = dedupeItems(data); V.loaded = true; V.loadErr = null;
     render(); schedule();
   }
   function schedule() {
@@ -192,6 +203,12 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
       return;
     }
     V.items.forEach(fill);
+    if (shot === "dupes") { // 041 去重演示（演示数字）：同一 listing 来自不同批次 / 重发 / URL 变体（查询串、其他域名、结尾斜杠）各 1 份 → 列表只显示 1 条
+      const vars = ["?ref=search_grid-1", "/", "?click_key=abc#reviews"], before = V.items.length;
+      for (let k = 0; k < 36; k++) { const o = V.items[k % 12]; V.items.push({ ...o, id: `demo-dup-${k}`, batch_id: "demo-b2", listing_id: k % 2 ? o.listing_id : null,
+        etsy_url: `https://${k % 3 ? "www" : "de"}.etsy.com/listing/${o.listing_id}/x${vars[k % 3]}`, status: k % 4 ? "screening" : "queued" }); }
+      V.items = dedupeItems(V.items); toast(`演示数字：去重前 ${before + 36} 条，同一链接合并后显示 ${V.items.length} 条`, "ok");
+    }
     if (shot === "failed") [2, 5, 8].forEach((k, j) => { const it = V.items[k]; if (it) { it.status = "failed"; it.screen_state = null; it.title = it.image_url = null; it.error = "EHunt 取数失败"; it.attempts = j === 2 ? 3 : j + 1; it.max_attempts = 3; } });
     if (shot === "ehuntq") { // 一键刷新后：28 条重新排队（error 已清空），其中 2 条已被 worker 探测并写上异常原因
       for (let k = 0; k < 28; k++) { const it = V.items[k * 2]; if (it) Object.assign(it, { status: "queued", screen_state: null, title: null, image_url: null, attempts: 0, max_attempts: 3,

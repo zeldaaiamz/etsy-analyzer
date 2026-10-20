@@ -213,7 +213,7 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
     if (all) { title = "发送全部批次到预筛选？"; ok = `发送 ${plan.n.toLocaleString()} 条`;
       body = `<p>将发送以下批次（已发送过的跳过）：</p><ul class="ss-send-list">${plan.rows.map((x) => `<li>第 ${x.b.batch_no} 批：<b>${x.st.left.toLocaleString()}</b> 条${x.st.partial ? `（剩余，已发 ${x.st.sent}/${x.st.total}）` : ""}</li>`).join("")}</ul>${plan.skipped.length ? `<p class="hint">跳过已发送：${plan.skipped.map((x) => `第 ${x.b.batch_no} 批`).join("、")}</p>` : ""}<p>合计 <b>${plan.n.toLocaleString()}</b> 条（批次之间重复的链接只发一次）。</p>${quota}`; }
     else { const x = plan.rows[0];
-      if (x.st.full) { title = `第 ${x.b.batch_no} 批已发送过`; ok = `再发一次（${x.st.total} 条）`; body = `<p class="warn">这一批已于 <b>${esc(fmtAt(x.st.at))}</b> 发送过，确定要再发一次？</p><p>再发会在预筛选里新建一份（${x.st.total} 条）。</p>${quota}`; }
+      if (x.st.full) { title = `第 ${x.b.batch_no} 批已发送过`; ok = `再发一次（${x.st.total} 条）`; body = `<p class="warn">这一批已于 <b>${esc(fmtAt(x.st.at))}</b> 发送过，确定要再发一次？</p><p>已经在预筛选列表里的链接会自动跳过（同一链接只出现一次），只补发不在列表里的。</p>${quota}`; }
       else if (x.st.partial) { title = `发送第 ${x.b.batch_no} 批剩余的链接？`; ok = `发送剩余 ${x.st.left} 条`; body = `<p>这一批已于 ${esc(fmtAt(x.st.at))} 发送了 ${x.st.sent}/${x.st.total} 条，将接着发送剩余 <b>${x.st.left}</b> 条。</p>${quota}`; }
       else { title = `把第 ${x.b.batch_no} 批送去预筛选？`; ok = `送去预筛选（${x.st.total} 条）`; body = `<p>将提交 <b>${x.st.total}</b> 条链接为预筛选任务，提交后跳到「预筛选」页。</p>${quota}`; } }
     if (!await confirmDialog({ title, ok, body })) return;
@@ -223,12 +223,13 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
       if (DEMO) res = await demoSend(plan.ids, plan.resend);
       else ({ data: res, error } = await getSb().rpc("sel_send_to_screen", { p_batches: plan.ids, p_resend: plan.resend }));
       if (error) return toast(/Could not find the function|does not exist/.test(error.message) ? "发送失败：需要后台先执行 039 迁移（没有发送任何链接）" : `发送失败（没有发送任何链接）：${error.message}`, "bad");
-      for (const r of res?.batches || []) { const b = V.batches.find((x) => x.id === r.batch_id); if (b && r.sent) Object.assign(b, { sent_to_screen_at: r.sent_at, sent_count: r.sent_count }); }
+      for (const r of res?.batches || []) { const b = V.batches.find((x) => x.id === r.batch_id); if (b && (r.sent || r.dup)) Object.assign(b, { sent_to_screen_at: r.sent_at, sent_count: r.sent_count }); }
       render(); loadRecent();   // 先标记、刷新，再跳转（039 在同一事务里已写好标记）
       const left = (res?.batches || []).reduce((a, r) => a + Math.max(0, r.total - r.sent_count), 0);
-      if (!res?.sent) return toast("这些批次都已发送过，没有重复发送", "bad");
+      const dupTxt = res?.dup ? `；${res.dup} 条已在预筛选里，已跳过` : "";
+      if (!res?.sent) return toast(res?.dup ? `这些链接都已在预筛选里（${res.dup} 条），没有重复发送` : "这些批次都已发送过，没有重复发送", "bad");
       if (res.limited) return toast(`已发送 ${res.sent} 条（${res.screen_batches} 个预筛选批次）；还有 ${left} 条因为预筛选排队已满 1000 条没有发送，等预筛选跑完一些后点「发送剩余」`, "bad");
-      toast(`✓ 已发送 ${res.sent} 条到预筛选${res.screen_batches > 1 ? `（分成 ${res.screen_batches} 个批次，每个 ≤500 条）` : ""}`, "ok");
+      toast(`✓ 已发送 ${res.sent} 条到预筛选${res.screen_batches > 1 ? `（分成 ${res.screen_batches} 个批次，每个 ≤500 条）` : ""}${dupTxt}`, "ok");
       if (!DEMO && res.first_screen_batch) location.hash = `#/screen/${res.first_screen_batch}`;
     } catch (e) { toast(`发送失败（没有发送任何链接）：${e.message || e}`, "bad"); }
     finally { V.sending = false; render(); }

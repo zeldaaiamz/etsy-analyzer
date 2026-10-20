@@ -1,9 +1,9 @@
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
 import { computeVelocity, computeManualVelocity, cmpVelocity, velocityBadge, loadReviewDates, demoReviewDates, loadScrapeInfo } from "./velocity.js";
 import { amzBlock, amzUrls, openAll, applyEdit, kwList, MAX_KW, DIR_SELECT_HTML } from "./amzsearch.js";
-import { createScreen, ANOMALY_PREFIX, anomalyReason } from "./screen.js?v=1cd5e187";
+import { createScreen, ANOMALY_PREFIX, anomalyReason } from "./screen.js?v=41b002d6";
 import { createExWords } from "./exwords.js?v=c9174633";
-import { createSelScreen } from "./selscreen.js?v=9e5d522a";
+import { createSelScreen } from "./selscreen.js?v=e44b330d";
 
 // ?demo=1：纯前端示例数据，不登录、不连 Supabase，仅用于预览界面（&offline=1 / &quota=1 预览横幅）
 const QS = new URLSearchParams(location.search);
@@ -278,7 +278,7 @@ async function submitJobs(list, badN = 0) {
   if (!error) {
     const pre = $("preScreen")?.checked;
     const { data: rows, error: e2 } = await sb.from("jobs").insert(list.map((r) => ({ batch_id: batch.id, etsy_url: r.url, ...(r.id ? { etsy_listing_id: r.id } : {}), ...(pre ? { prescreen: true } : {}) }))).select("id");
-    if (!e2 && pre) { $("urls").value = ""; onUrlsInput(); setBusy(false); showSubmitResult({ ok: true, text: `✓ 已提交 ${list.length} 条预筛选：先取 EHunt 数据，确认后再分析。${quotaPlan(list.length, list.length)}` });
+    if (!e2 && pre) { $("urls").value = ""; onUrlsInput(); setBusy(false); const nNew = (rows || []).length, nDup = list.length - nNew; showSubmitResult({ ok: true, text: `✓ 已提交 ${nNew} 条预筛选${nDup ? `（${nDup} 条已在预筛选里，已跳过）` : ""}：先取 EHunt 数据，确认后再分析。${quotaPlan(nNew, nNew)}` });
       location.hash = `#/screen/${batch.id}`; return; }
     if (e2) res = { ok: false, text: `提交失败：${e2.message}` };
     else {
