@@ -25,3 +25,8 @@ test("条目来源与各批数量", () => {
   const items = [...Array(12).fill({ batch_id: "b0" }), ...Array(8).fill({ batch_id: "b1" })];
   assert.equal(batchCounts(items, B), "reason DEP 第一批 12个，reason DEP 第二批 8个");
 });
+import { batchCountRows } from "../js/batchname.js";
+test("全选本批：按标签汇总 batch_id", () => {
+  const B = [{ id: "a", name: "获取链接 reason 第1批 10-19 01:00", created_at: "2026-10-19T01:00:00Z" }, { id: "b", name: "获取链接 reason 第2批 10-19 02:00", created_at: "2026-10-19T02:00:00Z" }, { id: "c", name: "获取链接 reason 第2批 10-19 02:00", created_at: "2026-10-19T02:00:01Z" }];
+  assert.deepEqual(batchCountRows([{ batch_id: "a" }, { batch_id: "b" }, { batch_id: "c" }], B), [{ label: "reason 第一批", ids: ["a"], n: 1 }, { label: "reason 第二批", ids: ["b", "c"], n: 2 }]);
+});

@@ -2,7 +2,7 @@
 // → 每批“分析剩余数据”或底部“全部已加载”一键确认 → 只有保留的进入 DeepSeek / Keepamore / 截图（017 screen_confirm）
 export const BATCH = 50;
 const POLL_MS = 3000;
-import { screenBatchGroups, batchIndex, itemSrc, batchCounts } from "./batchname.js";
+import { screenBatchGroups, batchIndex, itemSrc, batchCounts, batchCountRows } from "./batchname.js";
 // EHunt 账号/服务异常（与商品本身无关）：新 worker 写 'EHunt 服务异常（原因）'；旧 worker 写 'EHunt 错误 500: 查询失败: …'
 export const EHUNT_ANOMALY_RE = /EHunt 服务异常|EHunt 错误 5\d\d|查询失败|daily_limit/;
 export const ANOMALY_PREFIX = "EHunt 服务异常";
@@ -12,7 +12,7 @@ export function anomalyReason(err) {
 }
 
 export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDialog, getStatus = () => null }) {
-  const V = { loadErr: null, items: [], batch: null, tab: "all", rej: new Set(), imgOk: new Set(), busy: new Set(), loaded: false, timer: null, demo: null, sbatches: null };
+  const V = { loadErr: null, items: [], batch: null, tab: "all", rej: new Set(), imgOk: new Set(), busy: new Set(), loaded: false, timer: null, demo: null, sbatches: null, sel: new Set() };
   const thumb = (u) => (/^https:\/\/i\.etsystatic\.com\//.test(u || "") ? u.replace(/\/il_[0-9a-zA-Z]+x[0-9a-zA-Z]+\./, "/il_570xN.") : u);
   const hasData = (it) => it.status === "screening" || it.screen_state === "rejected" || it.screen_state === "kept";
   const fetchingIt = (it) => (it.status === "queued" || it.status === "running") && it.screen_state !== "kept";
@@ -62,8 +62,9 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
       : it.status === "screening" ? (rj ? `<button class="sc-x sc-undo" data-sundo="${esc(it.id)}" title="撤销排除">撤销</button>`
         : `<button class="sc-x" data-srej="${esc(it.id)}" title="排除（不再分析）" aria-label="排除">✕</button>`) : "";
     const price = it.price != null ? `$${Number(it.price).toFixed(2)}` : "";
-    return `<div class="sc-card${rj ? " rej" : ""}${hasData(it) ? "" : " wait"}" data-skey="${esc(it.id)}">
-      <a class="sc-img" href="${esc(it.etsy_url)}" target="_blank" rel="noopener">${ph}${img}${rj ? '<span class="sc-tag">已排除</span>' : it.screen_state === "kept" ? '<span class="sc-tag sc-kept">已进入分析</span>' : ""}</a>${act}
+    const selBox = it.status === "screening" ? `<label class="sc-sel" title="选择"><input type="checkbox" data-ssel="${esc(it.id)}"${V.sel.has(it.id) ? " checked" : ""}></label>` : "";
+    return `<div class="sc-card${rj ? " rej" : ""}${V.sel.has(it.id) ? " sel" : ""}${hasData(it) ? "" : " wait"}" data-skey="${esc(it.id)}">
+      <a class="sc-img" href="${esc(it.etsy_url)}" target="_blank" rel="noopener">${ph}${img}${rj ? '<span class="sc-tag">已排除</span>' : it.screen_state === "kept" ? '<span class="sc-tag sc-kept">已进入分析</span>' : ""}</a>${selBox}${act}
       <div class="sc-info"><div class="sc-title" title="${esc(it.title || "")}">${head}</div>
       ${(() => { const src = itemSrc(V.bidx?.get(it.batch_id)); const stt = rj ? "已排除" : it.screen_state === "kept" ? "已进入分析" : failed ? "取数失败" : fetchingIt(it) ? "取数中" : it.status === "screening" ? (bstate === "ready" ? "可确认" : "待确认") : ""; return src || stt ? `<div class="sc-src">${src ? `<span class="sc-kw" title="${esc(src)}">${esc(src)}</span>` : ""}${stt ? `<span class="pill pill-info sc-st">${stt}</span>` : ""}</div>` : ""; })()}
       <div class="sc-meta"><b>${esc(price)}</b>${it.title ? `<span class="hint">#${esc(it.listing_id || "")}</span>` : ""}</div></div></div>`;
@@ -79,7 +80,10 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
   }
   function render() {
     V.bidx = batchIndex(V.sbatches || []); renderBatches();
-    { const el = $("screenCounts"); if (el) { const t = batchCounts(V.items, V.sbatches || []); el.innerHTML = t ? `<div class="sc-counts"><b>本页各批数量：</b>${esc(t)}${(V.sbatches || []).some((b) => b.demo) ? ' <span class="pill pill-bad">演示数字</span>' : ""}</div>` : ""; } }
+    { const el = $("screenCounts"); if (el) { const rows = batchCountRows(V.items, V.sbatches || []), selOk = (it) => it.status === "screening";
+      const nSel = [...V.sel].filter((id) => V.items.some((it) => it.id === id)).length, demoTag = (V.sbatches || []).some((b) => b.demo) ? ' <span class="pill pill-bad">演示数字</span>' : "";
+      el.innerHTML = rows.length ? `<div class="sc-counts"><b>本页各批数量：</b>${rows.map((r, i) => `<span class="sc-cnt">${esc(r.label)} ${r.n}个 <button type="button" class="btn btn-ghost btn-xs" data-sselb="${esc(r.ids.join(","))}">全选本批</button></span>${i < rows.length - 1 ? "，" : ""}`).join("")}${demoTag}</div>
+        ${nSel ? `<div class="sc-selbar"><b>已选 ${nSel} 条</b><button type="button" class="btn btn-danger-ghost btn-sm" data-sselact="rej">✕ 排除所选</button><button type="button" class="btn btn-ghost btn-sm" data-sselact="undo">撤销排除</button><button type="button" class="btn btn-ghost btn-sm" data-sselact="clear">清除选择</button></div>` : ""}` : ""; } }
     const box = $("screenBody"); if (!box) return;
     const bs = batches(), tot = V.items.length;
     const nRej = V.items.filter((it) => V.rej.has(it.id) || it.screen_state === "rejected").length;
@@ -177,6 +181,12 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
   document.addEventListener("error", (ev) => { const t = ev.target; if (t.tagName === "IMG" && t.dataset?.sid) markImg(t, true); }, true);
   document.addEventListener("click", (ev) => {
     if (!visible()) return;
+    const cb = ev.target.closest("[data-ssel]"); if (cb) { ev.stopPropagation(); cb.checked ? V.sel.add(cb.dataset.ssel) : V.sel.delete(cb.dataset.ssel); render(); return; }
+    const sb2 = ev.target.closest("[data-sselb],[data-sselact]");
+    if (sb2) { ev.preventDefault();
+      if (sb2.dataset.sselb) { const ids = new Set(sb2.dataset.sselb.split(",")), L = V.items.filter((it) => ids.has(it.batch_id) && it.status === "screening"); L.forEach((it) => V.sel.add(it.id)); toast(`已选中本批 ${L.length} 条（可批量排除 / 撤销）`, "ok"); }
+      else { const a = sb2.dataset.sselact; if (a === "rej") V.sel.forEach((id) => V.rej.add(id)); if (a === "undo") V.sel.forEach((id) => V.rej.delete(id)); if (a !== "clear") toast(a === "rej" ? `已排除 ${V.sel.size} 条（确认前可撤销）` : `已撤销 ${V.sel.size} 条`, "ok"); V.sel.clear(); }
+      render(); return; }
     const t = ev.target.closest("[data-srej],[data-sundo],[data-srestore],[data-sconfirm],[data-stab],[data-shide],[data-srefall],[data-sdelfail],[data-sreload]"); if (!t) return;
     ev.preventDefault();
     if (t.dataset.srej) { V.rej.add(t.dataset.srej); toast("已排除，不会进入分析", "", [{ label: "撤销", run: () => { V.rej.delete(t.dataset.srej); render(); } }], 4000); render(); }

@@ -39,3 +39,10 @@ export function batchCounts(items, batches) {
   if (other && out.length) out.push(`其他 ${other}个`);
   return out.join("，");
 }
+// 同 batchCounts，但返回结构（含 batch_id 列表），用于「全选本批」
+export function batchCountRows(items, batches) {
+  const M = batchIndex(batches), R = new Map();
+  for (const id of M.keys()) { const l = M.get(id).label; if (!R.has(l)) R.set(l, { label: l, ids: [], n: 0 }); R.get(l).ids.push(id); }
+  for (const it of items || []) { const x = M.get(it.batch_id); if (x) R.get(x.label).n++; }
+  return [...R.values()].filter((r) => r.n);
+}
