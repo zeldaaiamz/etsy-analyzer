@@ -604,3 +604,5 @@ html,body{overflow-x:hidden}
 
 .sc-gdiv{width:24px;height:2px;border-radius:2px;background:var(--border)}
 .sc-only{margin:0 0 10px;font-size:13px}
+.ss-llist{list-style:none;user-select:text;white-space:normal;padding:6px 10px;margin:0;max-height:360px;overflow:auto;font:12px/1.7 ui-monospace,Menlo,monospace}.ss-llist li{display:flex;gap:10px;align-items:center;min-width:0}.ss-lchk{display:inline-flex;gap:4px;align-items:center;flex:none;font-family:system-ui,sans-serif;font-size:11px;color:var(--text-2);width:64px}.ss-l-sent .ss-lchk{color:var(--ok,#15803d)}.ss-lchk input{margin:0}.ss-lurl{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.ss-autosw{display:inline-flex;align-items:center;gap:6px;font-size:13px;white-space:nowrap;cursor:pointer}.ss-autosw input{width:16px;height:16px;margin:0}

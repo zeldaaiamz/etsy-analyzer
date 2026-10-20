@@ -47,13 +47,17 @@ export function sendState(b, total = b?.passed_count) {
   return { sent: n, total: t, full: n >= t, partial: n > 0 && n < t, left: t - n, at: b.sent_to_screen_at };
 }
 // keyword + nos（historySendNos 的结果）时显示「<关键词> 第N批」，N = 同一关键词在历史里的发送顺序
+// 每条链接是否已送去预筛选（只读，来自库里的 sel_batches.sent_to_screen_at / sent_count）：
+// 039/041/042 都按 rank 顺序（rank nulls last, id，与这里读 sel_items 的顺序一致）发送，额度满即停 → 已发送的总是前 sent_count 条；
+// 其中「已在预筛选列表里被去重跳过」的也计入 sent_count（算已发送）；038 旧标记 sent_count 为空 = 整批已发送
+export function linkSentFlags(b, n) { const st = sendState(b, n); return Array.from({ length: n }, (_, i) => i < st.sent); }
 export function sentInfo(batches, keyword, nos, runId) {
   const S = (batches || []).filter((b) => b.sent_to_screen_at).sort((a, b) => Date.parse(b.sent_to_screen_at) - Date.parse(a.sent_to_screen_at));
   if (!S.length) return { sent: false, text: "未发送", tip: "这次查找的链接还没有送去预筛选", tags: [] };
   const st = sendState(S[0]);
   if (keyword && nos) {
     const tags = S.slice().reverse().map((b) => batchLabel(keyword, nos.get(`${runId}:${b.batch_no}`) || b.batch_no));
-    return { sent: true, partial: st.partial, text: `${tags[tags.length - 1]}${st.partial ? `（部分 ${st.sent}/${st.total}）` : ""}`, tags, tip: `已发送到预筛选：${tags.join("、")}` };
+    return { sent: true, partial: st.partial, auto: !!S[0].auto_sent_at, text: `${tags[tags.length - 1]}${S[0].auto_sent_at ? " · 已自动发送" : ""}${st.partial ? `（部分 ${st.sent}/${st.total}）` : ""}`, tags, tip: `已发送到预筛选：${tags.join("、")}` };
   }
   const nosB = [...new Set(S.map((b) => b.batch_no))].sort((a, b) => a - b);
   return { sent: true, partial: st.partial, text: `第${cnNum(S[0].batch_no)}批已发送${st.partial ? `（部分 ${st.sent}/${st.total}）` : ""}`, tip: `第${nosB.map(cnNum).join("、")}批已发送到预筛选` };
@@ -318,7 +322,8 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
     }
     const sb = getSb(); if (!sb) return;
     const q = (cols) => sb.from("sel_runs").select(cols).gte("created_at", new Date(Date.now() - 3 * 864e5).toISOString()).order("created_at", { ascending: false }).limit(RECENT_N);
-    let { data, error } = await q("id,keyword,status,created_at,passed_count,total_count,sel_batches(batch_no,sent_to_screen_at,sent_count,passed_count)"); // 同一次请求带上各批发送状态（039 sent_count：部分发送）
+    let { data, error } = await q("id,keyword,status,created_at,passed_count,total_count,sel_batches(batch_no,sent_to_screen_at,sent_count,passed_count,auto_sent_at)"); // 046 auto_sent_at
+    if (error) ({ data, error } = await q("id,keyword,status,created_at,passed_count,total_count,sel_batches(batch_no,sent_to_screen_at,sent_count,passed_count)")); // 同一次请求带上各批发送状态（039 sent_count：部分发送）
     if (error) ({ data, error } = await q("id,keyword,status,created_at,passed_count,total_count,sel_batches(batch_no,sent_to_screen_at)")); // 039 未执行
     if (error) ({ data, error } = await q("id,keyword,status,created_at,passed_count,total_count")); // 038 未执行：没有 sent_to_screen_at 列 → 全部显示未发送
     V.recent = error ? [] : data || []; renderRecent();
@@ -379,7 +384,7 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
       Object.assign(b2, { scraped_count: P.judged, passed_count: P.passed, excluded_count: P.excluded }); run.progress = { ...P, batch_no: 2, target: 1000, at: iso(2) };
     } else if (kind === "done") {
       Object.assign(b2, { status: "done", scraped_count: 1000, passed_count: 341, excluded_count: 651, dup_count: 8, excluded_by_reason: { "定制": 560, "IP": 41, "材质": 29, "素材/数字文件": 21 }, finished_at: iso(20) });
-      const sf = QSP.get("sendfx"); if (sf === "sent") Object.assign(b1, { sent_to_screen_at: iso(3 * 3600) }); else if (sf === "partial") Object.assign(b1, { sent_to_screen_at: iso(3600), sent_count: 200 }); // 演示：已发送 / 部分发送
+      const sf = QSP.get("sendfx"); if (sf === "sent") Object.assign(b1, { sent_to_screen_at: iso(3 * 3600) }); else if (sf === "partial") Object.assign(b1, { sent_to_screen_at: iso(3600), sent_count: 200 }); else if (sf === "auto") Object.assign(b1, { sent_to_screen_at: iso(3600), sent_count: 352, auto_sent_at: iso(3600) }), Object.assign(b2, { sent_to_screen_at: iso(20), sent_count: 341, auto_sent_at: iso(20) }); else if (sf === "autopartial") Object.assign(b1, { sent_to_screen_at: iso(3600), sent_count: 352, auto_sent_at: iso(3600) }), Object.assign(b2, { sent_to_screen_at: iso(20), sent_count: 120, auto_sent_at: iso(20), auto_pending: true }); // 演示：已发送 / 部分发送
       Object.assign(run, { status: "succeeded", remaining_count: 0, progress: { stage: "done", batch_no: 2, target: 1000, read: 1000, judged: 1000, vision_pending: 0, passed: 341, excluded: 651, at: iso(20) } });
     } else if (kind === "failed") {
       Object.assign(b2, { status: "failed", scraped_count: 286, passed_count: 97, excluded_count: 187, finished_at: iso(60) });
@@ -482,27 +487,34 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
     return `<div class="ss-count">${head}<div class="ss-form"><label>最多读取 <input id="ssLimit" class="input input-sm ss-thr" type="number" min="1" max="${Math.min(n, MAX_ROWS)}" value="${esc(V.limErr && $("ssLimit") ? $("ssLimit").value : String(Math.min(n, MAX_ROWS)))}"> 条</label>
       <button class="btn btn-primary" id="ssGo">抓取 →</button><span id="ssLimErr" class="warn" role="alert">${esc(V.limErr)}</span>${n > BATCH ? '<span class="hint">先读第 1 批（1–1000），完成后可读下一批或一键读取全部剩余</span>' : ""}</div></div>`;
   }
+  // 链接列表：每条前面一个只读勾选框，已送去预筛选 = 勾选「已发送」，其余「未发送」
+  function linkList(b, links) {
+    const F = linkSentFlags(b, links.length), nS = F.filter(Boolean).length;
+    return `<ol class="ss-links ss-llist" aria-label="链接列表（已发送 ${nS} / ${links.length}）">${links.map((u, i) => `<li class="${F[i] ? "ss-l-sent" : ""}"><label class="ss-lchk" title="${F[i] ? "已送去预筛选（含已在预筛选列表里被去重的）" : "还没有送去预筛选"}"><input type="checkbox" disabled${F[i] ? " checked" : ""} aria-label="${F[i] ? "已发送" : "未发送"}"><span>${F[i] ? "已发送" : "未发送"}</span></label><span class="ss-lurl" title="${esc(u)}">${esc(u)}</span></li>`).join("")}</ol>`;
+  }
   function batchBlock(b) {
     const links = V.links[b.id] || [], range = `${b.offset_start.toLocaleString()}–${b.offset_end.toLocaleString()}`;
     const demo = b.demo ? '<span class="pill pill-bad">演示数字</span>' : "";
     const exl = b.excluded_count ? `<span class="hint">已排除 ${b.excluded_count}：${esc(sumReasons(b.excluded_by_reason))}（不调豆包、不显示、不入库）</span>` : "";
     const tot = b.offset_end - b.offset_start + 1;
     const st = sendState(b, links.length), busy = V.sending === b.id || V.sending === "all";
-    const mark = st.full ? `<span class="pill pill-ok" title="${esc(fmtAt(st.at))} 已送去预筛选">✓ 已发送</span>` : st.partial ? `<span class="pill pill-warn" title="${esc(fmtAt(st.at))} 发送了 ${st.sent}/${st.total} 条">已发送（部分 ${st.sent}/${st.total}）</span>` : "";
+    const auto = b.auto_sent_at ? (b.auto_pending ? `<span class="pill pill-info ss-auto" title="预筛选排队已满 1000 条，空出后自动补发剩余 ${st.left} 条">已自动发送 · 等待补发 ${st.left} 条</span>` : `<span class="pill pill-info ss-auto" title="${esc(fmtAt(b.auto_sent_at))} 读完后自动送去预筛选">已自动发送</span>`) : "";
+    const mark0 = st.full ? `<span class="pill pill-ok" title="${esc(fmtAt(st.at))} 已送去预筛选">✓ 已发送</span>` : st.partial ? `<span class="pill pill-warn" title="${esc(fmtAt(st.at))} 发送了 ${st.sent}/${st.total} 条">已发送（部分 ${st.sent}/${st.total}）</span>` : "";
+    const mark = auto + mark0;
     const psBtn = `${mark}<button class="btn ${st.full ? "btn-ghost" : "btn-primary"} btn-sm" data-ssps="${esc(b.id)}"${st.full ? ' title="除了获取失败，不重复获取：已获取成功的不会再获取，只重新获取失败的"' : ""}${links.length && !V.sending ? "" : " disabled"}${busy ? ' aria-busy="true"' : ""}>${busy ? '<span class="spin"></span> 发送中…' : st.full ? `再次送去预筛选（${links.length} 条）` : st.partial ? `发送剩余（${st.left} 条）` : `送去预筛选（${links.length} 条）`}</button>`;
     const btns = `<button class="btn btn-ghost btn-sm" data-sscopy="${esc(b.id)}"${links.length ? "" : " disabled"}>复制本批</button><button class="btn btn-ghost btn-sm" data-ssdl="${esc(b.id)}"${links.length ? "" : " disabled"}>下载 TXT</button>${psBtn}`;
     if (b.status === "canceled" || b.status === "failed") { // 失败的批次也显示已通过的链接（原来只显示“失败”两个字，已入库的链接看不到也复制不了）
       const f = b.status === "failed", canRe = V.run?.status === (f ? "failed" : "canceled") && b === lastStopped();
       return `<section class="ss-batch ss-batch-stop"><div class="ss-res-head"><h3>第 ${b.batch_no} 批（${range}）· <span class="pill pill-bad">${f ? "失败" : "已停止"}</span> 已读 ${(b.scraped_count || 0).toLocaleString()} / ${tot.toLocaleString()} 条，通过 <span class="ss-n ss-n-ok">${links.length}</span> 条</h3>${demo}<span class="spacer"></span>
         ${canRe ? `<button class="btn btn-primary btn-sm" id="ssResume">${f ? "重试本批（从断点）" : "继续本批"}</button>` : ""}${btns}</div>
-      ${links.length ? `<pre class="ss-links">${esc(links.join("\n"))}</pre>` : ""}${exl}</section>`; }
+      ${links.length ? `${linkList(b, links)}` : ""}${exl}</section>`; }
     if (b.status !== "done") { const w = b.status === "queued" && !b.started_at ? waitedMin(b.created_at) : 0;
       return `<div class="ss-batch ss-batch-run"><b>第 ${b.batch_no} 批（${range}）</b> <span class="hint">${b.status === "queued" ? `排队中，等待 box 抓取进程${w >= 2 ? `（已等待 ${w} 分钟，box 可能暂停，恢复后自动开始）` : ""}` : "读取中（进度见上方）"}</span></div>`; }
     if (b.copied_at && !V.open.has(b.id)) return `<div class="ss-batch ss-batch-copied"><span class="pill pill-ok">✓ 已复制</span> <b>第 ${b.batch_no} 批（${range}）</b> 符合要求 ${links.length} 条 ${demo}<span class="spacer"></span>${psBtn}<button class="btn btn-link btn-sm" data-ssopen="${esc(b.id)}">展开</button></div>`;
     return `<section class="ss-batch"><div class="ss-res-head"><h3>第 ${b.batch_no} 批（${range}）· 符合要求 <span class="ss-n ss-n-ok">${links.length}</span> 条</h3>${demo}<span class="spacer"></span>
         ${b.copied_at ? `<button class="btn btn-link btn-sm" data-ssfold="${esc(b.id)}">收起</button>` : ""}
         ${btns}</div>
-      <pre class="ss-links">${esc(links.join("\n"))}</pre>${exl}</section>`;
+      ${linkList(b, links)}${exl}</section>`;
   }
   function render() {
     const body = $("ssBody"); if (!body) return; const r = V.run;
@@ -552,5 +564,21 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
     else if (e.target.id === "ssAdd") { e.preventDefault(); guard("next", () => next(false)); }
   });
   document.addEventListener("input", (e) => { if (e.target.id === "ssAdd") return addLabels(); if (e.target.id === "ssLimit") { V.limErr = ""; e.target.classList.remove("input-bad"); const el = $("ssLimErr"); if (el) el.textContent = ""; } });
-  return { show: (runId) => load(runId), _state: V };
+  // 046 自动送去预筛选开关（sel_prefs.auto_send，没有记录 = 开启）；表不存在（046 未执行）→ 不显示开关
+  async function loadPrefs() {
+    if (DEMO) { V.auto = QSP.get("autosend") !== "0"; V.autoOk = true; return renderAuto(); }
+    const sb = getSb(); if (!sb) return; const { data, error } = await sb.from("sel_prefs").select("auto_send").maybeSingle();
+    V.autoOk = !error; V.auto = error ? null : data ? !!data.auto_send : true; renderAuto();
+  }
+  function renderAuto() {
+    const el = $("ssAuto"); if (!el) return; if (!V.autoOk) { el.innerHTML = ""; return; }
+    el.innerHTML = `<label class="ss-autosw" title="每批读完后，数据库自动把这批链接送去预筛选（每条只发一次；排队满 1000 条时先发一部分，空出后自动补发）"><input type="checkbox" id="ssAutoChk"${V.auto ? " checked" : ""}${V.autoBusy ? " disabled" : ""}> 读完自动送去预筛选</label>`;
+  }
+  document.addEventListener("change", async (e) => {
+    if (e.target.id !== "ssAutoChk" || V.autoBusy) return; const on = e.target.checked; V.autoBusy = true; renderAuto();
+    let err = null; if (!DEMO) { const sb = getSb(), { data: u } = await sb.auth.getUser(); ({ error: err } = await sb.from("sel_prefs").upsert({ user_id: u?.user?.id, auto_send: on, updated_at: new Date().toISOString() })); }
+    V.autoBusy = false; if (err) { toast(`保存失败：${err.message}`, "bad"); } else { V.auto = on; toast(on ? "已开启：每批读完自动送去预筛选" : "已关闭自动发送（可手动点「送去预筛选」）", "ok"); } renderAuto();
+  });
+  loadPrefs();
+  return { show: (runId) => { if (V.autoOk == null) loadPrefs(); else renderAuto(); return load(runId); }, _state: V };
 }
