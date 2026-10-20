@@ -3,7 +3,7 @@ import { computeVelocity, computeManualVelocity, cmpVelocity, velocityBadge, loa
 import { amzBlock, amzUrls, openAll, applyEdit, kwList, MAX_KW, DIR_SELECT_HTML } from "./amzsearch.js";
 import { createScreen, ANOMALY_PREFIX, anomalyReason } from "./screen.js?v=1cd5e187";
 import { createExWords } from "./exwords.js?v=c9174633";
-import { createSelScreen } from "./selscreen.js?v=5cc320a5";
+import { createSelScreen } from "./selscreen.js?v=18ecf366";
 
 // ?demo=1：纯前端示例数据，不登录、不连 Supabase，仅用于预览界面（&offline=1 / &quota=1 预览横幅）
 const QS = new URLSearchParams(location.search);
@@ -955,15 +955,15 @@ const SCR = createScreen({ $, esc, imgUrl, toast, getSb: () => sb, DEMO, QS, con
 async function sendToPrescreen(urls) {
   const list = []; const seen = new Set();
   for (const u of urls) { const r = checkLine(u); if (r.reason) continue; const k = r.id ? `id:${r.id}` : r.url; if (!seen.has(k)) { seen.add(k); list.push(r); } }
-  if (!list.length) return toast("没有有效链接", "bad");
-  if (DEMO) { toast(`演示模式不会提交：${list.length} 条将进入预筛选`, "ok"); location.hash = "#/screen"; return; }
+  if (!list.length) { toast("没有有效链接", "bad"); return false; }
+  if (DEMO) { toast(`演示模式不会提交：${list.length} 条将进入预筛选`, "ok"); if (!QS.has("stay")) location.hash = "#/screen"; return true; }
   const { data: batch, error } = await sb.from("batches").insert({ name: `获取链接 ${new Date().toISOString()}` }).select().single();
-  if (error) return toast(`提交失败：${error.message}`, "bad");
+  if (error) { toast(`提交失败：${error.message}`, "bad"); return false; }
   for (let i = 0; i < list.length; i += MAX_SUBMIT) {
     const { error: e2 } = await sb.from("jobs").insert(list.slice(i, i + MAX_SUBMIT).map((r) => ({ batch_id: batch.id, etsy_url: r.url, ...(r.id ? { etsy_listing_id: r.id } : {}), prescreen: true })));
-    if (e2) return toast(`提交失败（已提交 ${i} 条）：${e2.message}`, "bad");
+    if (e2) { toast(`提交失败（已提交 ${i} 条）：${e2.message}`, "bad"); return i > 0; } // 部分提交也算已发送
   }
-  toast(`✓ 已提交 ${list.length} 条预筛选`, "ok"); location.hash = `#/screen/${batch.id}`;
+  toast(`✓ 已提交 ${list.length} 条预筛选`, "ok"); location.hash = `#/screen/${batch.id}`; return true;
 }
 const SSC = createSelScreen({ $, esc, toast, getSb: () => sb, DEMO, confirmDialog, sendToPrescreen });
 const EXW = createExWords({ $, esc, toast, getSb: () => sb, DEMO, confirmDialog });
