@@ -132,5 +132,7 @@ export function createSelQueue({ $, esc, toast, getSb, DEMO, confirmDialog, frie
   function swap(r, a) { const q = buildQueue(Q.runs, (id) => Q.batches[id]).wait, i = q.findIndex((x) => x.id === r.id), o = q[i + (a === "up" ? -1 : 1)]; if (!o) return;
     const R = (id) => Q.runs.find((x) => x.id === id), ka = r.queue_at, ro = R(o.id); r.queue_at = ro.queue_at; ro.queue_at = ka; }
   document.addEventListener("click", (e) => { const t = e.target.closest?.("[data-sq]"); if (t) act(t.dataset.sq, t.dataset.sqid); });
-  return { load, render, _state: Q };
+  // 演示（?demoqueue=1）：新任务进入抓取队列末尾（演示数字）
+  function demoAdd(run, batch) { if (!DEMO) return; if (!Q.demo) Q.demo = demoFixtures(QSP.get("squeue") || "running"); Q.demo.runs.push({ created_at: new Date().toISOString(), ...run }); if (batch) Q.demo.bat[run.id] = [batch]; Q.runs = Q.demo.runs; Q.batches = Q.demo.bat; render(); }
+  return { load, render, demoAdd, _state: Q };
 }

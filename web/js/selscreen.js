@@ -2,7 +2,7 @@
 // ① 关键词 → 查 EHunt 结果数（价格 8–40 · 总销量 ≥100 · 7 天销量 >3 · 按 7 天销量降序）→ ② 填最多读取条数 → 抓取（box 上的 worker，不在阿里云）
 // ③ 标题规则先筛：排除的不调豆包、不显示、不入库（页面只一行汇总；原因写 box 本地日志 3 天）→ ④ 通过的调豆包视觉 → 显示符合要求 N 条 + 纯 Etsy 链接
 // ⑤ >1000 分批，每批 1000，最多 5 批 / 5,000；“还剩 N 条未读”只在每批完成后更新 ⑥ 只有符合要求的入库，保留 3 天 ⑦ 网页无搜索，查询找序猿
-import { createSelQueue } from "./selqueue.js?v=91487c42";
+import { createSelQueue } from "./selqueue.js?v=b8f9de12";
 const BATCH = 1000, MAX_ROWS = 5000; // 每批 1000，最多读到 EHunt 第 5,000 条（分批次数不再单独限制，第 1 批可能不足 1000）
 const RORDER = ["定制", "IP", "材质", "素材/数字文件", "7天销量≤3", "其他"];
 // ---- 纯函数（web/tests/selscreen.test.mjs）----
@@ -95,6 +95,8 @@ export function sendOutcome(res, left = 0) {
   if (res.limited) return { kind: "bad", go, text: `已发送 ${sent} 条（${res.screen_batches} 个预筛选批次）；还有 ${left} 条因为预筛选排队已满 1000 条没有发送，等预筛选跑完一些后点「发送剩余」${extra}` };
   return { kind: "ok", go, text: `✓ 已发送 ${sent} 条到预筛选${res.screen_batches > 1 ? `（分成 ${res.screen_batches} 个批次，每个 ≤500 条）` : ""}${extra}` };
 }
+// 「查询数量」只在本次提交请求进行中禁用（防连点）；当前任务进行中也能查询新词，进入队列按顺序执行（037/048）
+export const countDisabled = (run, submitting) => !!submitting;
 export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
   const QSP = new URLSearchParams(location.search);
   const V = { addErr: "", run: null, batches: [], links: {}, open: new Set(), timer: null, fx: null, demoRuns: {}, recent: null, limErr: "", busy: new Set(), seq: 0, lastSt: null, sending: false };
@@ -173,7 +175,10 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
   async function count() {
     const kw = normKw($("ssKw").value); if (!kw) return toast("请输入关键词", "bad");
     if (kw.length > KW_MAX) return toast(`关键词太长（${kw.length} 字），最多 ${KW_MAX} 字`, "bad");
-    $("ssKw").value = kw; const btn = $("ssCount"); if (btn) btn.disabled = true;
+    $("ssKw").value = kw; const btn = $("ssCount"); if (btn) btn.disabled = true; V.counting = true;
+    try { return await countInner(kw, btn); } finally { V.counting = false; const b2 = $("ssCount"); if (b2) b2.disabled = false; }
+  }
+  async function countInner(kw, btn) {
     // 043：一次索引查询；RPC 不存在（043 未执行）或出错时不拦提交
     let seen = [];
     if (DEMO) seen = DEMO_KWLOG.filter((r) => kwKey(r.keyword) === kwKey(kw)).map((r) => r.queried_at);
@@ -183,6 +188,7 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
     const { data, error } = await getSb().rpc("sel_count", { p_keyword: kw, p_params: FILTERS });
     if (error) {
       if (btn) btn.disabled = false;
+      if (/已有正在查询数量的任务/.test(error.message)) return toast("另一个关键词正在查询数量，请稍等几十秒再查（后台更新 048 后可直接排队）", "bad");
       if (/已有进行中的任务/.test(error.message)) { // 带过去看正在进行的那个，而不是只报错
         const a = await getSb().from("sel_runs").select("id,keyword").in("status", ["count_queued", "counting", "queued", "running"]).order("created_at", { ascending: false }).limit(1).maybeSingle();
         if (a.data?.id) { toast(`已有进行中的任务「${a.data.keyword}」，已为你打开；可以先停止它`, "bad"); location.hash = `#/selscreen/${a.data.id}`; return; }
@@ -201,6 +207,9 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
     const err = limitError(); V.limErr = err;
     if (err) { const el = $("ssLimErr"); if (el) el.textContent = err; $("ssLimit")?.classList.add("input-bad"); $("ssLimit")?.focus(); return; }
     const r = V.run, lim = Number($("ssLimit").value);
+    if (DEMO && QSP.has("demoqueue")) { const e = Math.min(lim, BATCH); Object.assign(r, { max_rows: lim, status: "queued", current_batch: 1, queue_at: new Date().toISOString() });
+      SQ.demoAdd({ id: r.id, keyword: r.keyword, status: "queued", max_rows: lim, current_batch: 1, queue_at: r.queue_at }, { id: `${r.id}-b1`, run_id: r.id, batch_no: 1, offset_start: 1, offset_end: e, status: "queued", scraped_count: 0, passed_count: 0 });
+      (V.demoRuns[r.id] ||= { run: r, batches: [], links: {} }).batches = [{ id: `${r.id}-b1`, batch_no: 1, offset_start: 1, offset_end: e, status: "queued", scraped_count: 0, passed_count: 0, excluded_count: 0, demo: true }]; return refresh(); }
     if (DEMO) { r.max_rows = lim; return demoBatch(r, 1); }
     const { data, error } = await getSb().rpc("sel_start", { p_run: r.id, p_limit: lim }); if (error) return toast(`开始失败：${error.message}`, "bad");
     if (data === false) toast("任务状态已变化（可能在另一个标签页已经开始），已刷新", "bad"); load(r.id);
@@ -527,7 +536,7 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
     const ST = { count_queued: "排队查询数量", counting: "读取结果数中", queued: "排队中（等待 box 抓取进程）", running: "读取 EHunt 列表页中", batch_done: "本批完成", succeeded: "全部完成", failed: "失败", canceled: "已停止" };
     const prog = progressPanel(r);
     $("ssStart").innerHTML = `<div id="ssRecent"></div><div class="card ss-start"><div class="ss-form"><input id="ssKw" class="input" maxlength="${KW_MAX}" placeholder="EHunt 关键词，例如 acrylic decoration" value="${esc($("ssKw")?.value || r?.keyword || "")}">
-        <button class="btn btn-primary" id="ssCount"${active(r) ? " disabled" : ""}>查询数量</button><button class="btn btn-ghost btn-sm" id="ssKwLog" title="导出全部关键词查询记录（永久保留）">导出查询记录 CSV</button></div>${countPanel(r)}${prog}</div>`; DEMO ? loadRecent() : renderRecent();
+        <button class="btn btn-primary" id="ssCount"${countDisabled(r, V.counting) ? " disabled" : ""} title="${active(r) ? "当前任务进行中也可以查询新关键词，会排进队列按顺序执行" : ""}">查询数量</button><button class="btn btn-ghost btn-sm" id="ssKwLog" title="导出全部关键词查询记录（永久保留）">导出查询记录 CSV</button></div>${countPanel(r)}${prog}</div>`; DEMO ? loadRecent() : renderRecent();
     const done = V.batches.filter((b) => FIN.includes(b.status));
     const all = [...new Set(done.flatMap((b) => V.links[b.id] || []))], exAll = done.reduce((a, b) => a + (b.excluded_count || 0), 0);
     const exR = {}; done.forEach((b) => Object.entries(b.excluded_by_reason || {}).forEach(([k, v]) => exR[k] = (exR[k] || 0) + v));
