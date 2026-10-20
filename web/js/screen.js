@@ -90,13 +90,12 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
   }
 
   // 预筛选批次列表：「<关键词> 第N批」，按关键词分组（最近发送的关键词在前），组内按发送顺序
-  function renderBatches() {
-    const el = $("screenBatches"); if (!el) return; const G = screenBatchGroups(V.sbatches || []);
-    if (!G.length) { el.innerHTML = ""; return; }
-    const demo = (V.sbatches || []).some((b) => b.demo) ? ' <span class="pill pill-bad">演示数字</span>' : "";
-    el.innerHTML = `<div class="sc-blist"><div class="sc-bgrp"><span class="sc-bkw">获取链接批次${demo}</span><a class="fchip sc-bchip${V.batch ? "" : " active"}" href="#/screen">全部</a></div>${G.map((g) =>
-      `<div class="sc-bgrp"><span class="sc-bkw">${esc(g.keyword)}</span>${g.items.map((it) => `<a class="fchip sc-bchip${V.batch === it.id ? " active" : ""}" href="#/screen/${esc(it.id)}">${esc(it.label)}</a>`).join("")}</div>`).join("")}</div>`;
+  function renderBatches() { // 批次芯片列表已移除；旧链接 #/screen/<批次> 仍只看该批次，并给出返回「全部」的入口
+    const el = $("screenBatches"); if (!el) return;
+    const demo = (V.sbatches || []).some((b) => b.demo) ? '<span class="pill pill-bad">演示数字</span>' : "";
+    el.innerHTML = V.batch || demo ? `<div class="sc-only hint">${V.batch ? `正在查看单个发送批次 · <a href="#/screen" data-sall="1">查看全部</a> ` : ""}${demo}</div>` : "";
   }
+
   function render() {
     V.bidx = batchIndex(V.sbatches || []); renderBatches();
     { const el = $("screenCounts"); if (el) {       const nSel = [...V.sel].filter((id) => V.items.some((it) => it.id === id)).length, demoTag = (V.sbatches || []).some((b) => b.demo) ? ' <span class="pill pill-bad">演示数字</span>' : "";
