@@ -3,7 +3,7 @@ import { computeVelocity, computeManualVelocity, cmpVelocity, velocityBadge, loa
 import { amzBlock, amzUrls, openAll, applyEdit, kwList, MAX_KW, DIR_SELECT_HTML } from "./amzsearch.js";
 import { createScreen, ANOMALY_PREFIX, anomalyReason } from "./screen.js?v=1cd5e187";
 import { createExWords } from "./exwords.js?v=c9174633";
-import { createSelScreen } from "./selscreen.js?v=18ecf366";
+import { createSelScreen } from "./selscreen.js?v=9e5d522a";
 
 // ?demo=1：纯前端示例数据，不登录、不连 Supabase，仅用于预览界面（&offline=1 / &quota=1 预览横幅）
 const QS = new URLSearchParams(location.search);
@@ -73,12 +73,14 @@ let modalValidate = null;
 function confirmDialog({ title, body, ok = "确定", danger = false, validate = null }) {
   modalValidate = validate; $("modalTitle").textContent = title; $("modalBody").innerHTML = body;
   $("modalOk").textContent = ok; $("modalOk").className = `btn ${danger ? "btn-danger" : "btn-primary"}`;
-  $("modal").classList.remove("hidden"); $("modalOk").focus();
+  $("modal").classList.remove("hidden"); $("modalOk").focus(); modalOpenedAt = performance.now();
   return new Promise((res) => { modalRes = res; });
 }
 const closeModal = (v) => { modalValidate = null; $("modal").classList.add("hidden"); const r = modalRes; modalRes = null; r && r(v); };
-$("modalOk").onclick = () => { const v = modalValidate ? modalValidate() : true; if (v) closeModal(v); }; $("modalCancel").onclick = () => closeModal(false);
-$("modal").addEventListener("click", (ev) => { if (ev.target.id === "modal") closeModal(false); });
+$("modalOk").onclick = () => { if (modalFresh()) return; const v = modalValidate ? modalValidate() : true; if (v) closeModal(v); }; $("modalCancel").onclick = () => closeModal(false);
+// 双击打开按钮时第二下落在遮罩上 → 原来会立刻“取消”（审计 #1）：打开后 600ms 内的遮罩点击忽略；确定按钮同样防误触
+let modalOpenedAt = 0; const modalFresh = () => performance.now() - modalOpenedAt < 600;
+$("modal").addEventListener("click", (ev) => { if (ev.target.id === "modal" && !modalFresh()) closeModal(false); });
 const csvCell = (v) => { let s = v == null ? "" : Array.isArray(v) ? v.join(" | ") : String(v);
   if (/^[=+\-@\t\r]/.test(s)) s = "'" + s; // 防 CSV 公式注入
   return /[",\n\r]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
@@ -951,21 +953,7 @@ function renderLibrary() {
     <p class="muted">${totalAll ? (L.stage === "candidate" || L.stage === "all" ? "在任务中点“☆ 加入产品库”会进入备选" : "在备选中选择产品移到这里") : "在已完成任务上点“☆ 加入产品库”，或勾选多个任务批量加入"}</p></div>`;
 }
 const SCR = createScreen({ $, esc, imgUrl, toast, getSb: () => sb, DEMO, QS, confirmDialog, getStatus: () => S.status });
-// 获取链接 → 预筛选：直接复用任务页的提交路径（batches + jobs.prescreen=true），超过单次上限自动分组插入
-async function sendToPrescreen(urls) {
-  const list = []; const seen = new Set();
-  for (const u of urls) { const r = checkLine(u); if (r.reason) continue; const k = r.id ? `id:${r.id}` : r.url; if (!seen.has(k)) { seen.add(k); list.push(r); } }
-  if (!list.length) { toast("没有有效链接", "bad"); return false; }
-  if (DEMO) { toast(`演示模式不会提交：${list.length} 条将进入预筛选`, "ok"); if (!QS.has("stay")) location.hash = "#/screen"; return true; }
-  const { data: batch, error } = await sb.from("batches").insert({ name: `获取链接 ${new Date().toISOString()}` }).select().single();
-  if (error) { toast(`提交失败：${error.message}`, "bad"); return false; }
-  for (let i = 0; i < list.length; i += MAX_SUBMIT) {
-    const { error: e2 } = await sb.from("jobs").insert(list.slice(i, i + MAX_SUBMIT).map((r) => ({ batch_id: batch.id, etsy_url: r.url, ...(r.id ? { etsy_listing_id: r.id } : {}), prescreen: true })));
-    if (e2) { toast(`提交失败（已提交 ${i} 条）：${e2.message}`, "bad"); return i > 0; } // 部分提交也算已发送
-  }
-  toast(`✓ 已提交 ${list.length} 条预筛选`, "ok"); location.hash = `#/screen/${batch.id}`; return true;
-}
-const SSC = createSelScreen({ $, esc, toast, getSb: () => sb, DEMO, confirmDialog, sendToPrescreen });
+const SSC = createSelScreen({ $, esc, toast, getSb: () => sb, DEMO, confirmDialog });
 const EXW = createExWords({ $, esc, toast, getSb: () => sb, DEMO, confirmDialog });
 function route() {
   const lib = location.hash.startsWith("#/library"), scr = location.hash.startsWith("#/screen"), ssc = location.hash.startsWith("#/selscreen");

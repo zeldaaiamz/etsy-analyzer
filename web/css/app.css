@@ -593,3 +593,4 @@ html,body{overflow-x:hidden}
 .ss-q-row .ss-pg-bar{margin:6px 0 4px}.ss-q-row>.hint,.ss-q-row>.warn{font-size:12px;margin-left:30px}
 .pill-mute{background:var(--surface-2);color:var(--text-2)}.ss-q-del:hover{color:var(--bad)}.ss-q-off{margin:8px 0 0}
 @media (max-width:640px){.ss-q-acts{width:100%;justify-content:flex-end}.ss-q-row>.hint,.ss-q-row>.warn{margin-left:0}}
+.ss-send-list{margin:6px 0 8px 18px;padding:0}.ss-send-list li{margin:2px 0}

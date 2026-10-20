@@ -38,17 +38,31 @@ export function recentOpen(store, narrow) { const v = store?.getItem?.(RECENT_KE
 export function recentList(rows, now = Date.now()) { const since = now - 3 * 864e5; return (rows || []).filter((r) => Date.parse(r.created_at) > since).sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, RECENT_N); }
 // 送去预筛选状态（按批次，sel_batches.sent_to_screen_at，038）：显示最近一次发送的批次，如「第二批已发送」；从未发送 →「未发送」
 export const cnNum = (n) => { const d = "零一二三四五六七八九"; n = Number(n) || 0; if (n < 10) return d[n]; if (n < 20) return "十" + (n % 10 ? d[n % 10] : ""); if (n < 100) return d[Math.floor(n / 10)] + "十" + (n % 10 ? d[n % 10] : ""); return String(n); };
+// 039：sel_batches.sent_count = 本批已发送多少条（按 rank 顺序）；038 旧标记（sent_count 为空）视为整批已发送
+export function sendState(b, total = b?.passed_count) {
+  const t = Math.max(0, Number(total) || 0);
+  if (!b?.sent_to_screen_at) return { sent: 0, total: t, full: false, partial: false, left: t, at: null };
+  const n = b.sent_count == null ? t : Math.min(t, Number(b.sent_count) || 0);
+  return { sent: n, total: t, full: n >= t, partial: n > 0 && n < t, left: t - n, at: b.sent_to_screen_at };
+}
 export function sentInfo(batches) {
   const S = (batches || []).filter((b) => b.sent_to_screen_at).sort((a, b) => Date.parse(b.sent_to_screen_at) - Date.parse(a.sent_to_screen_at));
   if (!S.length) return { sent: false, text: "未发送", tip: "这次查找的链接还没有送去预筛选" };
-  const nos = [...new Set(S.map((b) => b.batch_no))].sort((a, b) => a - b);
-  return { sent: true, text: `第${cnNum(S[0].batch_no)}批已发送`, tip: `第${nos.map(cnNum).join("、")}批已发送到预筛选` };
+  const nos = [...new Set(S.map((b) => b.batch_no))].sort((a, b) => a - b), st = sendState(S[0]);
+  return { sent: true, partial: st.partial, text: `第${cnNum(S[0].batch_no)}批已发送${st.partial ? `（部分 ${st.sent}/${st.total}）` : ""}`, tip: `第${nos.map(cnNum).join("、")}批已发送到预筛选` };
+}
+export const fmtAt = (iso) => { const d = new Date(iso); return isNaN(d) ? "" : d.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }); };
+// 「送去预筛选」确认框文字：未发送 / 已全部发送（明确再发一次）/ 部分发送（发剩余）
+export function sendPlan(batches, linksOf, single) {
+  const rows = batches.map((b) => ({ b, st: sendState(b, (linksOf(b.id) || []).length) })).filter((x) => x.st.total > 0);
+  if (single) { const x = rows[0]; if (!x) return null; return { ids: [x.b.id], resend: x.st.full, n: x.st.full ? x.st.total : x.st.left, rows }; }
+  const todo = rows.filter((x) => !x.st.full); return { ids: todo.map((x) => x.b.id), resend: false, n: todo.reduce((a, x) => a + x.st.left, 0), rows: todo, skipped: rows.filter((x) => x.st.full) };
 }
 // 等待了多久（box 暂停时排队会很久，给出提示，不是卡死）
 export const waitedMin = (iso, now = Date.now()) => (iso ? Math.max(0, Math.floor((now - Date.parse(iso)) / 60000)) : 0);
-export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sendToPrescreen }) {
+export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
   const QSP = new URLSearchParams(location.search);
-  const V = { addErr: "", run: null, batches: [], links: {}, open: new Set(), timer: null, fx: null, demoRuns: {}, recent: null, limErr: "", busy: new Set(), seq: 0, lastSt: null };
+  const V = { addErr: "", run: null, batches: [], links: {}, open: new Set(), timer: null, fx: null, demoRuns: {}, recent: null, limErr: "", busy: new Set(), seq: 0, lastSt: null, sending: false };
   const FILTERS = { price_min: 8, price_max: 40, min_sales: 100, min_sales_7d: 4, sort: "↓7-day sales" };
   const ACTIVE_ST = ["count_queued", "counting", "queued", "running", "paused"];  // 与 sel_delete_run 一致（037/038）
   const active = (r) => r && ["count_queued", "counting", "queued", "running"].includes(r.status);
@@ -189,14 +203,45 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
     const raw = V.batches.flatMap((b) => V.links[b.id] || []), list = [...new Set(raw)];
     return { list, dup: raw.length - list.length };
   }
-  async function prescreen(bid) {
-    const list = V.links[bid] || []; if (!list.length) return;
-    const b = V.batches.find((x) => x.id === bid);
-    if (!await confirmDialog({ title: `把第 ${b?.batch_no} 批送去预筛选？`, ok: `送去预筛选（${list.length} 条）`, body: `<p>将提交 <b>${list.length}</b> 条链接为预筛选任务（每条新 listing 消耗 1 次 EHunt 额度，24 小时内重复的走缓存），提交后跳到「预筛选」页。</p>` })) return;
-    if (!await sendToPrescreen(list)) return;
-    const at = new Date().toISOString(); if (b) b.sent_to_screen_at = at;   // 只有真正提交成功才记“已发送”
-    if (!DEMO) { const { error } = await getSb().rpc("sel_mark_sent", { p_batches: [bid] }); if (error) console.warn("sel_mark_sent（需要 038）", error.message); }
-    render(); loadRecent();
+  // 送去预筛选（039 sel_send_to_screen：一个事务建预筛选批次（每个 ≤500 条）+ 任务 + 标记本批；服务端按用户串行，已发送的默认跳过 → 连点不会重复）
+  async function prescreen(bid, all = false) {
+    if (V.sending) return;
+    const fin = V.batches.filter((b) => FIN.includes(b.status) && (V.links[b.id] || []).length);
+    const plan = sendPlan(all ? fin : fin.filter((b) => b.id === bid), (id) => V.links[id], !all); if (!plan || !plan.ids.length) return toast(all ? "所有批次都已发送过" : "本批没有可发送的链接", "bad");
+    const quota = "<p class=\"hint\">每条新 listing 消耗 1 次 EHunt 额度（24 小时内重复的走缓存）；每个预筛选批次最多 500 条，超过自动分成多个；预筛选排队+运行中最多 1000 条，超出的部分之后可以点「发送剩余」。</p>";
+    let title, ok, body;
+    if (all) { title = "发送全部批次到预筛选？"; ok = `发送 ${plan.n.toLocaleString()} 条`;
+      body = `<p>将发送以下批次（已发送过的跳过）：</p><ul class="ss-send-list">${plan.rows.map((x) => `<li>第 ${x.b.batch_no} 批：<b>${x.st.left.toLocaleString()}</b> 条${x.st.partial ? `（剩余，已发 ${x.st.sent}/${x.st.total}）` : ""}</li>`).join("")}</ul>${plan.skipped.length ? `<p class="hint">跳过已发送：${plan.skipped.map((x) => `第 ${x.b.batch_no} 批`).join("、")}</p>` : ""}<p>合计 <b>${plan.n.toLocaleString()}</b> 条（批次之间重复的链接只发一次）。</p>${quota}`; }
+    else { const x = plan.rows[0];
+      if (x.st.full) { title = `第 ${x.b.batch_no} 批已发送过`; ok = `再发一次（${x.st.total} 条）`; body = `<p class="warn">这一批已于 <b>${esc(fmtAt(x.st.at))}</b> 发送过，确定要再发一次？</p><p>再发会在预筛选里新建一份（${x.st.total} 条）。</p>${quota}`; }
+      else if (x.st.partial) { title = `发送第 ${x.b.batch_no} 批剩余的链接？`; ok = `发送剩余 ${x.st.left} 条`; body = `<p>这一批已于 ${esc(fmtAt(x.st.at))} 发送了 ${x.st.sent}/${x.st.total} 条，将接着发送剩余 <b>${x.st.left}</b> 条。</p>${quota}`; }
+      else { title = `把第 ${x.b.batch_no} 批送去预筛选？`; ok = `送去预筛选（${x.st.total} 条）`; body = `<p>将提交 <b>${x.st.total}</b> 条链接为预筛选任务，提交后跳到「预筛选」页。</p>${quota}`; } }
+    if (!await confirmDialog({ title, ok, body })) return;
+    V.sending = all ? "all" : bid; render();
+    try {
+      let res, error;
+      if (DEMO) res = await demoSend(plan.ids, plan.resend);
+      else ({ data: res, error } = await getSb().rpc("sel_send_to_screen", { p_batches: plan.ids, p_resend: plan.resend }));
+      if (error) return toast(/Could not find the function|does not exist/.test(error.message) ? "发送失败：需要后台先执行 039 迁移（没有发送任何链接）" : `发送失败（没有发送任何链接）：${error.message}`, "bad");
+      for (const r of res?.batches || []) { const b = V.batches.find((x) => x.id === r.batch_id); if (b && r.sent) Object.assign(b, { sent_to_screen_at: r.sent_at, sent_count: r.sent_count }); }
+      render(); loadRecent();   // 先标记、刷新，再跳转（039 在同一事务里已写好标记）
+      const left = (res?.batches || []).reduce((a, r) => a + Math.max(0, r.total - r.sent_count), 0);
+      if (!res?.sent) return toast("这些批次都已发送过，没有重复发送", "bad");
+      if (res.limited) return toast(`已发送 ${res.sent} 条（${res.screen_batches} 个预筛选批次）；还有 ${left} 条因为预筛选排队已满 1000 条没有发送，等预筛选跑完一些后点「发送剩余」`, "bad");
+      toast(`✓ 已发送 ${res.sent} 条到预筛选${res.screen_batches > 1 ? `（分成 ${res.screen_batches} 个批次，每个 ≤500 条）` : ""}`, "ok");
+      if (!DEMO && res.first_screen_batch) location.hash = `#/screen/${res.first_screen_batch}`;
+    } catch (e) { toast(`发送失败（没有发送任何链接）：${e.message || e}`, "bad"); }
+    finally { V.sending = false; render(); }
+  }
+  // 演示：与 039 相同的规则（额度 ?sendcap=，耗时 ?sendms=），不连数据库
+  async function demoSend(ids, resend) {
+    await new Promise((r) => setTimeout(r, Number(QSP.get("sendms")) || 700));
+    let cap = QSP.has("sendcap") ? Number(QSP.get("sendcap")) : 1000; const seen = new Set(), out = []; let sent = 0, nb = 0, limited = false; const at = new Date().toISOString();
+    for (const id of ids) { const b = V.batches.find((x) => x.id === id), L = V.links[id] || [], st = sendState(b, L.length), d0 = resend ? 0 : st.sent; let n = 0, k = 0;
+      for (const u of L.slice(d0)) { if (seen.has(u)) { n++; continue; } if (cap <= 0) { limited = true; break; } if (!k || k >= 500) { nb++; k = 0; } seen.add(u); k++; n++; cap--; sent++; }
+      out.push({ batch_id: id, batch_no: b.batch_no, sent: n, sent_count: d0 + n, total: L.length, sent_at: n ? at : b.sent_to_screen_at }); }
+    if (!sent && limited) throw new Error("预筛选排队中+运行中的任务已达上限 1000 条，请等预筛选跑完一些后再发送");
+    return { batches: out, sent, screen_batches: nb, limited };
   }
   async function copy(bid) {
     const { list, dup } = linksOf(bid);
@@ -228,7 +273,8 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
     }
     const sb = getSb(); if (!sb) return;
     const q = (cols) => sb.from("sel_runs").select(cols).gte("created_at", new Date(Date.now() - 3 * 864e5).toISOString()).order("created_at", { ascending: false }).limit(RECENT_N);
-    let { data, error } = await q("id,keyword,status,created_at,passed_count,total_count,sel_batches(batch_no,sent_to_screen_at)"); // 同一次请求带上各批发送状态
+    let { data, error } = await q("id,keyword,status,created_at,passed_count,total_count,sel_batches(batch_no,sent_to_screen_at,sent_count,passed_count)"); // 同一次请求带上各批发送状态（039 sent_count：部分发送）
+    if (error) ({ data, error } = await q("id,keyword,status,created_at,passed_count,total_count,sel_batches(batch_no,sent_to_screen_at)")); // 039 未执行
     if (error) ({ data, error } = await q("id,keyword,status,created_at,passed_count,total_count")); // 038 未执行：没有 sent_to_screen_at 列 → 全部显示未发送
     V.recent = error ? [] : data || []; renderRecent();
   }
@@ -271,7 +317,7 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
     const kw = id === "demo-recent-1" ? "acrylic decoration" : "wedding sign", n = id === "demo-recent-1" ? 20 : 1400;
     const run = { id, keyword: kw, status: id === "demo-recent-1" ? "succeeded" : "batch_done", total_count: n, max_rows: n, batch_size: BATCH, current_batch: 1, remaining_count: n - Math.min(n, BATCH), created_at: new Date(Date.now() - (id === "demo-recent-1" ? 5 : 30) * 36e5).toISOString() };
     const pass = id === "demo-recent-1" ? 7 : 312, b = { id: `${id}-b1`, batch_no: 1, offset_start: 1, offset_end: Math.min(n, BATCH), status: "done", scraped_count: Math.min(n, BATCH), passed_count: pass, excluded_count: Math.min(n, BATCH) - pass, excluded_by_reason: { "定制": Math.min(n, BATCH) - pass }, demo: true };
-    (V.recentFx?.[id]?.sel_batches || []).forEach((x) => { if (x.batch_no === b.batch_no) b.sent_to_screen_at = x.sent_to_screen_at; });
+    (V.recentFx?.[id]?.sel_batches || []).forEach((x) => { if (x.batch_no === b.batch_no) Object.assign(b, { sent_to_screen_at: x.sent_to_screen_at, sent_count: x.sent_count ?? null }); });
     V.demoRuns[id] = { run, batches: [b], links: { [b.id]: demoLinks(run, 1, pass) } };
   }
   // 演示截图：?demo=1&sprog=counting|reading|vision|done|failed#/selscreen/demo-prog（数字都是演示数字）
@@ -287,6 +333,7 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
       Object.assign(b2, { scraped_count: P.judged, passed_count: P.passed, excluded_count: P.excluded }); run.progress = { ...P, batch_no: 2, target: 1000, at: iso(2) };
     } else if (kind === "done") {
       Object.assign(b2, { status: "done", scraped_count: 1000, passed_count: 341, excluded_count: 651, dup_count: 8, excluded_by_reason: { "定制": 560, "IP": 41, "材质": 29, "素材/数字文件": 21 }, finished_at: iso(20) });
+      const sf = QSP.get("sendfx"); if (sf === "sent") Object.assign(b1, { sent_to_screen_at: iso(3 * 3600) }); else if (sf === "partial") Object.assign(b1, { sent_to_screen_at: iso(3600), sent_count: 200 }); // 演示：已发送 / 部分发送
       Object.assign(run, { status: "succeeded", remaining_count: 0, progress: { stage: "done", batch_no: 2, target: 1000, read: 1000, judged: 1000, vision_pending: 0, passed: 341, excluded: 651, at: iso(20) } });
     } else if (kind === "failed") {
       Object.assign(b2, { status: "failed", scraped_count: 286, passed_count: 97, excluded_count: 187, finished_at: iso(60) });
@@ -394,7 +441,9 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
     const demo = b.demo ? '<span class="pill pill-bad">演示数字</span>' : "";
     const exl = b.excluded_count ? `<span class="hint">已排除 ${b.excluded_count}：${esc(sumReasons(b.excluded_by_reason))}（不调豆包、不显示、不入库）</span>` : "";
     const tot = b.offset_end - b.offset_start + 1;
-    const psBtn = `${b.sent_to_screen_at ? '<span class="pill pill-ok" title="已送去预筛选">已发送</span>' : ""}<button class="btn btn-primary btn-sm" data-ssps="${esc(b.id)}"${links.length ? "" : " disabled"}>送去预筛选（${links.length} 条）</button>`;
+    const st = sendState(b, links.length), busy = V.sending === b.id || V.sending === "all";
+    const mark = st.full ? `<span class="pill pill-ok" title="${esc(fmtAt(st.at))} 已送去预筛选">✓ 已发送</span>` : st.partial ? `<span class="pill pill-warn" title="${esc(fmtAt(st.at))} 发送了 ${st.sent}/${st.total} 条">已发送（部分 ${st.sent}/${st.total}）</span>` : "";
+    const psBtn = `${mark}<button class="btn ${st.full ? "btn-ghost" : "btn-primary"} btn-sm" data-ssps="${esc(b.id)}"${links.length && !V.sending ? "" : " disabled"}${busy ? ' aria-busy="true"' : ""}>${busy ? '<span class="spin"></span> 发送中…' : st.full ? `再次送去预筛选（${links.length} 条）` : st.partial ? `发送剩余（${st.left} 条）` : `送去预筛选（${links.length} 条）`}</button>`;
     const btns = `<button class="btn btn-ghost btn-sm" data-sscopy="${esc(b.id)}"${links.length ? "" : " disabled"}>复制本批</button><button class="btn btn-ghost btn-sm" data-ssdl="${esc(b.id)}"${links.length ? "" : " disabled"}>下载 TXT</button>${psBtn}`;
     if (b.status === "canceled" || b.status === "failed") { // 失败的批次也显示已通过的链接（原来只显示“失败”两个字，已入库的链接看不到也复制不了）
       const f = b.status === "failed", canRe = V.run?.status === (f ? "failed" : "canceled") && b === lastStopped();
@@ -429,7 +478,7 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
         <label class="hint">再读取 <input id="ssAdd" class="input input-sm ss-thr" type="number" min="1" max="${left}" value="${esc(val)}"> 条</label>
         <button class="btn btn-primary" id="ssNext">读取下一批（${(re + 1).toLocaleString()}–${e.toLocaleString()}）</button><button class="btn btn-ghost${nb > 1 ? "" : " hidden"}" id="ssAll">一键读取全部（${add.toLocaleString()} 条，${nb} 批）</button><span id="ssAddErr" class="warn" role="alert">${esc(V.addErr)}</span></div>`; })() : "";
     const cum = done.length > 1 || (r && r.status !== "succeeded" && done.length) ? `<div class="card ss-cum"><b>累计符合要求 <span class="ss-n ss-n-ok">${all.length.toLocaleString()}</span> 条</b><span class="hint">（${done.length} 批 · 已读 ${done.reduce((a, b) => a + b.scraped_count, 0).toLocaleString()} 条）</span>${V.batches.some((b) => b.demo) ? '<span class="pill pill-bad">演示数字</span>' : ""}<span class="spacer"></span>
-        <button class="btn btn-primary btn-sm" data-sscopy="all"${all.length ? "" : " disabled"}>复制全部批次</button><button class="btn btn-ghost btn-sm" data-ssdl="all"${all.length ? "" : " disabled"}>下载 TXT</button></div>` : "";
+        <button class="btn btn-primary btn-sm" data-sscopy="all"${all.length ? "" : " disabled"}>复制全部批次</button><button class="btn btn-ghost btn-sm" data-ssdl="all"${all.length ? "" : " disabled"}>下载 TXT</button>${(() => { const P = sendPlan(done.filter((b) => (V.links[b.id] || []).length), (id) => V.links[id], false); return `<button class="btn btn-primary btn-sm" id="ssSendAll"${P.ids.length && !V.sending ? "" : " disabled"} title="${P.ids.length ? `发送 ${P.ids.length} 个未发送/部分发送的批次` : "所有批次都已发送"}">${V.sending === "all" ? '<span class="spin"></span> 发送中…' : P.ids.length ? `发送全部批次（${P.n.toLocaleString()} 条）` : "全部批次已发送"}</button>`; })()}</div>` : "";
     body.innerHTML = !r ? '<div class="card empty"><div class="ico">◎</div><h3>输入关键词，先“查询数量”</h3><p class="muted">再填写最多读取条数点“抓取”</p></div>'
       : `${cum}${V.batches.map(batchBlock).join("")}${nextBar}
         ${done.length ? `<p class="hint ss-note">已排除合计 ${exAll.toLocaleString()}${exAll ? `：${esc(sumReasons(exR))}` : ""}（原因只记在 box 本地日志，3 天后删除）· 仅保留最近 3 天的筛选结果 · 网页不提供搜索，查历史请在对话里问序猿</p>` : ""}`;
@@ -438,7 +487,8 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog, sen
     const t = e.target, id = t.id;
     if (id === "ssCount") return guard("count", count); if (id === "ssGo") return guard("start", start); if (id === "ssStop") return guard("cancel", cancel);
     if (id === "ssResume") return guard("resume", resume);
-    if (t.dataset?.ssps) return prescreen(t.dataset.ssps);
+    const ps = t.closest?.("[data-ssps]"); if (ps) return guard("send", () => prescreen(ps.dataset.ssps));
+    if (t.closest?.("#ssSendAll")) return guard("send", () => prescreen(null, true));
     if (id === "ssNext") return guard("next", () => next(false)); if (id === "ssAll") return guard("next", () => next(true));
     if (t.dataset?.sscopy) return copy(t.dataset.sscopy);
     if (t.dataset?.ssdl) return download(t.dataset.ssdl);
