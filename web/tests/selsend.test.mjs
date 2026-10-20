@@ -38,3 +38,8 @@ test("046 自动发送：历史标签「已自动发送」；部分自动发送�
   const f = lsf(b, 341); assert.equal(f.filter(Boolean).length, 120); assert.ok(f[119] && !f[120]);
   assert.equal(lsf({ ...b, sent_count: 341, auto_pending: false }, 341).every(Boolean), true); // 补发完成后全部勾选
 });
+test("047 发送全部：全部已发送 → 只恢复（不重复发送）", () => {
+  const AT2 = "2026-10-20T03:14:09Z", L = { a: ["u1", "u2"], b: ["v1"] };
+  const P = sendPlan([{ id: "a", batch_no: 1, sent_to_screen_at: AT2, sent_count: 2 }, { id: "b", batch_no: 2, sent_to_screen_at: AT2 }], (id) => L[id], false);
+  assert.ok(P.restoreOnly); assert.deepEqual(P.ids, ["a", "b"]); assert.equal(P.n, 0); assert.equal(P.resend, false);
+});

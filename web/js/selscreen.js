@@ -68,7 +68,10 @@ export const fmtAt = (iso) => { const d = new Date(iso); return isNaN(d) ? "" : 
 export function sendPlan(batches, linksOf, single) {
   const rows = batches.map((b) => ({ b, st: sendState(b, (linksOf(b.id) || []).length) })).filter((x) => x.st.total > 0);
   if (single) { const x = rows[0]; if (!x) return null; return { ids: [x.b.id], resend: x.st.full, n: x.st.full ? x.st.total : x.st.left, rows }; }
-  const todo = rows.filter((x) => !x.st.full); return { ids: todo.map((x) => x.b.id), resend: false, n: todo.reduce((a, x) => a + x.st.left, 0), rows: todo, skipped: rows.filter((x) => x.st.full) };
+  const todo = rows.filter((x) => !x.st.full), skipped = rows.filter((x) => x.st.full);
+  // 047：全部已发送时仍可点 → 不重复发送，只把在预筛选里删除过的恢复显示
+  if (!todo.length && skipped.length) return { ids: skipped.map((x) => x.b.id), resend: false, n: 0, rows: [], skipped, restoreOnly: true };
+  return { ids: todo.map((x) => x.b.id), resend: false, n: todo.reduce((a, x) => a + x.st.left, 0), rows: todo, skipped };
 }
 // 等待了多久（box 暂停时排队会很久，给出提示，不是卡死）
 export const waitedMin = (iso, now = Date.now()) => (iso ? Math.max(0, Math.floor((now - Date.parse(iso)) / 60000)) : 0);
@@ -252,13 +255,14 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
   async function prescreen(bid, all = false) {
     if (V.sending) return;
     const fin = V.batches.filter((b) => FIN.includes(b.status) && (V.links[b.id] || []).length);
-    const plan = sendPlan(all ? fin : fin.filter((b) => b.id === bid), (id) => V.links[id], !all); if (!plan || !plan.ids.length) return toast(all ? "所有批次都已发送过" : "本批没有可发送的链接", "bad");
+    const plan = sendPlan(all ? fin : fin.filter((b) => b.id === bid), (id) => V.links[id], !all); if (!plan || !plan.ids.length) return toast(all ? "没有可发送的批次" : "本批没有可发送的链接", "bad");
     const quota = "<p class=\"hint\">每条新 listing 消耗 1 次 EHunt 额度（已获取成功的直接沿用，不再重复获取）；每个预筛选批次最多 500 条，超过自动分成多个；预筛选排队+运行中最多 1000 条，超出的部分之后可以点「发送剩余」。</p>";
     let title, ok, body;
-    if (all) { title = "发送全部批次到预筛选？"; ok = `发送 ${plan.n.toLocaleString()} 条`;
+    if (all && plan.restoreOnly) { title = "全部批次都已发送"; ok = "恢复已删除的"; body = "<p>不会重复发送。之前在预筛选里删除过的链接（已获取过的）会恢复显示，不重新获取、不耗额度。</p>"; }
+    else if (all) { title = "发送全部批次到预筛选？"; ok = `发送 ${plan.n.toLocaleString()} 条`;
       body = `<p>将发送以下批次（已发送过的跳过）：</p><ul class="ss-send-list">${plan.rows.map((x) => `<li>第 ${x.b.batch_no} 批：<b>${x.st.left.toLocaleString()}</b> 条${x.st.partial ? `（剩余，已发 ${x.st.sent}/${x.st.total}）` : ""}</li>`).join("")}</ul>${plan.skipped.length ? `<p class="hint">跳过已发送：${plan.skipped.map((x) => `第 ${x.b.batch_no} 批`).join("、")}</p>` : ""}<p>合计 <b>${plan.n.toLocaleString()}</b> 条（批次之间重复的链接只发一次）。</p>${quota}`; }
     else { const x = plan.rows[0];
-      if (x.st.full) { title = `第 ${x.b.batch_no} 批已发送过`; ok = "再发一次（只重新获取失败的）"; body = `<p class="warn">这一批已于 <b>${esc(fmtAt(x.st.at))}</b> 发送过，确定要再发一次？</p><p>已经在预筛选列表里的链接会自动跳过（同一链接只出现一次）。<b>除了获取失败，不重复获取</b>：已获取成功、排队中、处理中的链接直接沿用原结果；只有之前获取失败的会重新获取。</p>${quota}`; }
+      if (x.st.full) { title = `第 ${x.b.batch_no} 批已发送过`; ok = "再发一次（恢复已删除的 + 重新获取失败的）"; body = `<p class="warn">这一批已于 <b>${esc(fmtAt(x.st.at))}</b> 发送过，确定要再发一次？</p><p>已经在预筛选列表里的链接会自动跳过（同一链接只出现一次）；<b>在预筛选里删除过的会恢复显示</b>（不重新获取）。<b>除了获取失败，不重复获取</b>：已获取成功、排队中、处理中的链接直接沿用原结果；只有之前获取失败的会重新获取。</p>${quota}`; }
       else if (x.st.partial) { title = `发送第 ${x.b.batch_no} 批剩余的链接？`; ok = `发送剩余 ${x.st.left} 条`; body = `<p>这一批已于 ${esc(fmtAt(x.st.at))} 发送了 ${x.st.sent}/${x.st.total} 条，将接着发送剩余 <b>${x.st.left}</b> 条。</p>${quota}`; }
       else { title = `把第 ${x.b.batch_no} 批送去预筛选？`; ok = `送去预筛选（${x.st.total} 条）`; body = `<p>将提交 <b>${x.st.total}</b> 条链接为预筛选任务，提交后跳到「预筛选」页。</p>${quota}`; } }
     if (!await confirmDialog({ title, ok, body })) return;
@@ -536,7 +540,7 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
         <label class="hint">再读取 <input id="ssAdd" class="input input-sm ss-thr" type="number" min="1" max="${left}" value="${esc(val)}"> 条</label>
         <button class="btn btn-primary" id="ssNext">读取下一批（${(re + 1).toLocaleString()}–${e.toLocaleString()}）</button><button class="btn btn-ghost${nb > 1 ? "" : " hidden"}" id="ssAll">一键读取全部（${add.toLocaleString()} 条，${nb} 批）</button><span id="ssAddErr" class="warn" role="alert">${esc(V.addErr)}</span></div>`; })() : "";
     const cum = done.length > 1 || (r && r.status !== "succeeded" && done.length) ? `<div class="card ss-cum"><b>累计符合要求 <span class="ss-n ss-n-ok">${all.length.toLocaleString()}</span> 条</b><span class="hint">（${done.length} 批 · 已读 ${done.reduce((a, b) => a + b.scraped_count, 0).toLocaleString()} 条）</span>${V.batches.some((b) => b.demo) ? '<span class="pill pill-bad">演示数字</span>' : ""}<span class="spacer"></span>
-        <button class="btn btn-primary btn-sm" data-sscopy="all"${all.length ? "" : " disabled"}>复制全部批次</button><button class="btn btn-ghost btn-sm" data-ssdl="all"${all.length ? "" : " disabled"}>下载 TXT</button>${(() => { const P = sendPlan(done.filter((b) => (V.links[b.id] || []).length), (id) => V.links[id], false); return `<button class="btn btn-primary btn-sm" id="ssSendAll"${P.ids.length && !V.sending ? "" : " disabled"} title="${P.ids.length ? `发送 ${P.ids.length} 个未发送/部分发送的批次` : "所有批次都已发送"}">${V.sending === "all" ? '<span class="spin"></span> 发送中…' : P.ids.length ? `发送全部批次（${P.n.toLocaleString()} 条）` : "全部批次已发送"}</button>`; })()}</div>` : "";
+        <button class="btn btn-primary btn-sm" data-sscopy="all"${all.length ? "" : " disabled"}>复制全部批次</button><button class="btn btn-ghost btn-sm" data-ssdl="all"${all.length ? "" : " disabled"}>下载 TXT</button>${(() => { const P = sendPlan(done.filter((b) => (V.links[b.id] || []).length), (id) => V.links[id], false); return `<button class="btn btn-primary btn-sm" id="ssSendAll"${P.ids.length && !V.sending ? "" : " disabled"} title="${P.restoreOnly ? "所有批次都已发送；点此只恢复在预筛选里删除过的" : P.ids.length ? `发送 ${P.ids.length} 个未发送/部分发送的批次` : "所有批次都已发送"}">${V.sending === "all" ? '<span class="spin"></span> 发送中…' : P.restoreOnly ? "全部已发送 · 恢复已删除的" : P.ids.length ? `发送全部批次（${P.n.toLocaleString()} 条）` : "全部批次已发送"}</button>`; })()}</div>` : "";
     body.innerHTML = !r ? '<div class="card empty"><div class="ico">◎</div><h3>输入关键词，先“查询数量”</h3><p class="muted">再填写最多读取条数点“抓取”</p></div>'
       : `${cum}${V.batches.map(batchBlock).join("")}${nextBar}
         ${done.length ? `<p class="hint ss-note">已排除合计 ${exAll.toLocaleString()}${exAll ? `：${esc(sumReasons(exR))}` : ""}（原因只记在 box 本地日志，3 天后删除）· 仅保留最近 3 天的筛选结果 · 网页不提供搜索，查历史请在对话里问序猿</p>` : ""}`;
