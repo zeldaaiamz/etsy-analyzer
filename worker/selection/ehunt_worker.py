@@ -100,9 +100,97 @@ class Store:
     def lookup_patch(self, lid, **kw): self._req("PATCH", f"/rest/v1/ehunt_lookup_requests?listing_id=eq.{int(lid)}", kw, "return=minimal")
     def lookup_purge(self): return self._req("POST", "/rest/v1/rpc/ehunt_lookup_purge", {})
 
+# ---- 单页超时自动重试（2026-10-20 22:59 事故：第 14 页 reading rows 卡 637s，整个队列被堵约 10 分钟） ----
+# 每页（翻页/跳页 + 逐行读取）有硬超时；超时 → 记 warning → 关掉浏览器上下文，重新打开列表并设置筛选、跳回同一页重读，最多重试 PAGE_RETRIES 次。
+# 一页先整页读进内存、读完才 yield：超时的那一页一行都没有交出去 → 重读不会重复；已交出（已落定/在判断中）的 rank 绝不重读。
+# 全部重试都失败 → 抛 PageTimeout，走 handle_run 现有失败路径（本批“已停止”+中文原因，「继续本批」从断点接着读），队列继续往下走。
+PAGE_TIMEOUT_S = float(os.environ.get("EHUNT_PAGE_TIMEOUT_S", "90"))     # 正常一页 8-17s
+PAGE_RETRIES = max(0, int(os.environ.get("EHUNT_PAGE_RETRIES", "2")))   # 超时后重试次数（共 1 + 2 = 3 次）
+PAGE_KILL_GRACE_S = float(os.environ.get("EHUNT_PAGE_KILL_GRACE_S", "20"))  # 超过硬超时这么久仍卡在单个浏览器调用里 → 看门狗杀掉本 profile 的 chromium
+class PageTimeout(RuntimeError): pass
+
+def _kill_profile_browser(profile=None):
+    """看门狗（另一线程）：只杀本进程后代中 --user-data-dir=本 profile 的 chromium，让主线程卡住的 Playwright 调用立即报错返回。"""
+    profile = os.path.realpath(profile or PROFILE); me = os.getpid(); killed = []
+    try:
+        procs = {}
+        for d in os.listdir("/proc"):
+            if not d.isdigit(): continue
+            try:
+                ppid = int(open(f"/proc/{d}/stat").read().rsplit(")", 1)[1].split()[1])
+                cmd = open(f"/proc/{d}/cmdline", "rb").read().decode(errors="replace").split("\0")
+                procs[int(d)] = (ppid, cmd)
+            except Exception: continue
+        def descends(pid):
+            for _ in range(20):
+                pid = procs.get(pid, (0,))[0]
+                if pid == me: return True
+                if pid <= 1: return False
+            return False
+        for pid, (_, cmd) in procs.items():
+            if any(a.startswith("--user-data-dir=") and os.path.realpath(a.split("=", 1)[1]) == profile for a in cmd) and descends(pid):
+                try: os.kill(pid, 9); killed.append(pid)
+                except Exception: pass
+    except Exception: log.warning("page watchdog kill failed", exc_info=True)
+    return killed
+
+class _Watchdog:
+    """一页一次：deadline + grace 后仍未 disarm → 调 kill()。正常页（8-17s）只多一个空闲计时器线程，不影响速度。"""
+    def __init__(self, seconds, kill):
+        import threading
+        self.fired = False; self.kill = kill
+        self.t = threading.Timer(seconds, self._fire); self.t.daemon = True; self.t.start()
+    def _fire(self):
+        self.fired = True; log.warning("ehunt page watchdog: browser call stuck past hard timeout, killing browser to unblock"); self.kill()
+    def disarm(self): self.t.cancel()
+
+def page_loop(open_session, start_rank, end_rank, ps, between=None, timeout=None, retries=None, clock=time.monotonic, watchdog=None):
+    """与浏览器无关的翻页/超时/重试骨架（单测直接用假 session）。
+    open_session(page) → session：已打开列表并停在第 page 页；session.read(page, deadline) → (rows, has_next)，rows = [(rank, row)]，
+    超过 deadline 抛 PageTimeout；session.next(page, deadline) 翻到第 page 页；session.ctx 给 between；session.close()。"""
+    timeout = PAGE_TIMEOUT_S if timeout is None else timeout; retries = PAGE_RETRIES if retries is None else retries
+    watchdog = watchdog or (lambda s: _Watchdog(s, _kill_profile_browser))
+    page = (start_rank - 1) // ps + 1; done = start_rank - 1; sess = None; need_next = False
+    try:
+        while done < end_rank:
+            for att in range(retries + 1):
+                deadline = clock() + timeout; wd = watchdog(timeout + PAGE_KILL_GRACE_S); t0 = clock()
+                try:
+                    if sess is None: sess = open_session(page)
+                    elif need_next: sess.next(page, deadline)
+                    need_next = False
+                    rows, has_next = sess.read(page, deadline)
+                    if att and _PROG[0]: _PROG[0].update(retry=0)   # 重试成功：清掉网页上的“超时重试中”
+                    break
+                except LoginExpired: raise
+                except Exception as e:
+                    if not (isinstance(e, PageTimeout) or wd.fired or clock() > deadline or "Timeout" in type(e).__name__): raise
+                    log.warning("ehunt page %s: timed out after %.0fs (attempt %d/%d, limit %.0fs): %s — reopening same page (rank %s→)",
+                                page, clock() - t0, att + 1, retries + 1, timeout, str(e)[:120], done + 1)
+                    stage("page_retry", page=page, retry=att + 1, retry_max=retries)
+                    if sess is not None:
+                        try: sess.close()
+                        except Exception: log.warning("closing timed-out session failed", exc_info=True)
+                    sess = None; need_next = False
+                finally: wd.disarm()
+            else:
+                raise PageTimeout(f"EHunt 第 {page} 页读取超时（每次 {timeout:.0f} 秒，已重试 {retries} 次仍失败）")
+            for rank, row in rows:
+                if rank <= done: continue          # 重读时跳过已交出的 rank（防重复）
+                if rank > end_rank: break
+                yield row; done = rank
+            if between and sess is not None:
+                try: between(sess.ctx)
+                except Exception: log.warning("lookup between pages failed", exc_info=True)
+            if not has_next or done >= end_rank: break
+            page += 1; need_next = True
+    finally:
+        if sess is not None: sess.close()
+
 def scrape_ehunt(keyword, params, start_rank, end_rank, between=None):
     """读 EHunt 排名 start_rank..end_rank（含）：界面设好筛选 → 跳到对应页（每页 20）→ 逐行读 DOM。只在内存里产出行，不落盘。
-    between(ctx)：每读完一页调用一次（穿插处理预筛选主图查询，用同一浏览器上下文的新标签页，不影响本页状态）。"""
+    between(ctx)：每读完一页调用一次（穿插处理预筛选主图查询，用同一浏览器上下文的新标签页，不影响本页状态）。
+    每页硬超时 PAGE_TIMEOUT_S，超时重开同一页重试 PAGE_RETRIES 次（见 page_loop）。"""
     import re
     from playwright.sync_api import sync_playwright
     U = ui(); ps = int(U["page_size"]); num = lambda s: float("".join(ch for ch in (s or "") if ch.isdigit() or ch == ".") or 0)
@@ -110,48 +198,63 @@ def scrape_ehunt(keyword, params, start_rank, end_rank, between=None):
     def total_of(t):  # “637” / “6.26K” / “1.2M”
         t = re.split(r"↑", t or "")[0].strip().upper(); k = 1000 if t.endswith("K") else 1000000 if t.endswith("M") else 1
         return int(round(num(t) * k))
-    page = (start_rank - 1) // ps + 1
+    def left_ms(deadline):   # 每个 Playwright 调用的超时不超过本页剩余时间（最多 30s）
+        r = deadline - time.monotonic()
+        if r <= 0: raise PageTimeout("本页读取超时")
+        return max(1000, min(30000, int(r * 1000)))
+    class Sess:
+        def __init__(s, page):
+            s.ctx = None
+            s.ctx, s.pg = _open_list(p, keyword, params)
+            try:
+                stage("read_setup", page=page)
+                s.pg.wait_for_selector(U["row"], timeout=30000)
+                if page > 1:  # 续读/重试：分页 “Go to” 输入框
+                    old = s.first_href(); s.pg.fill(U["jump_input"], str(page)); s.pg.keyboard.press("Enter"); s.wait_page(page, old, time.monotonic() + PAGE_TIMEOUT_S)
+            except BaseException: s.close(); raise
+        def close(s):
+            if s.ctx is not None:
+                c, s.ctx = s.ctx, None
+                try: c.close()
+                except Exception as e: log.warning("ehunt ctx close failed (browser already gone?): %s", str(e)[:120])
+        def first_href(s):
+            e = s.pg.query_selector(U["row"] + " " + U["title"]); return e.get_attribute("href") if e else None
+        def wait_page(s, n, old, deadline):  # SPA 翻页：等到当前页码 = n 且首行变化
+            for i in range(60):
+                left_ms(deadline)
+                if i % 10 == 0: dismiss_overlays(s.pg, U)
+                a_ = s.pg.query_selector(U["active_page"])
+                if a_ and a_.inner_text().strip() == str(n) and s.first_href() != old: break
+                time.sleep(0.5)
+            else: raise RuntimeError(f"翻页到第 {n} 页超时")
+            time.sleep(1.5)
+        def next(s, n, deadline):
+            old = s.first_href(); _click(s.pg, U, U["next"], timeout=left_ms(deadline)); s.wait_page(n, old, deadline)
+        def read(s, page, deadline):
+            pg = s.pg; pg.set_default_timeout(left_ms(deadline))
+            pg.wait_for_selector(U["row"], timeout=left_ms(deadline)); dismiss_overlays(pg, U); t_page = time.time()
+            rank = (page - 1) * ps; out = []
+            log.info("ehunt page %s: reading rows (rank %s→, target %s)", page, rank + 1, end_rank); stage("reading", page=page)
+            for tr in pg.query_selector_all(U["row"]):
+                pg.set_default_timeout(left_ms(deadline))
+                a = tr.query_selector(U["title"])
+                if not a: continue
+                rank += 1
+                if rank < start_rank: continue
+                if rank > end_rank: break
+                lk = tr.query_selector(U["link"]); href = (lk.get_attribute("href") if lk else "") or a.get_attribute("href") or ""
+                lid = "".join(ch for ch in href.rstrip("/").split("/listing/")[-1].split("/product-detail/")[-1].split("/")[0] if ch.isdigit())
+                img = tr.query_selector(U["img"]); cell = lambda k: (lambda e: e.inner_text() if e else "")(tr.query_selector(U[k]))
+                out.append((rank, {"rank": rank, "page": page, "title": a.inner_text().strip(), "listing_id": lid, "url": f"https://www.etsy.com/listing/{lid}", "image_url": img.get_attribute("src") if img else "",
+                                   "price": num(cell("price")), "total_sales": total_of(cell("total")), "sales_7d": d7_of(cell("d7"))}))
+                time.sleep(0.3)
+            left_ms(deadline)
+            has_next = rank < end_rank and pg.query_selector(U["next"]) is not None
+            pg.set_default_timeout(30000)
+            log.info("ehunt page %s done: rank=%s, %.0fs", page, rank, time.time() - t_page)
+            return out, has_next
     with sync_playwright() as p:
-        ctx, pg = _open_list(p, keyword, params)
-        try:
-            def first_href():
-                e = pg.query_selector(U["row"] + " " + U["title"]); return e.get_attribute("href") if e else None
-            def wait_page(n, old):  # SPA 翻页：等到当前页码 = n 且首行变化
-                for i in range(60):
-                    if i % 10 == 0: dismiss_overlays(pg, U)
-                    a_ = pg.query_selector(U["active_page"])
-                    if a_ and a_.inner_text().strip() == str(n) and first_href() != old: break
-                    time.sleep(0.5)
-                else: raise RuntimeError(f"翻页到第 {n} 页超时")
-                time.sleep(1.5)
-            stage("read_setup", page=page)
-            pg.wait_for_selector(U["row"], timeout=30000)
-            if page > 1:  # 续读：分页 “Go to” 输入框
-                old = first_href(); pg.fill(U["jump_input"], str(page)); pg.keyboard.press("Enter"); wait_page(page, old)
-            rank = (page - 1) * ps
-            while rank < end_rank:
-                pg.wait_for_selector(U["row"], timeout=30000); dismiss_overlays(pg, U); t_page = time.time()
-                log.info("ehunt page %s: reading rows (rank %s→, target %s)", page, rank + 1, end_rank); stage("reading", page=page)
-                for tr in pg.query_selector_all(U["row"]):
-                    a = tr.query_selector(U["title"])
-                    if not a: continue
-                    rank += 1
-                    if rank < start_rank: continue
-                    if rank > end_rank: break
-                    lk = tr.query_selector(U["link"]); href = (lk.get_attribute("href") if lk else "") or a.get_attribute("href") or ""
-                    lid = "".join(ch for ch in href.rstrip("/").split("/listing/")[-1].split("/product-detail/")[-1].split("/")[0] if ch.isdigit())
-                    img = tr.query_selector(U["img"]); cell = lambda k: (lambda e: e.inner_text() if e else "")(tr.query_selector(U[k]))
-                    yield {"rank": rank, "page": page, "title": a.inner_text().strip(), "listing_id": lid, "url": f"https://www.etsy.com/listing/{lid}", "image_url": img.get_attribute("src") if img else "",
-                           "price": num(cell("price")), "total_sales": total_of(cell("total")), "sales_7d": d7_of(cell("d7"))}
-                    time.sleep(0.3)
-                log.info("ehunt page %s done: rank=%s, %.0fs", page, rank, time.time() - t_page)
-                if between:
-                    try: between(ctx)
-                    except Exception: log.warning("lookup between pages failed", exc_info=True)
-                nxt = pg.query_selector(U["next"])
-                if not nxt or rank >= end_rank: break
-                old = first_href(); _click(pg, U, U["next"]); page += 1; wait_page(page, old)
-        finally: ctx.close()
+        yield from page_loop(Sess, start_rank, end_rank, ps, between=between)
 
 # 标准筛选（需求文档 §2）：数量与抓取都必须带上，否则会拿到未筛选的总数（如 43,805）。
 # EHunt 的筛选不在 URL 里（https://ehunt.ai/etsy-product-research 无查询参数），只在页面状态里 → 必须通过界面操作设置。
