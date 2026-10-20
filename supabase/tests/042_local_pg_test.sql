@@ -20,13 +20,19 @@ update public.jobs set status = 'failed' where etsy_listing_id in (1004, 1005);
 update public.jobs set status = 'canceled' where etsy_listing_id in (1006, 1007);
 update public.jobs set status = 'running' where etsy_listing_id = 1008;
 select public.sel_send_to_screen(array['bbbbbbbb-0000-0000-0000-000000000001'::uuid], true) as r \gset
-select pg_temp.ok((:'r'::jsonb)->>'sent' = '4' and (:'r'::jsonb)->>'reused' = '6', '再发一次：只重新获取失败/取消的 4 条，6 条（成功/排队/处理中）复用');
+select pg_temp.ok((:'r'::jsonb)->>'sent' = '4' and ((:'r'::jsonb)->>'reused')::int + ((:'r'::jsonb)->>'dup')::int = 6, '再发一次：只重新获取失败/取消的 4 条，6 条（成功/排队/处理中）复用');
 select pg_temp.ok((select count(*) from public.jobs where etsy_listing_id = 1001) = 1, '成功的 listing 没有第二个任务');
 select pg_temp.ok((select count(*) from public.jobs where etsy_listing_id = 1008) = 1, '处理中的 listing 没有第二个任务');
 select pg_temp.ok((select count(*) from public.jobs where etsy_listing_id = 1004) = 2, '失败的 listing 重新获取');
+select pg_temp.ok((select count(*) from public.jobs where etsy_listing_id = 1004 and screen_hidden_at is null) = 1, '041+042：失败的旧任务隐藏，列表里仍只有一条');
+select pg_temp.ok(not exists (select 1 from public.jobs where prescreen and screen_hidden_at is null group by etsy_listing_id having count(*) > 1), '041+042：列表无重复');
+-- 隐藏的非失败任务：不再获取，计为 reused
+update public.jobs set screen_hidden_at = now() where etsy_listing_id = 1001;
+select pg_temp.ok((public.sel_send_to_screen(array['bbbbbbbb-0000-0000-0000-000000000001'::uuid], true))->>'reused' = '1', '已隐藏但成功的 listing 计为 reused、不重新获取');
+update public.jobs set screen_hidden_at = null where etsy_listing_id = 1001;
 select pg_temp.ok((public.sel_send_to_screen(array['bbbbbbbb-0000-0000-0000-000000000001'::uuid], true))->>'sent' = '0', '再发第三次：全部已有非失败任务，0 条新建');
 select public.sel_send_to_screen(array['bbbbbbbb-0000-0000-0000-000000000002'::uuid]) as r \gset
-select pg_temp.ok((:'r'::jsonb)->>'sent' = '5' and (:'r'::jsonb)->>'reused' = '5', '跨批次重复的 5 条复用，只发 5 条新');
+select pg_temp.ok((:'r'::jsonb)->>'sent' = '5' and ((:'r'::jsonb)->>'reused')::int + ((:'r'::jsonb)->>'dup')::int = 5, '跨批次重复的 5 条复用，只发 5 条新');
 select pg_temp.ok((select sent_count from public.sel_batches where batch_no = 2) = 10, '复用计入 sent_count（不会显示“发送剩余”）');
 -- EHunt 主图查询
 reset role;
