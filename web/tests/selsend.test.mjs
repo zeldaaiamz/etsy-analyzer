@@ -22,3 +22,11 @@ test("确认计划：单批已发送 → 明确重发；部分 → 发剩余；�
   const all = sendPlan([A, B, C], lo, false); assert.deepEqual(all.ids, ["b", "c"]); assert.equal(all.n, 342); assert.deepEqual(all.skipped.map((x) => x.b.id), ["a"]); assert.equal(all.resend, false);
   assert.equal(sendPlan([], lo, true), null);
 });
+import { linkSentFlags } from "../js/selscreen.js";
+test("每条链接已发送标记：只有实际发送（含去重算已发送）的前 sent_count 条", () => {
+  const AT2 = "2026-10-20T01:00:00Z";
+  assert.deepEqual(linkSentFlags({}, 3), [false, false, false]);
+  assert.deepEqual(linkSentFlags({ sent_to_screen_at: AT2, sent_count: 2 }, 5), [true, true, false, false, false]); // 部分发送
+  assert.deepEqual(linkSentFlags({ sent_to_screen_at: AT2, sent_count: null }, 2), [true, true]); // 038 旧标记 = 整批
+  assert.deepEqual(linkSentFlags({ sent_to_screen_at: AT2, sent_count: 9 }, 2), [true, true]);
+});
