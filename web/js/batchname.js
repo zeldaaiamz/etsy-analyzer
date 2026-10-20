@@ -56,3 +56,20 @@ export function deletePlan(selIds, items, batches) {
 // 条目来源标签：只按该任务自己的 jobs.batch_id（建任务的批次，之后从不改写）查批次列表，不看标题/关键词文字/位置。
 // 批次列表还没加载 → 空（不猜）；批次不是「获取链接」建的（任务页手动粘贴、重新分析）→「其他来源」
 export function sourceLabel(item, idx) { if (!idx || !item?.batch_id) return ""; const x = idx.get(item.batch_id); return x ? itemSrc(x) : "其他来源"; }
+// 预筛选页按实际发送批次分组（jobs.batch_id）：一个关键词的一次发送 = 一组（≤500 拆分的多个批次合为一组）。
+// 组顺序 = 批次列表顺序（最近发送的关键词在前，组内按发送顺序）；非获取链接批次 / 未知批次 →「其他来源」放最后。
+// sent = 发送时建的任务数（batches.jobs(count)，包括已进入分析 / 已隐藏的）；拿不到时为 null
+export function groupItems(items, batches) {
+  const out = [], byLabel = new Map(), bid2g = new Map(), cnt = new Map((batches || []).map((b) => [b.id, b.jobs_count]));
+  for (const g of screenBatchGroups(batches)) for (const it of g.items) {
+    const label = batchLabel(g.keyword, it.n); let G = byLabel.get(label);
+    if (!G) byLabel.set(label, (G = { key: label, label, keyword: g.keyword, ids: [], items: [], sent: 0 })), out.push(G);
+    G.ids.push(it.id); bid2g.set(it.id, G); const c = cnt.get(it.id); G.sent = G.sent == null || c == null ? null : G.sent + Number(c);
+  }
+  const other = { key: "其他来源", label: "其他来源", keyword: "", ids: [], items: [], sent: null };
+  for (const it of items || []) (bid2g.get(it.batch_id) || other).items.push(it);
+  for (const it of other.items) if (it.batch_id && !other.ids.includes(it.batch_id)) other.ids.push(it.batch_id);
+  return out.filter((G) => G.items.length).concat(other.items.length ? [other] : []);
+}
+// 组标题数量：列表中 x 条；与发送数 y 不同时显示「x/y」（差额 = 已进入分析 / 已删除隐藏 / 去重等不在列表里的）
+export function groupCount(G) { const x = G.items.length; return G.sent == null || G.sent === x ? `${x}个` : `${x}/${G.sent}个`; }

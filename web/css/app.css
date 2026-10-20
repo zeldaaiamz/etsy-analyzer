@@ -412,7 +412,7 @@ a{color:var(--primary);text-decoration:none}a:hover{text-decoration:underline}
 .warn{color:var(--warn)}
 @media (max-width:640px){
   .sc-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:10px}
-  .sc-bh .btn{width:100%}.sc-foot .btn{width:100%}
+  .sc-bh .btn:not(.btn-xs){width:100%}.sc-foot .btn{width:100%}
   .sc-batch{padding:var(--s3)}
 }
 .sc-img:has(img.on) .sc-ph{display:none}

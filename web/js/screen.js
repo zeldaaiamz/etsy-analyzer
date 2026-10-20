@@ -2,7 +2,7 @@
 // → 每批“分析剩余数据”或底部“全部已加载”一键确认 → 只有保留的进入 DeepSeek / Keepamore / 截图（017 screen_confirm）
 export const BATCH = 50;
 const POLL_MS = 3000;
-import { screenBatchGroups, batchIndex, itemSrc, batchCounts, batchCountRows, deletable, deletePlan, sourceLabel } from "./batchname.js";
+import { screenBatchGroups, batchIndex, itemSrc, batchCounts, batchCountRows, deletable, deletePlan, groupItems, groupCount } from "./batchname.js";
 // EHunt 账号/服务异常（与商品本身无关）：新 worker 写 'EHunt 服务异常（原因）'；旧 worker 写 'EHunt 错误 500: 查询失败: …'
 export const EHUNT_ANOMALY_RE = /EHunt 服务异常|EHunt 错误 5\d\d|查询失败|daily_limit/;
 export const ANOMALY_PREFIX = "EHunt 服务异常";
@@ -22,7 +22,8 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
   const blocked = (it) => anomaly(it) || (fetchingIt(it) && !it.title && svcPaused());
   const waiting = (it) => fetchingIt(it) && it.status === "queued" && /额度/.test(it.error || "") && !anomaly(it);
   const ready = (it) => !hasData(it) || !it.image_url || V.imgOk.has(it.id); // 无图或失败也算加载完成
-  const batches = () => { const out = []; for (let i = 0; i < V.items.length; i += BATCH) out.push(V.items.slice(i, i + BATCH)); return out; };
+  const groups = () => groupItems(V.items, V.sbatches || []); // 按实际发送批次（jobs.batch_id）分组，不再固定 50 条一组
+  const batches = () => groups().map((G) => G.items);
   const pendingOf = (b) => b.filter((it) => it.status === "screening");
   const batchState = (b) => {
     const pend = pendingOf(b), fetching = b.filter(fetchingIt);
@@ -34,13 +35,17 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
   async function load() {
     if (DEMO) return;
     const sb = getSb(); if (!sb) return;
+    // jobs(count)：发送时建的任务数（同一请求里的聚合，不逐条查询）；旧 PostgREST 不支持聚合时退回不带数量
+    const BSEL = V.noCount ? "id,name,created_at" : "id,name,created_at,jobs(count)";
     // 批次列表与 screen_list 并行请求（只在首次 / 切换时取，轮询不重复取），不增加等待时间
-    const bq = V.sbatches ? null : sb.from("batches").select("id,name,created_at").like("name", "获取链接 %").order("created_at", { ascending: true }).limit(1000);
+    const bq = V.sbatches ? null : sb.from("batches").select(BSEL).like("name", "获取链接 %").order("created_at", { ascending: true }).limit(1000);
     const [{ data, error }, br] = await Promise.all([sb.rpc("screen_list", V.batch ? { p_batch: V.batch } : {}), bq]);
-    if (br && !br.error) V.sbatches = br.data || [];
+    const norm = (L) => (L || []).map((b) => ({ id: b.id, name: b.name, created_at: b.created_at, jobs_count: Array.isArray(b.jobs) ? b.jobs[0]?.count ?? null : null }));
+    if (br && br.error && !V.noCount) { V.noCount = true; const r2 = await sb.from("batches").select("id,name,created_at").like("name", "获取链接 %").order("created_at", { ascending: true }).limit(1000); if (!r2.error) V.sbatches = norm(r2.data); }
+    else if (br && !br.error) V.sbatches = norm(br.data);
     // 列表里有批次不在已取的批次列表中（新发送的 / 超过 1000 条上限）→ 一次批量补取这些 id（不逐条查询；轮询时一般没有缺的）
     if (!error && V.sbatches) { const have = new Set(V.sbatches.map((b) => b.id)), miss = [...new Set((data || []).map((it) => it.batch_id).filter((id) => id && !have.has(id) && !V.noSrc?.has(id)))];
-      if (miss.length) { const r = await sb.from("batches").select("id,name,created_at").in("id", miss.slice(0, 200)); if (!r.error) { V.sbatches = V.sbatches.concat(r.data || []); (V.noSrc ||= new Set()); miss.slice(0, 200).forEach((id) => { if (!(r.data || []).some((b) => b.id === id)) V.noSrc.add(id); }); } } }
+      if (miss.length) { const r = await sb.from("batches").select(BSEL).in("id", miss.slice(0, 200)); if (!r.error) { V.sbatches = V.sbatches.concat(norm(r.data)); (V.noSrc ||= new Set()); miss.slice(0, 200).forEach((id) => { if (!(r.data || []).some((b) => b.id === id)) V.noSrc.add(id); }); } } }
     if (error) { V.loadErr = error.message; toast(`加载筛选列表失败：${error.message}`, "bad"); render(); return; }
     V.items = data || []; V.loaded = true; V.loadErr = null;
     render(); schedule();
@@ -69,7 +74,7 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     return `<div class="sc-card${rj ? " rej" : ""}${V.sel.has(it.id) ? " sel" : ""}${hasData(it) ? "" : " wait"}" data-skey="${esc(it.id)}">
       <a class="sc-img" href="${esc(it.etsy_url)}" target="_blank" rel="noopener">${ph}${img}${rj ? '<span class="sc-tag">已排除</span>' : it.screen_state === "kept" ? '<span class="sc-tag sc-kept">已进入分析</span>' : ""}</a>${selBox}${act}
       <div class="sc-info"><div class="sc-title" title="${esc(it.title || "")}">${head}</div>
-      ${(() => { const src = V.sbatches ? sourceLabel(it, V.bidx) : ""; const stt = rj ? "已排除" : it.screen_state === "kept" ? "已进入分析" : failed ? "取数失败" : fetchingIt(it) ? "取数中" : it.status === "screening" ? (bstate === "ready" ? "可确认" : "待确认") : ""; return src || stt ? `<div class="sc-src">${src ? `<span class="sc-kw" title="${esc(src)}">${esc(src)}</span>` : ""}${stt ? `<span class="pill pill-info sc-st">${stt}</span>` : ""}</div>` : ""; })()}
+      ${(() => { const src = ""; const stt = rj ? "已排除" : it.screen_state === "kept" ? "已进入分析" : failed ? "取数失败" : fetchingIt(it) ? "取数中" : it.status === "screening" ? (bstate === "ready" ? "可确认" : "待确认") : ""; return src || stt ? `<div class="sc-src">${src ? `<span class="sc-kw" title="${esc(src)}">${esc(src)}</span>` : ""}${stt ? `<span class="pill pill-info sc-st">${stt}</span>` : ""}</div>` : ""; })()}
       <div class="sc-meta"><b>${esc(price)}</b>${it.title ? `<span class="hint">#${esc(it.listing_id || "")}</span>` : ""}</div></div></div>`;
   }
 
@@ -83,10 +88,8 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
   }
   function render() {
     V.bidx = batchIndex(V.sbatches || []); renderBatches();
-    { const el = $("screenCounts"); if (el) { const rows = batchCountRows(V.items, V.sbatches || []), selOk = (it) => it.status === "screening";
-      const nSel = [...V.sel].filter((id) => V.items.some((it) => it.id === id)).length, demoTag = (V.sbatches || []).some((b) => b.demo) ? ' <span class="pill pill-bad">演示数字</span>' : "";
-      el.innerHTML = rows.length ? `<div class="sc-counts"><b>本页各批数量：</b>${rows.map((r, i) => `<span class="sc-cnt">${esc(r.label)} ${r.n}个 <button type="button" class="btn btn-ghost btn-xs" data-sselb="${esc(r.ids.join(","))}">全选本批</button></span>${i < rows.length - 1 ? "，" : ""}`).join("")}${demoTag}</div>
-        ${nSel ? `<div class="sc-selbar"><b>已选 ${nSel} 条</b><button type="button" class="btn btn-danger-ghost btn-sm" data-sselact="rej">✕ 排除所选</button><button type="button" class="btn btn-ghost btn-sm" data-sselact="undo">撤销排除</button><button type="button" class="btn btn-danger btn-sm" data-sselact="del"${V.busy.has("seldel") ? " disabled" : ""}>${V.busy.has("seldel") ? '<span class="spin"></span>' : "🗑 "}删除所选</button><button type="button" class="btn btn-ghost btn-sm" data-sselact="clear">清除选择</button></div>` : ""}` : ""; } }
+    { const el = $("screenCounts"); if (el) {       const nSel = [...V.sel].filter((id) => V.items.some((it) => it.id === id)).length, demoTag = (V.sbatches || []).some((b) => b.demo) ? ' <span class="pill pill-bad">演示数字</span>' : "";
+      el.innerHTML = `${nSel ? `<div class="sc-selbar"><b>已选 ${nSel} 条</b><button type="button" class="btn btn-danger-ghost btn-sm" data-sselact="rej">✕ 排除所选</button><button type="button" class="btn btn-ghost btn-sm" data-sselact="undo">撤销排除</button><button type="button" class="btn btn-danger btn-sm" data-sselact="del"${V.busy.has("seldel") ? " disabled" : ""}>${V.busy.has("seldel") ? '<span class="spin"></span>' : "🗑 "}删除所选</button><button type="button" class="btn btn-ghost btn-sm" data-sselact="clear">清除选择</button></div>` : ""}`; } }
     const box = $("screenBody"); if (!box) return;
     const bs = batches(), tot = V.items.length;
     const nRej = V.items.filter((it) => V.rej.has(it.id) || it.screen_state === "rejected").length;
@@ -95,7 +98,7 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     const nWait = V.items.filter(waiting).length;
     const anom = V.items.filter(blocked), st = getStatus() || {}, svcAnom = svcPaused();
     const banner = anom.length || svcAnom ? `<div class="banner banner-bad sc-banner" data-sbanner="1"><b>EHunt 服务异常</b>（${esc(anomalyReason(svcAnom ? st.reason : anom[0].error))}）：Etsy 取数已暂停${svcAnom ? `，约 北京时间 ${esc(new Date(st.ehunt_paused_until).toLocaleTimeString("zh-CN", { timeZone: "Asia/Shanghai", hour: "2-digit", minute: "2-digit", hour12: false }))} 自动重试` : ""}<span class="banner-sub">${anom.length ? `${anom.length} 条受影响（排队 ${anom.filter(fetchingIt).length} · 失败 ${anom.filter((it) => it.status === "failed").length}）。` : ""}这与商品本身无关，不消耗重试次数；EHunt 恢复后，失败项可点“一键刷新”重新取数（已达 3 次上限的也可以）。</span></div>` : "";
-    $("screenSum").innerHTML = tot ? `共 <b>${tot}</b> 条 · ${bs.length} 批 · 待确认 <b>${nPend}</b> · 已排除 ${nRej}${nFetch ? ` · 取数中 ${nFetch}` : ""}${nWait ? ` · <span class="warn">${nWait} 条等待明日 EHunt 额度</span>` : ""}` : "";
+    $("screenSum").innerHTML = tot ? `共 <b>${tot}</b> 条 · ${bs.length} 组 · 待确认 <b>${nPend}</b> · 已排除 ${nRej}${nFetch ? ` · 取数中 ${nFetch}` : ""}${nWait ? ` · <span class="warn">${nWait} 条等待明日 EHunt 额度</span>` : ""}` : "";
     $("screenTabs").innerHTML = [["all", "全部"], ["pending", "待确认"], ["rejected", "已排除"]].map(([k, n]) =>
       `<button class="fchip${V.tab === k ? " active" : ""}" data-stab="${k}">${n}<span class="fchip-n">${k === "all" ? tot : k === "pending" ? nPend - V.items.filter((it) => it.status === "screening" && V.rej.has(it.id)).length : nRej}</span></button>`).join("")
     const nDone = V.items.filter((it) => it.screen_state === "rejected").length; // 只算已确认排除的（未确认的 ✕ 可直接撤销）
@@ -104,7 +107,8 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     $("screenTabs").innerHTML += `<span class="spacer"></span>${nRetry ? `<button class="btn btn-primary btn-sm" data-srefall="1" ${V.busy.has("refall") ? "disabled" : ""} title="重新取数所有失败且未达 3 次上限的条目（EHunt 服务异常导致的失败不受上限限制）">${V.busy.has("refall") ? '<span class="spin"></span>' : ""}一键刷新（${nRetry} 条失败）</button>` : ""}${nDead ? `<button class="btn btn-danger-ghost btn-sm" data-sdelfail="1" title="永久删除已重试 3 次仍失败的条目（不可恢复）">🗑 一键删除失败（${nDead} 条）</button>` : ""}${nDone ? `<button class="btn btn-danger-ghost btn-sm" data-shide="1" title="永久删除全部已排除条目（不可恢复，不消耗 EHunt 额度）">🗑 删除所有已排除 (${nDone})</button>` : ""}`;
     if (V.loadErr && !tot) { box.innerHTML = `<div class="card empty"><div class="ico">!</div><h3>加载失败</h3><p class="muted">${esc(V.loadErr)}</p><button class="btn btn-primary btn-sm" data-sreload="1">刷新</button></div>`; $("screenFoot").innerHTML = ""; return; }
     if (!tot) { box.innerHTML = `<div class="card empty"><div class="ico">◎</div><h3>${!DEMO && !V.loaded ? "加载中…" : "没有待筛选的链接"}</h3><p class="muted">在“任务”页粘贴链接并勾选“先预筛选”，取到 EHunt 数据后会出现在这里</p></div>`; $("screenFoot").innerHTML = ""; return; }
-    box.innerHTML = banner + bs.map((b, i) => {
+    const GS = groups(), demoTag = (V.sbatches || []).some((b) => b.demo) ? ' <span class="pill pill-bad">演示数字</span>' : "";
+    box.innerHTML = banner + bs.map((b, i) => { const G = GS[i];
       const st = batchState(b), pend = pendingOf(b), keep = pend.filter((it) => !V.rej.has(it.id)).length, rj = pend.length - keep;
       const nReady = b.filter((it) => hasData(it) && ready(it)).length;
       const show = b.filter((it) => V.tab === "all" || (V.tab === "pending" ? it.status === "screening" && !V.rej.has(it.id) : V.rej.has(it.id) || it.screen_state === "rejected"));
@@ -114,7 +118,7 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
       const allWait = st === "loading" && b.filter(fetchingIt).length && b.filter(fetchingIt).every(waiting) && !nReady;
       const prog = allWait ? `<span class="pill pill-warn">等待明日 EHunt 额度（${b.filter(waiting).length} 条）</span>` : st === "loading" ? `<span class="sc-prog"><span style="width:${Math.round((nReady / b.length) * 100)}%"></span></span><span class="hint">加载中 ${nReady}/${b.length}</span>`
         : st === "ready" ? `<span class="pill pill-info">可确认</span>` : "";
-      return `<section class="sc-batch sc-${st}" data-sbatch="${i}"><div class="sc-bh"><h3>第 ${i + 1} 批 <span class="hint">#${i * BATCH + 1}–${i * BATCH + b.length}</span></h3>${prog}<span class="spacer"></span>${btn}</div>
+      return `<section class="sc-batch sc-${st}" data-sbatch="${i}"><div class="sc-bh"><h3 class="sc-glabel">${esc(G.label)} <span class="hint" title="${G.sent != null && G.sent !== G.items.length ? `这次发送建了 ${G.sent} 条，列表中现有 ${G.items.length} 条（其余已进入分析、已删除或被去重）` : "列表中的条数 = 这次发送的条数"}">· ${groupCount(G)}${V.tab !== "all" ? ` · 当前显示 ${show.length}` : ""}</span>${i === 0 ? demoTag : ""}</h3><button type="button" class="btn btn-ghost btn-xs" data-sselb="${esc(G.ids.join(","))}"${G.items.some(deletable) ? "" : " disabled"}>全选本批</button>${prog}<span class="spacer"></span>${btn}</div>
         ${show.length ? `<div class="sc-grid">${show.map((it) => card(it, st)).join("")}</div>` : `<p class="hint sc-none">本批没有符合筛选的条目</p>`}</section>`;
     }).join("");
     const readyAll = bs.filter((b) => batchState(b) === "ready").flatMap(pendingOf), keepAll = readyAll.filter((it) => !V.rej.has(it.id)).length;
@@ -230,14 +234,18 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
       listing_id: 1900000000 + i, title: null, image_url: null, price: null, _t: `${names[i % names.length]}${i >= names.length ? ` · ${["Gift", "Set of 2", "Vintage Style", "Handmade"][i % 4]}` : ""}`, _img: svg(i), _p: 8 + ((i * 7.3) % 60) }));
     const shot = QS.get("sshot") || "";
     { const t0 = Date.now() - 6 * 864e5, at = (h) => new Date(t0 + h * 36e5).toISOString(), nm = (kw, no, h) => `获取链接 ${kw} 第${no}批 ${new Date(t0 + h * 36e5 + 8 * 36e5).toISOString().slice(5, 16).replace("T", " ")}`; // 演示数字
-      V.sbatches = [["reason", 1, 1], ["Alex kitchen", 1, 2], ["reason", 2, 3], ["Alex kitchen", 2, 4], ["Alex kitchen", 2, 4], ["reason", 1, 5]].map(([k, no, h], i) => ({ id: `demo-pb-${i}`, name: nm(k, no, h), created_at: at(h) + "", demo: true })); }
-    { const ids = ["demo-pb-0", "demo-pb-2", "demo-pb-0", "demo-pb-1", "demo-pb-3", "demo-pb-5", "demo-pb-0", "demo-pb-4"]; V.items.forEach((it, i) => { it.batch_id = ids[i % ids.length]; }); if (V.items[9]) V.items[9].batch_id = "demo-pb-m"; V.sbatches.push({ id: "demo-pb-m", name: "任务页粘贴（演示）", created_at: new Date().toISOString(), demo: true }); } // 演示数字
+      // 演示数字：每个元素 = [关键词, 获取链接批号, 小时, 列表中条数, 发送时建的任务数]
+      const D = [["reason", 1, 1, 8, 10], ["Alex kitchen", 1, 2, 12, 12], ["reason", 2, 3, 6, 6], ["Alex kitchen", 2, 4, 9, 9], ["Alex kitchen", 2, 4, 5, 5], ["Gift", 1, 6, 32, 32]];
+      V.sbatches = D.map(([k, no, h, , c], i) => ({ id: `demo-pb-${i}`, name: nm(k, no, h), created_at: at(h) + "", jobs_count: c, demo: true }));
+      V.sbatches.push({ id: "demo-pb-m", name: "任务页粘贴（演示）", created_at: new Date().toISOString(), demo: true });
+      let j = 0; D.forEach(([, , , n], i) => { for (let q = 0; q < n && j < V.items.length; q++) V.items[j++].batch_id = `demo-pb-${i}`; }); while (j < V.items.length) V.items[j++].batch_id = "demo-pb-m"; }
+    // 演示数字
     const quotaFrom = n > 200 ? 200 : n; // 200 条以后等待明日额度（演示额度队列）
     const fill = (it, i) => { if (i >= quotaFrom) { it.error = "EHunt 今日额度已用完，明日自动继续"; return; } it.status = "screening"; it.screen_state = "awaiting"; it.title = it._t; it.image_url = it._img; it.price = it._p; };
     if (shot === "loading") { // 第 1 批已加载完成可确认；第 2、3 批部分加载；其余仍在取数
       V.items.forEach((it, i) => { if (i < 50 || (i < 100 && i % 3) || (i >= 100 && i < 150 && i % 4 === 0)) fill(it, i); else if (i < 150) it.status = "running"; });
       render();
-      if (QS.has("sscroll")) setTimeout(() => { const el = document.querySelector('[data-sbatch="1"]'); if (el) window.scrollTo(0, el.getBoundingClientRect().top + window.scrollY - (innerWidth < 640 ? 260 : 330)); }, 300);
+      if (QS.has("sscroll")) setTimeout(() => { const el = document.querySelector('[data-sbatch="1"]'); if (el && 0) window.scrollTo(0, el.getBoundingClientRect().top + window.scrollY - (innerWidth < 640 ? 260 : 330)); }, 300);
       return;
     }
     V.items.forEach(fill);

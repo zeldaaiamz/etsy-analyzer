@@ -54,3 +54,17 @@ test("来源标签严格按 jobs.batch_id：与标题文字 / 位置无关", () 
   assert.equal(sourceLabel({ batch_id: "manual" }, idx), "其他来源");
   assert.equal(sourceLabel({ batch_id: "pb0" }, null), ""); // 批次列表未加载：不猜
 });
+import { groupItems, groupCount } from "../js/batchname.js";
+test("按实际发送批次分组：Gift 第一批 恰好 32 条，组数量 = 该批任务", () => {
+  const B = [{ id: "r1", name: "获取链接 reason 第1批 10-19 01:00", created_at: "2026-10-19T01:00:00Z", jobs_count: 10 },
+    { id: "g1a", name: "获取链接 Gift 第1批 10-19 05:00", created_at: "2026-10-19T05:00:00Z", jobs_count: 20 }, { id: "g1b", name: "获取链接 Gift 第1批 10-19 05:00", created_at: "2026-10-19T05:00:01Z", jobs_count: 12 },
+    { id: "r2", name: "获取链接 reason 第2批 10-19 03:00", created_at: "2026-10-19T03:00:00Z", jobs_count: 6 }, { id: "m", name: "2026-10-19T00:00:00Z", created_at: "2026-10-19T00:00:00Z" }];
+  // 交错顺序 + 标题故意写别的关键词：分组只看 batch_id
+  const mk = (bid, n) => Array.from({ length: n }, (_, i) => ({ id: `${bid}-${i}`, batch_id: bid, title: "reason gift" }));
+  const all = [...mk("g1a", 20), ...mk("r1", 8), ...mk("g1b", 12), ...mk("r2", 6), ...mk("m", 2), { id: "x", batch_id: "unknown" }].sort(() => 0.5 - Math.random());
+  const G = groupItems(all, B);
+  assert.deepEqual(G.map((g) => [g.label, g.items.length, groupCount(g)]), [["Gift 第一批", 32, "32个"], ["reason 第一批", 8, "8/10个"], ["reason 第二批", 6, "6个"], ["其他来源", 3, "3个"]]);
+  for (const g of G.slice(0, 3)) for (const it of g.items) assert.ok(g.ids.includes(it.batch_id));
+  assert.equal(G.reduce((a, g) => a + g.items.length, 0), all.length); // 不多不少
+  assert.equal(groupCount({ items: [1, 2], sent: null }), "2个"); // 拿不到发送数：只显示列表数
+});
