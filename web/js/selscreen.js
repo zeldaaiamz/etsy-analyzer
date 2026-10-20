@@ -37,7 +37,8 @@ export const RECENT_N = 10, RECENT_KEY = "sel.recentOpen";
 export function recentOpen(store, narrow) { const v = store?.getItem?.(RECENT_KEY); return v === "1" ? true : v === "0" ? false : !narrow; }
 export function recentList(rows, now = Date.now()) { const since = now - 3 * 864e5; return (rows || []).filter((r) => Date.parse(r.created_at) > since).sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, RECENT_N); }
 // 送去预筛选状态（按批次，sel_batches.sent_to_screen_at，038）：显示最近一次发送的批次，如「第二批已发送」；从未发送 →「未发送」
-export const cnNum = (n) => { const d = "零一二三四五六七八九"; n = Number(n) || 0; if (n < 10) return d[n]; if (n < 20) return "十" + (n % 10 ? d[n % 10] : ""); if (n < 100) return d[Math.floor(n / 10)] + "十" + (n % 10 ? d[n % 10] : ""); return String(n); };
+import { cnNum, batchLabel, historySendNos } from "./batchname.js?v=1f34253d";
+export { cnNum };
 // 039：sel_batches.sent_count = 本批已发送多少条（按 rank 顺序）；038 旧标记（sent_count 为空）视为整批已发送
 export function sendState(b, total = b?.passed_count) {
   const t = Math.max(0, Number(total) || 0);
@@ -45,12 +46,19 @@ export function sendState(b, total = b?.passed_count) {
   const n = b.sent_count == null ? t : Math.min(t, Number(b.sent_count) || 0);
   return { sent: n, total: t, full: n >= t, partial: n > 0 && n < t, left: t - n, at: b.sent_to_screen_at };
 }
-export function sentInfo(batches) {
+// keyword + nos（historySendNos 的结果）时显示「<关键词> 第N批」，N = 同一关键词在历史里的发送顺序
+export function sentInfo(batches, keyword, nos, runId) {
   const S = (batches || []).filter((b) => b.sent_to_screen_at).sort((a, b) => Date.parse(b.sent_to_screen_at) - Date.parse(a.sent_to_screen_at));
-  if (!S.length) return { sent: false, text: "未发送", tip: "这次查找的链接还没有送去预筛选" };
-  const nos = [...new Set(S.map((b) => b.batch_no))].sort((a, b) => a - b), st = sendState(S[0]);
-  return { sent: true, partial: st.partial, text: `第${cnNum(S[0].batch_no)}批已发送${st.partial ? `（部分 ${st.sent}/${st.total}）` : ""}`, tip: `第${nos.map(cnNum).join("、")}批已发送到预筛选` };
+  if (!S.length) return { sent: false, text: "未发送", tip: "这次查找的链接还没有送去预筛选", tags: [] };
+  const st = sendState(S[0]);
+  if (keyword && nos) {
+    const tags = S.slice().reverse().map((b) => batchLabel(keyword, nos.get(`${runId}:${b.batch_no}`) || b.batch_no));
+    return { sent: true, partial: st.partial, text: `${tags[tags.length - 1]}${st.partial ? `（部分 ${st.sent}/${st.total}）` : ""}`, tags, tip: `已发送到预筛选：${tags.join("、")}` };
+  }
+  const nosB = [...new Set(S.map((b) => b.batch_no))].sort((a, b) => a - b);
+  return { sent: true, partial: st.partial, text: `第${cnNum(S[0].batch_no)}批已发送${st.partial ? `（部分 ${st.sent}/${st.total}）` : ""}`, tip: `第${nosB.map(cnNum).join("、")}批已发送到预筛选` };
 }
+export { historySendNos };
 export const fmtAt = (iso) => { const d = new Date(iso); return isNaN(d) ? "" : d.toLocaleString("zh-CN", { timeZone: "Asia/Shanghai", month: "numeric", day: "numeric", hour: "2-digit", minute: "2-digit", hour12: false }); };
 // 「送去预筛选」确认框文字：未发送 / 已全部发送（明确再发一次）/ 部分发送（发剩余）
 export function sendPlan(batches, linksOf, single) {
@@ -272,6 +280,10 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
         ["teacher gift", "dog mom", "nurse badge", "christmas ornament", "bookmark", "cake topper", "keychain", "door sign", "plant marker", "earrings", "magnet"].forEach((k, i) =>
           fx.push({ id: `demo-recent-x${i}`, keyword: k, status: ["counted", "running", "succeeded", "canceled", "failed"][i % 5], created_at: new Date(Date.now() - (1 + i * 5) * 36e5).toISOString(), passed_count: 10 + i * 7, total_count: 100 + i * 37, demo: true,
             sel_batches: i === 2 ? [{ batch_no: 1, sent_to_screen_at: new Date(Date.now() - 9 * 36e5).toISOString() }, { batch_no: 2, sent_to_screen_at: new Date(Date.now() - 8 * 36e5).toISOString() }] : i === 5 ? [{ batch_no: 1, sent_to_screen_at: new Date(Date.now() - 20 * 36e5).toISOString() }] : [] }));
+      if (QSP.has("batchdemo")) { const h = (x) => new Date(Date.now() - x * 36e5).toISOString(); // 演示：批次命名（数字为演示数字）
+        fx.push({ id: "demo-recent-bn1", keyword: "reason", status: "succeeded", created_at: h(20), passed_count: 640, demo: true, sel_batches: [{ batch_no: 1, sent_to_screen_at: h(19) }] },
+          { id: "demo-recent-bn2", keyword: "Alex kitchen", status: "succeeded", created_at: h(18), passed_count: 1210, demo: true, sel_batches: [{ batch_no: 1, sent_to_screen_at: h(17) }, { batch_no: 2, sent_to_screen_at: h(16), sent_count: 300, passed_count: 410 }] },
+          { id: "demo-recent-bn3", keyword: "reason", status: "succeeded", created_at: h(4), passed_count: 288, demo: true, sel_batches: [{ batch_no: 1, sent_to_screen_at: h(3) }] }); }
       V.recentFx = Object.fromEntries(fx.map((r) => [r.id, r]));
       V.recent = recentList([...own, ...fx].filter((r) => Date.parse(r.created_at) > since && !V.deleted?.has(r.id))); return renderRecent();
     }
@@ -287,10 +299,11 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
     const ST = { count_queued: "查询中", counting: "查询中", counted: "待抓取", queued: "排队中", running: "读取中", batch_done: "本批完成", succeeded: "完成", failed: "失败", canceled: "已停止" };
     const t = (iso) => { const d = new Date(iso); return `${d.getMonth() + 1}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`; };
     if (!L.length) { el.innerHTML = ""; return; }
+    const sbOf = (r) => { const D = V.demoRuns[r.id]; return D && !D.fxOnly ? D.batches : r.sel_batches; }, nos = historySendNos(L.map((r) => ({ ...r, sel_batches: sbOf(r) })));
     const open = recentOpen(globalThis.localStorage, globalThis.matchMedia?.("(max-width:560px)").matches), demo = L.some((r) => r.demo) ? ' <span class="pill pill-bad">演示数字</span>' : "";
     el.innerHTML = `<div class="ss-recent${open ? " open" : ""}"><button type="button" class="ss-rhead" data-ssrtog aria-expanded="${open}" aria-label="最近 3 天查找记录（${L.length}）" title="最近 3 天查找记录（${L.length}）">${demo}<span class="spacer"></span><span class="ss-rtog">${open ? "收起 ▴" : `展开（${L.length}）▾`}</span></button>
       ${open ? `<div class="ss-rlist">${L.map((r) => { const busy = ACTIVE_ST.includes(r.status);
-        return `<div class="ss-rrow${V.run?.id === r.id ? " active" : ""}"><a class="ss-rlink" href="#/selscreen/${esc(r.id)}" title="${esc(ST[r.status] || r.status)}"${V.run?.id === r.id ? ' aria-current="true"' : ""}><b class="ss-rkw">${esc(r.keyword)}</b><span class="ss-rtime hint">${t(r.created_at)}</span><span class="ss-rst">${esc(chipText(r))}</span>${(() => { const D = V.demoRuns[r.id], si = sentInfo(D && !D.fxOnly ? D.batches : r.sel_batches); return `<span class="pill ${si.sent ? "pill-ok" : "pill-muted"} ss-rsent" title="${esc(si.tip)}">${esc(si.text)}</span>`; })()}</a><button type="button" class="ss-rdel" data-ssrdel="${esc(r.id)}"${busy ? ' disabled title="进行中的任务不能删除，请先停止"' : ' title="删除这条记录"'} aria-label="删除 ${esc(r.keyword)}">🗑</button></div>`; }).join("")}</div>` : ""}</div>`;
+        return `<div class="ss-rrow${V.run?.id === r.id ? " active" : ""}"><a class="ss-rlink" href="#/selscreen/${esc(r.id)}" title="${esc(ST[r.status] || r.status)}"${V.run?.id === r.id ? ' aria-current="true"' : ""}><b class="ss-rkw">${esc(r.keyword)}</b><span class="ss-rtime hint">${t(r.created_at)}</span><span class="ss-rst">${esc(chipText(r))}</span>${(() => { const si = sentInfo(sbOf(r), r.keyword, nos, r.id); return si.sent ? `<span class="ss-rsents">${si.tags.map((t, i) => `<span class="pill pill-ok ss-rsent" title="${esc(si.tip)}">${esc(i === si.tags.length - 1 ? si.text : t)}</span>`).join("")}</span>` : `<span class="pill pill-muted ss-rsent" title="${esc(si.tip)}">${esc(si.text)}</span>`; })()}</a><button type="button" class="ss-rdel" data-ssrdel="${esc(r.id)}"${busy ? ' disabled title="进行中的任务不能删除，请先停止"' : ' title="删除这条记录"'} aria-label="删除 ${esc(r.keyword)}">🗑</button></div>`; }).join("")}</div>` : ""}</div>`;
   }
   // 删除一条查找记录（连同批次和链接）。进行中（查询中/排队中/读取中）的不能删：按钮禁用，需先停止（RPC 也会拒绝）
   async function delRecent(id) {
