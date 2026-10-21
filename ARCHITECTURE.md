@@ -156,6 +156,7 @@ stateDiagram-v2
 - Worker OCR：`worker/analyzer/review_ocr.py`作为 worker 主进程的后台线程每 20s 处理队列（已安装 pytesseract 时默认启用，`REVIEW_OCR_ENABLED=0` 关闭；也可 `python -m analyzer.review_ocr`）。ECS 已安装依赖：`apt install tesseract-ocr tesseract-ocr-chi-sim`，`pip install pytesseract pillow`。测试：`tests/test_review_ocr.py`。
 - 演示：`?demo=1#/library`（示例评论日期、两个抓取失败条目：一个已手动填写，另一个可上传截图模拟识别；一个未抓取）。
 - 浏览器抓取结果入库：box 上 `tools/save_reviews.py`（见文件头用法；`--list-library` 列出产品库 listing）。
+- **自动抓取（049，未上线）**：`product_library` AFTER INSERT 触发器 → `listing_scrape_status=pending`（ON CONFLICT DO NOTHING；除了失败重试，不重复抓取）；box 上独立进程 `worker/selection/review_scraper.py`（`deploy/box-selection-worker.sh reviews-start`，nice 10，每轮 ≤3 个，间隔 8s，浏览器模式下 EHunt 获取链接/计数/预筛选查询忙时让路）→ `claim_review_scrapes` → 抓取 → `finish_review_scrape`（ok 替换 etsy_page/etsy_api 公共行；failed 记错误）。抓取方式：有 `ETSY_API_KEY` 用 Open API v3 getReviewsByListing（推荐），否则 Playwright 读商品页（box 出口 IP 目前被 DataDome 403）。ECS 访问不到 etsy.com，所以不放在 analyzer。前端卡片：pending/fetching「评论抓取中」，failed「抓取失败 重试」（`retry_review_scrape`），有抓取中的每 30s 刷新状态。测试：`worker/tests/test_review_scraper.py`、`supabase/tests/run_049_local.sh`、`web/tests/autoreviews.test.mjs`。
 
 ## 一键亚马逊搜索（PM-001，迁移 020）
 - `analyses.keyword_items` / `product_library.amazon_keywords`：`[{keyword, source, basis}]`，source ∈ title/image/review/original-title/manual，≤5 个，去重（约束 `valid_amazon_keywords`）；恰好 1 个 original-title（原标题逐字片段，≤4 词）。

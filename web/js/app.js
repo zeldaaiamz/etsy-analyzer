@@ -1,5 +1,5 @@
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
-import { computeVelocity, computeManualVelocity, cmpVelocity, velocityBadge, loadReviewDates, demoReviewDates, loadScrapeInfo } from "./velocity.js";
+import { computeVelocity, computeManualVelocity, cmpVelocity, velocityBadge, cardVelocityBadge, scrapeChip, SCRAPE_BUSY, loadReviewDates, demoReviewDates, loadScrapeInfo } from "./velocity.js";
 import { amzBlock, amzUrls, openAll, applyEdit, kwList, MAX_KW, DIR_SELECT_HTML } from "./amzsearch.js";
 import { createScreen, ANOMALY_PREFIX, anomalyReason } from "./screen.js?v=fc16c45f";
 import { createExWords } from "./exwords.js?v=c9174633";
@@ -124,7 +124,7 @@ async function boot() {
         const real = await (await fetch("./preview-fixture.json")).json();
         libItems = [...real, ...libItems.filter((r) => !(r.amazon_keywords || []).length)]; } catch { /* 无快照文件时用演示数据 */ } }
       S.lib = new Map(libItems.map((r) => [Number(r.etsy_listing_id), r]));
-      [...S.lib.keys()].forEach((id) => L.scr.set(id, [1488800014, 1488800016].includes(id) ? "failed" : id === 1488800015 ? "pending" : "ok")); // 演示：两个抓取失败，其中一个已手动填写
+      [...S.lib.keys()].forEach((id) => L.scr.set(id, [1488800014, 1488800016].includes(id) ? "failed" : id === 1488800015 ? "pending" : id === 1488800013 ? "fetching" : "ok")); // 演示：两个抓取失败，其中一个已手动填写
       if (QS.get("ocr") === "review") L.ocr.set(1488800014, { id: "demo", status: "done", extracted_dates: DEMO_OCR(), total_reviews: 214 });
       L.man.set(1488800016, { listing_id: 1488800016, month_counts: [3, 2, 2, 1, 1, 0], latest_review_date: new Date(Date.now() - 9 * 864e5).toISOString().slice(0, 10) });
       if (QS.has("failed")) fx.jobs.push({ ...fx.jobs.find((j) => j.status === "failed"), id: "demo-failed-2", etsy_url: "https://www.etsy.com/listing/1700000009/y", etsy_listing_id: 1700000009, error: "亚马逊搜索超时（Keepamore 504）" });
@@ -675,14 +675,31 @@ async function toggleVelocity() { // 只在点击时取数 + 计算；再点恢�
   L.velBusy = true; renderLibrary();
   try { const ids = libVisible0().map((r) => Number(r.etsy_listing_id)), now = Date.now();
     const dates = DEMO ? demoReviewDates(ids, now) : await loadReviewDates(sb, ids);
-    if (DEMO) L.scr.forEach((v, id) => v === "pending" && dates.delete(id)); // 演示：尚未抓取
+    if (DEMO) L.scr.forEach((v, id) => (SCRAPE_BUSY.has(v) || v === "failed") && dates.delete(id)); // 演示：尚未抓取 / 抓取失败
     L.velData = new Map(ids.map((id) => [id, velFor(id, dates, now)])); L.vel = true;
   } catch (e) { toast(`评论数据加载失败：${e.message}`, "bad"); }
   L.velBusy = false; renderLibrary();
 }
 const isFailed = (r) => L.scr.get(Number(r.etsy_listing_id)) === "failed";
 const failedItems = () => (DEMO ? [...S.lib.values()] : L.items).filter(isFailed);
-async function refreshScrape() { if (DEMO) return; try { const x = await loadScrapeInfo(sb, L.items.map((r) => Number(r.etsy_listing_id))); L.scr = x.st; L.man = x.man; L.ocr = x.ocr; } catch { /* 019 未应用时静默 */ } }
+async function refreshScrape() { if (DEMO) return; try { const x = await loadScrapeInfo(sb, L.items.map((r) => Number(r.etsy_listing_id))); L.scr = x.st; L.man = x.man; L.ocr = x.ocr; } catch { /* 019 未应用时静默 */ } scheduleScrapePoll(); }
+// 049：有「评论抓取中」的商品时每 30 秒刷新一次状态；抓完的商品若正在按速度排序，补算它的速度
+let scrapeTimer = null;
+function scheduleScrapePoll() {
+  clearTimeout(scrapeTimer); if (DEMO || ![...L.scr.values()].some((v) => SCRAPE_BUSY.has(v))) return;
+  scrapeTimer = setTimeout(async () => { if (!location.hash.startsWith("#/library")) return scheduleScrapePoll();
+    const before = new Map(L.scr); await refreshScrape();
+    const done = [...before].filter(([id, v]) => SCRAPE_BUSY.has(v) && !SCRAPE_BUSY.has(L.scr.get(id))).map(([id]) => id);
+    if (done.length) { await recomputeVelocity(done); renderLibrary(); } }, 30000);
+}
+async function recomputeVelocity(ids) { if (!L.vel || !L.velData || !ids.length) return; const now = Date.now();
+  try { const dates = DEMO ? demoReviewDates(ids, now) : await loadReviewDates(sb, ids); ids.forEach((id) => L.velData.set(id, velFor(id, dates, now))); } catch { /* 下次点击排序再算 */ } }
+async function retryScrape(id) {
+  if (!DEMO) { const { data, error } = await sb.rpc("retry_review_scrape", { p_listing: id });
+    if (error || !data) return toast(`重试失败：${error?.message || "该商品不在你的产品库或不是失败状态"}`, "bad"); }
+  L.scr.set(id, "pending"); toast("已重新排队，后台会自动抓取评论日期", "ok"); renderLibrary(); scheduleScrapePoll();
+  if (DEMO) setTimeout(async () => { L.scr.set(id, "ok"); await recomputeVelocity([id]); renderLibrary(); }, 2500); // 演示：模拟 worker 抓取完成
+}
 // 抓取失败：已确认的截图日期优先，其次手动填写，都没有 → null（排最后）
 function velFor(id, dates, now) {
   if (L.scr.get(id) !== "failed") return computeVelocity(dates.get(id), now);
@@ -791,7 +808,7 @@ function libCard(r) {
   return `<article class="pcard${on ? " sel" : ""}">
     <div class="pimg">${img ? `<img src="${imgUrl(etsyThumb(r.image_url, "300x300"))}" width="300" height="300" decoding="async" data-zoom="${img}" data-cap="${esc(r.title)}" alt="" loading="lazy">` : '<div class="pimg-empty">◆</div>'}
       <label class="psel" title="选择"><input type="checkbox" data-lsel="${esc(r.id)}"${on ? " checked" : ""}></label>
-      <div class="pbadges">${L.vel ? velocityBadge(velOf(r), esc) : ""}${L.stage === "all" ? `<span class="pb pb-st st-${st}">${esc(STAGE_NAME[st])}</span>` : ""}${!r.job_id ? `<span class="pb pb-del" title="分析任务已删除，仅保留加入时的快照">${S.libPending.has(Number(r.etsy_listing_id)) ? "重新分析中…" : "分析已删除"}</span>` : ""}</div></div>
+      <div class="pbadges">${L.vel ? cardVelocityBadge(velOf(r), L.scr.get(Number(r.etsy_listing_id)), r.etsy_listing_id, esc) : scrapeChip(L.scr.get(Number(r.etsy_listing_id)), r.etsy_listing_id)}${L.stage === "all" ? `<span class="pb pb-st st-${st}">${esc(STAGE_NAME[st])}</span>` : ""}${!r.job_id ? `<span class="pb pb-del" title="分析任务已删除，仅保留加入时的快照">${S.libPending.has(Number(r.etsy_listing_id)) ? "重新分析中…" : "分析已删除"}</span>` : ""}</div></div>
     <div class="pinfo"><a class="ptitle" href="${url}" target="_blank" rel="noopener" title="${esc(r.title)}">${esc(r.title || `Etsy #${r.etsy_listing_id}`)}</a>
       <div class="pprice">${r.price != null ? `$${esc(Number(r.price).toFixed(2))}` : '<span class="muted">—</span>'}</div>
       ${amzBlock(r, { esc, editing: L.kwEdit === r.id, asinOn: L.asinOn.has(r.id), open: L.kwOpen.has(r.id) })}
@@ -1257,6 +1274,7 @@ document.addEventListener("click", (ev) => {
   if (t.dataset?.clear) { ev.preventDefault(); F.cat = "all"; F.q = ""; $("q").value = ""; return render(); }
   if (t.dataset?.zoom) { $("lbImg").src = t.dataset.zoom; $("lbCap").textContent = t.dataset.cap || ""; $("lightbox").classList.remove("hidden"); return; }
   if (t.dataset?.lvel) return toggleVelocity();
+  if (t.dataset?.rretry) return retryScrape(Number(t.dataset.rretry));
   if (t.dataset?.oconf) return confirmShots(Number(t.dataset.oconf));
   if (t.dataset?.msave) return saveManual(Number(t.dataset.msave));
   if (t.dataset?.detail) return openDetail(t.dataset.detail);
