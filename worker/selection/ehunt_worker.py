@@ -108,6 +108,10 @@ PAGE_TIMEOUT_S = float(os.environ.get("EHUNT_PAGE_TIMEOUT_S", "90"))     # 正�
 PAGE_RETRIES = max(0, int(os.environ.get("EHUNT_PAGE_RETRIES", "2")))   # 超时后重试次数（共 1 + 2 = 3 次）
 PAGE_KILL_GRACE_S = float(os.environ.get("EHUNT_PAGE_KILL_GRACE_S", "20"))  # 超过硬超时这么久仍卡在单个浏览器调用里 → 看门狗杀掉本 profile 的 chromium
 class PageTimeout(RuntimeError): pass
+class PageStuck(RuntimeError): pass          # 翻页到第 N 页超时（页码/首行没变）→ 与超时同样重开同一页重试（2026-10-21 menu 第 2 页）
+class KeywordNotApplied(RuntimeError): pass  # 关键词未生效（Selected: 中没有 Keyword）→ 同样重开重试（2026-10-21 book 续读）
+class RunStopped(BaseException): pass        # 重试间隙发现用户已取消/暂停：立即停（BaseException：不被页内 except Exception 吞掉）
+RETRY_KINDS = {PageTimeout: "超时", PageStuck: "翻页卡住", KeywordNotApplied: "关键词未生效"}
 
 def _kill_profile_browser(profile=None):
     """看门狗（另一线程）：只杀本进程后代中 --user-data-dir=本 profile 的 chromium，让主线程卡住的 Playwright 调用立即报错返回。"""
@@ -144,37 +148,46 @@ class _Watchdog:
         self.fired = True; log.warning("ehunt page watchdog: browser call stuck past hard timeout, killing browser to unblock"); self.kill()
     def disarm(self): self.t.cancel()
 
-def page_loop(open_session, start_rank, end_rank, ps, between=None, timeout=None, retries=None, clock=time.monotonic, watchdog=None):
+def page_loop(open_session, start_rank, end_rank, ps, between=None, timeout=None, retries=None, clock=time.monotonic, watchdog=None, should_stop=None):
     """与浏览器无关的翻页/超时/重试骨架（单测直接用假 session）。
     open_session(page) → session：已打开列表并停在第 page 页；session.read(page, deadline) → (rows, has_next)，rows = [(rank, row)]，
-    超过 deadline 抛 PageTimeout；session.next(page, deadline) 翻到第 page 页；session.ctx 给 between；session.close()。"""
+    超过 deadline 抛 PageTimeout；翻页卡住 PageStuck、关键词未生效 KeywordNotApplied 同样重试；should_stop() 为真 → 抛 RunStopped（取消/暂停）。
+    session.next(page, deadline) 翻到第 page 页；session.ctx 给 between；session.close()。"""
     timeout = PAGE_TIMEOUT_S if timeout is None else timeout; retries = PAGE_RETRIES if retries is None else retries
     watchdog = watchdog or (lambda s: _Watchdog(s, _kill_profile_browser))
     page = (start_rank - 1) // ps + 1; done = start_rank - 1; sess = None; need_next = False
     try:
         while done < end_rank:
+            last = None
             for att in range(retries + 1):
+                if att and should_stop and should_stop(): raise RunStopped()
                 deadline = clock() + timeout; wd = watchdog(timeout + PAGE_KILL_GRACE_S); t0 = clock()
                 try:
                     if sess is None: sess = open_session(page)
                     elif need_next: sess.next(page, deadline)
                     need_next = False
                     rows, has_next = sess.read(page, deadline)
-                    if att and _PROG[0]: _PROG[0].update(retry=0)   # 重试成功：清掉网页上的“超时重试中”
+                    if att and _PROG[0]: _PROG[0].update(retry=0, retry_why=None)   # 重试成功：清掉网页上的“超时重试中”
                     break
                 except LoginExpired: raise
                 except Exception as e:
-                    if not (isinstance(e, PageTimeout) or wd.fired or clock() > deadline or "Timeout" in type(e).__name__): raise
-                    log.warning("ehunt page %s: timed out after %.0fs (attempt %d/%d, limit %.0fs): %s — reopening same page (rank %s→)",
-                                page, clock() - t0, att + 1, retries + 1, timeout, str(e)[:120], done + 1)
-                    stage("page_retry", page=page, retry=att + 1, retry_max=retries)
+                    kind = next((v for k, v in RETRY_KINDS.items() if isinstance(e, k)), None)
+                    if kind is None and (wd.fired or clock() > deadline or "Timeout" in type(e).__name__): kind = "超时"
+                    if kind is None: raise
+                    last = (kind, e)
+                    log.warning("ehunt page %s: %s after %.0fs (attempt %d/%d, limit %.0fs): %s — reopening same page (rank %s→)",
+                                page, "timed out" if kind == "超时" else "stuck paging" if kind == "翻页卡住" else "keyword not applied",
+                                clock() - t0, att + 1, retries + 1, timeout, str(e)[:120], done + 1)
+                    if att < retries: stage("page_retry", page=page, retry=att + 1, retry_max=retries, retry_why=kind)
                     if sess is not None:
                         try: sess.close()
                         except Exception: log.warning("closing timed-out session failed", exc_info=True)
                     sess = None; need_next = False
                 finally: wd.disarm()
             else:
-                raise PageTimeout(f"EHunt 第 {page} 页读取超时（每次 {timeout:.0f} 秒，已重试 {retries} 次仍失败）")
+                kind, e = last
+                if kind == "超时": raise PageTimeout(f"EHunt 第 {page} 页读取超时（每次 {timeout:.0f} 秒，已重试 {retries} 次仍失败）")
+                raise type(e)(f"EHunt 第 {page} 页{kind}（{str(e)[:80]}；已重试 {retries} 次仍失败）")
             for rank, row in rows:
                 if rank <= done: continue          # 重读时跳过已交出的 rank（防重复）
                 if rank > end_rank: break
@@ -187,7 +200,7 @@ def page_loop(open_session, start_rank, end_rank, ps, between=None, timeout=None
     finally:
         if sess is not None: sess.close()
 
-def scrape_ehunt(keyword, params, start_rank, end_rank, between=None):
+def scrape_ehunt(keyword, params, start_rank, end_rank, between=None, should_stop=None):
     """读 EHunt 排名 start_rank..end_rank（含）：界面设好筛选 → 跳到对应页（每页 20）→ 逐行读 DOM。只在内存里产出行，不落盘。
     between(ctx)：每读完一页调用一次（穿插处理预筛选主图查询，用同一浏览器上下文的新标签页，不影响本页状态）。
     每页硬超时 PAGE_TIMEOUT_S，超时重开同一页重试 PAGE_RETRIES 次（见 page_loop）。"""
@@ -226,7 +239,7 @@ def scrape_ehunt(keyword, params, start_rank, end_rank, between=None):
                 a_ = s.pg.query_selector(U["active_page"])
                 if a_ and a_.inner_text().strip() == str(n) and s.first_href() != old: break
                 time.sleep(0.5)
-            else: raise RuntimeError(f"翻页到第 {n} 页超时")
+            else: raise PageStuck(f"翻页到第 {n} 页超时")
             time.sleep(1.5)
         def next(s, n, deadline):
             old = s.first_href(); _click(s.pg, U, U["next"], timeout=left_ms(deadline)); s.wait_page(n, old, deadline)
@@ -254,7 +267,7 @@ def scrape_ehunt(keyword, params, start_rank, end_rank, between=None):
             log.info("ehunt page %s done: rank=%s, %.0fs", page, rank, time.time() - t_page)
             return out, has_next
     with sync_playwright() as p:
-        yield from page_loop(Sess, start_rank, end_rank, ps, between=between)
+        yield from page_loop(Sess, start_rank, end_rank, ps, between=between, should_stop=should_stop)
 
 # 标准筛选（需求文档 §2）：数量与抓取都必须带上，否则会拿到未筛选的总数（如 43,805）。
 # EHunt 的筛选不在 URL 里（https://ehunt.ai/etsy-product-research 无查询参数），只在页面状态里 → 必须通过界面操作设置。
@@ -356,7 +369,7 @@ def _open_list(p, keyword, params):
             dismiss_overlays(pg, U); pg.fill(U["search_input"], keyword); _click(pg, U, U["search_btn"]); pg.wait_for_load_state("networkidle"); time.sleep(2 + attempt * 2)
             dismiss_overlays(pg, U)
             if U["chip_keyword"].format(keyword=keyword).replace(" ", "").lower() in pg.locator(U["selected_row"]).first.inner_text().replace(" ", "").lower(): break
-        else: raise RuntimeError(f"关键词未生效：Selected: 中没有 Keyword: {keyword}")
+        else: raise KeywordNotApplied(f"关键词未生效：Selected: 中没有 Keyword: {keyword}")
         # Basic: Price(USD) → 自定义 Min/Max → OK（都在展开的 popover 里）
         _click(pg, U, U["price_dd"]); time.sleep(1); pop = pg.locator(U["popover"])
         pop.locator(U["min_input"]).first.fill(str(F["price_min"])); pop.locator(U["max_input"]).first.fill(str(F["price_max"]))
@@ -787,8 +800,14 @@ def handle_run(store, run, a, lookups):
         stage("read_setup", batch_no=b["batch_no"], target=b["offset_end"] - b["offset_start"] + 1, read=k0, judged=k0,
               vision_pending=0, passed=int(b.get("passed_count") or 0), excluded=int(b.get("excluded_count") or 0), dup=int(b.get("dup_count") or 0), page=(s0 - 1) // 20 + 1)
         sc = fake_scrape(a.fake, s0, b["offset_end"]) if a.fake else scrape_ehunt(run["keyword"], run.get("params") or {}, s0, b["offset_end"],
-                                                                               between=(lambda c: serve_lookups_browser(store, c)) if lookups and LOOKUPS_ON else None)
+                                                                               between=(lambda c: serve_lookups_browser(store, c)) if lookups and LOOKUPS_ON else None,
+                                                                               should_stop=lambda: store.run(run["id"]).get("status") in ("canceled", "paused"))
         process_batch(store, run, b, sc)
+    except RunStopped:   # 重试间隙用户取消/暂停：同 process_batch 的暂停路径 —— 批次“已停止”，run 状态保持用户设的（不写错误）
+        log.info("run %s stopped by user during page retry", run["id"])
+        _safe(store.patch_batch, b["id"], status="canceled", finished_at=NOW())
+        st_now = (_safe(store.run, run["id"]) or {}).get("status") or "canceled"
+        if _PROG[0]: _safe(_PROG[0].update, force=True, stage=st_now, retry=0, retry_why=None)
     except Exception as e:
         close_scraper(sc)
         if is_poisoned(e):

@@ -99,7 +99,7 @@ def test_batch_failure_flushes_and_resumes_from_breakpoint(worker, monkeypatch):
     assert st.batch["status"] == "canceled" and st.batch["scraped_count"] == 12   # 已落定的 12 条写回（不是只到 10）
     # 网页「继续本批」(sel_resume) → 批次重新 queued；worker 从 offset_start + scraped_count 接着读
     starts = []
-    def resume(kw, params, s0, e0, between=None):
+    def resume(kw, params, s0, e0, between=None, should_stop=None):
         starts.append(s0); yield from (r for r in real_pw_scrape() if r["rank"] >= s0)
     monkeypatch.setattr(W, "scrape_ehunt", resume)
     st.batch["status"] = "queued"; st.runs = [RUN_B]

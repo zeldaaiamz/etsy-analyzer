@@ -43,3 +43,10 @@ test("删除：进行中/排队/暂停的不能删，结束的可以", () => {
   for (const s of ["succeeded", "batch_done", "failed", "canceled", "counted"]) assert.equal(canDelete({ status: s }), true, s);
   assert.ok(queueItem({ id: "e", status: "succeeded" }, B({ status: "done" }), NOW).acts.includes("delete"));
 });
+
+test("page retry labels (timeout vs paging/keyword)", () => {
+  const mk = (why) => queueItem({ id: "r", status: "running", progress: { stage: "page_retry", retry: 1, retry_max: 2, retry_why: why, page: 44, at: ago(2) } }, null, NOW).label;
+  assert.equal(mk("超时"), "单页超时重试中"); assert.equal(mk(undefined), "单页超时重试中");
+  assert.equal(mk("翻页卡住"), "页面重试中"); assert.equal(mk("关键词未生效"), "页面重试中");
+  assert.equal(queueItem({ id: "r", status: "running", progress: { stage: "reading", retry: 0, at: ago(2) } }, null, NOW).label, "抓取中");
+});
