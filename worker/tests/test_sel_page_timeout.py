@@ -108,7 +108,7 @@ def test_page_timeout_fails_batch_cleanly_with_chinese_reason(monkeypatch, tmp_p
     """全部重试失败 → handle_run 现有路径：批次“已停止”、run canceled + 中文原因（可「继续本批」），不卡、不 recycle。"""
     monkeypatch.setattr(W, "EXCL_DIR", str(tmp_path)); monkeypatch.setattr(W, "SEEN", {})
     monkeypatch.setattr(W.C, "guard", lambda o: ("排除", "7天销量≤3", "")); monkeypatch.setattr(W.C, "dedupe", lambda rows: rows)
-    def scrape(kw, params, s0, e0, between=None):
+    def scrape(kw, params, s0, e0, between=None, should_stop=None):
         c = Clock(); site = FakeSite(c, hang_plan={2: 99})
         yield from W.page_loop(site.open, s0, e0, PS, timeout=90, retries=2, clock=c, watchdog=lambda x: NoDog())
     monkeypatch.setattr(W, "scrape_ehunt", scrape)
@@ -135,3 +135,92 @@ def test_kill_only_own_descendant_with_profile(tmp_path):
         time.sleep(0.2); killed = W._kill_profile_browser(str(prof))
         assert killed == [a.pid] and a.wait(5) == -9 and b.poll() is None
     finally: b.kill(); a.kill()
+
+
+# ---- 2026-10-21：翻页卡住 / 关键词未生效 也重开同一页重试 ----
+class OpenFailSite(FakeSite):
+    """open_fail: 前 N 次 open 抛 exc（模拟 _open_list 关键词未生效 / 跳页 wait_page 卡住）；next_fail: 前 N 次翻页抛 PageStuck。"""
+    def __init__(self, clock, open_fail=0, exc=None, next_fail=0, **kw):
+        super().__init__(clock, **kw); self.open_fail, self.oexc, self.next_fail = open_fail, exc, next_fail
+    def open(self, page):
+        if self.open_fail > 0:
+            self.open_fail -= 1; self.opens.append(page); raise self.oexc
+        s = super().open(page); site = self; orig = s.next
+        def nxt(n, deadline):
+            if site.next_fail > 0: site.next_fail -= 1; raise W.PageStuck(f"翻页到第 {n} 页超时")
+            orig(n, deadline)
+        s.next = nxt; return s
+
+def test_keyword_not_applied_retried_then_ok():
+    c = Clock(); s = OpenFailSite(c, open_fail=2, exc=W.KeywordNotApplied("关键词未生效：Selected: 中没有 Keyword: book"), total=1000)
+    rows = run(s, c, start=870, end=900)
+    assert [r["rank"] for r in rows] == list(range(870, 901)) and s.opens == [44, 44, 44]
+
+def test_page_stuck_on_next_retried_no_dup():
+    c = Clock(); s = OpenFailSite(c, next_fail=1, total=36)
+    rows = run(s, c, end=36)
+    assert [r["rank"] for r in rows] == list(range(1, 37)) and s.opens == [1, 2] and s.reads == [1, 2]
+
+def test_keyword_exhaustion_clean_message():
+    c = Clock(); s = OpenFailSite(c, open_fail=99, exc=W.KeywordNotApplied("关键词未生效：Selected: 中没有 Keyword: book"))
+    with pytest.raises(W.KeywordNotApplied, match="第 1 页关键词未生效.*已重试 2 次仍失败"): run(s, c)
+    assert len(s.opens) == 3
+
+def test_page_stuck_exhaustion_clean_message():
+    c = Clock(); s = OpenFailSite(c, next_fail=99, open_fail=0, total=60)
+    s2 = s.open
+    def open_(page):   # 重开后跳页也卡住
+        if page > 1: s.opens.append(page); raise W.PageStuck(f"翻页到第 {page} 页超时")
+        return s2(page)
+    with pytest.raises(W.PageStuck, match="第 2 页翻页卡住.*已重试 2 次"):
+        list(W.page_loop(open_, 1, 60, PS, timeout=90, retries=2, clock=c, watchdog=lambda x: NoDog()))
+
+def test_generic_runtime_error_still_not_retried():
+    c = Clock(); s = OpenFailSite(c, open_fail=1, exc=RuntimeError("排序不是 7 天销量降序"))
+    with pytest.raises(RuntimeError, match="排序"): run(s, c)
+    assert s.opens == [1]
+
+def test_cancel_during_retry_stops_without_more_attempts():
+    c = Clock(); s = FakeSite(c, hang_plan={2: 99}); stops = iter([False, True])
+    got = []
+    with pytest.raises(W.RunStopped):
+        for r in W.page_loop(s.open, 1, 60, PS, timeout=90, retries=2, clock=c, watchdog=lambda x: NoDog(), should_stop=lambda: next(stops)):
+            got.append(r["rank"])
+    assert got == list(range(1, 21)) and s.reads == [1, 2, 2] and s.closes == len(s.opens)   # 第 2 次重试前发现取消，浏览器已关
+
+def test_should_stop_not_called_on_normal_path():
+    c = Clock(); s = FakeSite(c); calls = []
+    rows = list(W.page_loop(s.open, 1, 60, PS, timeout=90, retries=2, clock=c, watchdog=lambda x: NoDog(), should_stop=lambda: calls.append(1)))
+    assert len(rows) == 60 and calls == []   # 正常页不多一次数据库往返
+
+def _handle(monkeypatch, tmp_path, scrape, status_seq):
+    monkeypatch.setattr(W, "EXCL_DIR", str(tmp_path)); monkeypatch.setattr(W, "SEEN", {})
+    monkeypatch.setattr(W.C, "guard", lambda o: ("排除", "7天销量≤3", "")); monkeypatch.setattr(W.C, "dedupe", lambda rows: rows)
+    monkeypatch.setattr(W, "scrape_ehunt", scrape)
+    rp, bp = [], []; seq = iter(status_seq)
+    class St:
+        def open_batch(s, rid): return {"id": "b1", "batch_no": 1, "offset_start": 1, "offset_end": 60, "scraped_count": 0}
+        def run(s, rid): return {"id": rid, "status": next(seq, status_seq[-1]), "max_rows": 60}
+        def passed_ids(s, rid): return set()
+        def patch_run(s, rid, **kw): rp.append(kw)
+        def patch_batch(s, bid, **kw): bp.append(kw)
+        def insert_item(s, b): pass
+    class A: fake = None
+    W.handle_run(St(), {"id": "r1", "keyword": "book", "status": "running", "user_id": "u", "params": {}}, A(), False)
+    return rp, bp
+
+def test_handle_run_cancel_during_retry_keeps_user_status(monkeypatch, tmp_path):
+    def scrape(kw, params, s0, e0, between=None, should_stop=None):
+        c = Clock(); site = FakeSite(c, hang_plan={2: 99})
+        yield from W.page_loop(site.open, s0, e0, PS, timeout=90, retries=2, clock=c, watchdog=lambda x: NoDog(), should_stop=should_stop)
+    rp, bp = _handle(monkeypatch, tmp_path, scrape, ["running", "paused"])
+    assert not any("status" in k for k in rp)                         # 不改 run 状态、不写错误（用户的“暂停”保持）
+    assert bp[-1].get("status") == "canceled" and any(k.get("scraped_count") == 20 for k in bp)   # 已读 20 条已落定，继续时从 21 读
+
+def test_handle_run_keyword_exhaustion_chinese_reason(monkeypatch, tmp_path):
+    def scrape(kw, params, s0, e0, between=None, should_stop=None):
+        c = Clock(); site = OpenFailSite(c, open_fail=99, exc=W.KeywordNotApplied("关键词未生效：Selected: 中没有 Keyword: book"))
+        yield from W.page_loop(site.open, s0, e0, PS, timeout=90, retries=2, clock=c, watchdog=lambda x: NoDog(), should_stop=should_stop)
+    rp, bp = _handle(monkeypatch, tmp_path, scrape, ["running"])
+    err = [k for k in rp if k.get("status") == "canceled"][-1]["error"]
+    assert "第 1 页关键词未生效" in err and "已重试 2 次" in err and "继续本批" in err

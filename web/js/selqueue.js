@@ -14,7 +14,7 @@ export function queueItem(r, batch, now = Date.now()) {
   if (r.status === "running") {
     if (beat > STALL_S) return { ...base, group: "problem", label: "卡住", reason: `box 抓取进程 ${Math.round(beat / 60)} 分钟没有更新进度（可能离线或浏览器卡死）`, acts: ["retry", "cancel"] };
     const target = P.target || (b ? b.offset_end - b.offset_start + 1 : 0), judged = Math.max(P.judged || 0, b?.scraped_count || 0), read = Math.max(judged, P.read || 0);
-    return { ...base, group: "running", label: P.stage === "vision" ? "豆包判断中" : P.retry > 0 ? "单页超时重试中" : P.stage === "read_setup" ? "打开 EHunt" : "抓取中", warn: beat > WARN_S,
+    return { ...base, group: "running", label: P.stage === "vision" ? "豆包判断中" : P.retry > 0 ? (P.retry_why && P.retry_why !== "超时" ? "页面重试中" : "单页超时重试中") : P.stage === "read_setup" ? "打开 EHunt" : "抓取中", warn: beat > WARN_S,
       pctR: target ? Math.min(100, (100 * read) / target) : 0, pctJ: target ? Math.min(100, (100 * judged) / target) : 0, read, judged, target, passed: Math.max(P.passed || 0, b?.passed_count || 0), page: P.page, acts: ["pause", "cancel"] };
   }
   if (r.status === "counting" || r.status === "count_queued") return { ...base, group: "running", label: r.status === "counting" ? "查询数量中" : "排队查询数量", counting: true, acts: ["cancel"] };
