@@ -1,8 +1,9 @@
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
 import { computeVelocity, computeManualVelocity, cmpVelocity, velocityBadge, cardVelocityBadge, scrapeChip, SCRAPE_BUSY, loadReviewDates, demoReviewDates, loadScrapeInfo } from "./velocity.js";
 import { amzBlock, amzUrls, openAll, applyEdit, kwList, MAX_KW, DIR_SELECT_HTML } from "./amzsearch.js";
-import { createScreen, ANOMALY_PREFIX, anomalyReason } from "./screen.js?v=ca18d8ce";
+import { createScreen, ANOMALY_PREFIX, anomalyReason } from "./screen.js?v=2e0c6e88";
 import { createExWords } from "./exwords.js?v=c9174633";
+import { createReconcile, taskTotalLine, sortAt } from "./reconcile.js?v=16c285c9";
 import { createSelScreen } from "./selscreen.js?v=9d530c70";
 
 // ?demo=1：纯前端示例数据，不登录、不连 Supabase，仅用于预览界面（&offline=1 / &quota=1 预览横幅）
@@ -329,7 +330,8 @@ async function loadAll() {
         const dj = drawerState && old.get(drawerState.id); if (dj && !S.jobs.has(dj.id) && inLib(dj)) S.jobs.set(dj.id, dj); // 从产品库打开的抽屉
         const keep = new Set(S.jobs.keys());
         [S.analyses, S.etsy, S.counts, S.asins, S.snaps].forEach((m) => [...m.keys()].forEach((k) => keep.has(k) || (drawerState?.id === k) || m.delete(k)));
-        S.hasMore = !!data.has_more; setLibCount(data.lib_count);
+        S.hasMore = !!data.has_more; setLibCount(data.lib_count); S.total = data.total ?? null;   // 051：共 N 个任务（未执行 051 时为 null，只显示已显示数）
+        REC.load().then(() => render()).catch(() => {});
         return afterLoad();
       }
       if (error && !/task_list|PGRST202|function/i.test(error.message || "")) throw error;
@@ -962,7 +964,23 @@ function renderLibrary() {
   $("libGrid").innerHTML = `<div class="card empty lib-empty"><div class="ico">★</div><h3>${totalAll ? (L.q || L.reason ? "没有匹配的产品" : `「${L.stage === "all" ? "全部" : STAGE_NAME[L.stage]}」里还没有产品`) : "产品库还是空的"}</h3>
     <p class="muted">${totalAll ? (L.stage === "candidate" || L.stage === "all" ? "在任务中点“☆ 加入产品库”会进入备选" : "在备选中选择产品移到这里") : "在已完成任务上点“☆ 加入产品库”，或勾选多个任务批量加入"}</p></div>`;
 }
-const SCR = createScreen({ $, esc, imgUrl, toast, getSb: () => sb, DEMO, QS, confirmDialog, getStatus: () => S.status });
+// 051 对账：预筛选页每批「确认 N · 已进任务 M · 产品库 L」+ 我的任务顶部全账号一行
+const REC = createReconcile({ $, esc, getSb: () => sb, DEMO, toast, demoData: demoRecon, onChanged: () => render(),
+  onGoTask: async (id, row) => { S.limit = Math.max(S.limit, row + 5); F.cat = "all"; F.q = ""; if ($("q")) $("q").value = ""; location.hash = "#/"; if (!DEMO) await loadAll();
+    S.flash = new Set([id]); render(); setTimeout(() => { S.flash.delete(id); render(); }, 6000);
+    setTimeout(() => document.querySelector(`[data-row="${CSS.escape(id)}"]`)?.scrollIntoView({ block: "center" }), 120); } });
+function demoRecon() {   // 演示数字：形状与生产 screen_reconcile 一致（批次、行号、原因），数字仿 Hongyan 账号 10-22 的对账
+  const mk = (n, from, reason, base, extra = {}) => Array.from({ length: n }, (_, i) => ({ id: `demo-r-${base + i}`, listing_id: base + i, title: `Demo listing ${base + i}`, status: "queued", reason, task_row: reason === "library" ? null : from + i, ...extra }));
+  const del = (n, base) => Array.from({ length: n }, (_, i) => ({ id: `demo-d-${base + i}`, listing_id: base + i, title: `Deleted demo ${base + i}` }));
+  return [
+    { batch_id: "demo-rb-label", name: "获取链接 label 第1批 10-21 15:57（演示数字）", confirmed: 6, in_tasks: 6, in_library: 0, failed: 0, missing: 0, deleted: 15, items: mk(6, 1, "task", 4100000001), deleted_items: del(15, 4100000101) },
+    { batch_id: "demo-rb-book", name: "获取链接 book 第1批 10-21 10:00（演示数字）", confirmed: 44, in_tasks: 44, in_library: 0, failed: 1, missing: 0, deleted: 136,
+      items: [...mk(43, 7, "task", 1700000001), ...mk(1, 50, "failed", 1700000099, { status: "failed", error: "未能识别出亚马逊搜索词：EHunt 网页回退只取到主图（演示）" })], deleted_items: del(136, 1700000201) },
+    { batch_id: "demo-rb-tag", name: "获取链接 tag 第1批 10-20 23:17（演示数字）", confirmed: 4, in_tasks: 1, in_library: 3, failed: 0, missing: 0, deleted: 38, items: [...mk(1, 51, "task", 4300000001), ...mk(3, 0, "library", 4300000011)], deleted_items: del(38, 4300000101) },
+    { batch_id: "demo-rb-miss", name: "示例：如果出现缺失（演示数字）", confirmed: 3, in_tasks: 2, in_library: 0, failed: 0, missing: 1, deleted: 0, items: [...mk(2, 52, "task", 4400000001), ...mk(1, 0, "missing", 4400000009)], deleted_items: [] },
+  ];
+}
+const SCR = createScreen({ $, esc, imgUrl, toast, getSb: () => sb, DEMO, QS, confirmDialog, getStatus: () => S.status, onChanged: () => REC.refresh(true) });
 const SSC = createSelScreen({ $, esc, toast, getSb: () => sb, DEMO, confirmDialog });
 const EXW = createExWords({ $, esc, toast, getSb: () => sb, DEMO, confirmDialog });
 function route() {
@@ -970,7 +988,7 @@ function route() {
   if (!$("nav").classList.contains("hidden")) { $("app").classList.toggle("hidden", lib || scr || ssc); $("selScreenView").classList.toggle("hidden", !ssc); $("libraryView").classList.toggle("hidden", !lib); $("screenView").classList.toggle("hidden", !scr); }
   document.querySelectorAll("[data-nav]").forEach((a) => a.classList.toggle("active", a.dataset.nav === (lib ? "library" : scr ? "screen" : ssc ? "selscreen" : "tasks")));
   if (ssc && (DEMO || (sb && currentUser))) SSC.show(location.hash.split("/")[2] || null); if (ssc && (DEMO || (sb && currentUser))) EXW.show();
-  if (scr) { if (DEMO || (sb && currentUser)) SCR.show(location.hash.split("/")[2] || null); } else SCR.hide();
+  if (scr) { if (DEMO || (sb && currentUser)) { SCR.show(location.hash.split("/")[2] || null); REC.refresh(false); } } else SCR.hide();
   if (lib) { renderLibrary(); if (!DEMO && sb && currentUser) loadLibrary(); }
 }
 window.addEventListener("hashchange", () => { closeDrawer(); route(); window.scrollTo(0, 0); });
@@ -1058,8 +1076,9 @@ function render() {
   if (!S.loaded) return setHtml($("list"), skeleton());
   if (!all.length) $("bulkBar").innerHTML = "";
   if (!all.length) return setHtml($("list"), `<div class="card empty"><div class="ico">🔍</div><h3>还没有分析记录</h3><p class="muted">在上方粘贴 Etsy 商品链接，点击“开始分析”</p></div>`);
-  const jobs = base.filter((j) => inCat(j, F.cat)).sort((x, y) => (PRIO[catOf(x)] - PRIO[catOf(y)]) || y.created_at.localeCompare(x.created_at));
+  const jobs = base.filter((j) => inCat(j, F.cat)).sort((x, y) => (PRIO[catOf(x)] - PRIO[catOf(y)]) || sortAt(y).localeCompare(sortAt(x)));   // 051：同类内按确认时间（无则发送时间）倒序，刚确认的排前
   renderBulk(jobs); renderLibCount();
+  { const el = $("taskTotal"); if (el) el.innerHTML = taskTotalLine({ total: DEMO ? all.length : S.total, shown: all.length, libCount: S.libCount, rec: REC.totals(), demo: DEMO }); }
   const more = S.hasMore ? `<button class="btn btn-ghost load-more" data-more="1">加载更多（已显示 ${all.length} 个任务）</button>` : "";
   if (!jobs.length) return setHtml($("list"), `<div class="card empty"><div class="ico">🗂️</div><h3>没有符合条件的任务</h3><p class="muted">换个分类或<a href="#" data-clear="1">清除筛选</a>${S.hasMore ? "；较早的任务需先“加载更多”" : ""}</p></div>${more}`);
   TICK.clear();

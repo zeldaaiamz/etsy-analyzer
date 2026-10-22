@@ -36,7 +36,7 @@ export function restoreSoftHide(items, removed) {
 // 可确认 = 已取到（status=screening）且图片已加载/无图/图片失败；同批排队、取数中的不在内，取到后再确认。纯函数，便于测试。
 export function confirmableItems(items, isReady) { return (items || []).filter((it) => it.status === "screening" && isReady(it)); }
 
-export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDialog, getStatus = () => null }) {
+export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDialog, getStatus = () => null, onChanged = () => {} }) {
   const V = { loadErr: null, items: [], batch: null, tab: "all", rej: new Set(), imgOk: new Set(), busy: new Set(), loaded: false, timer: null, demo: null, sbatches: null, sel: new Set() };
   const thumb = (u) => (/^https:\/\/i\.etsystatic\.com\//.test(u || "") ? u.replace(/\/il_[0-9a-zA-Z]+x[0-9a-zA-Z]+\./, "/il_570xN.") : u);
   const hasData = (it) => it.status === "screening" || it.screen_state === "rejected" || it.screen_state === "kept";
@@ -172,6 +172,7 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     V.busy.delete(which);
     if (err) { toast(`确认失败：${err.message}`, "bad"); return render(); }
     items.forEach((it) => { if (V.rej.has(it.id)) { it.status = "canceled"; it.screen_state = "rejected"; V.rej.delete(it.id); } else { it.status = "queued"; it.screen_state = "kept"; } });
+    onChanged();
     toast(`✓ ${res.kept} 条进入分析${res.rejected ? `，${res.rejected} 条已排除` : ""}`, "ok", [{ label: "查看任务", href: "#/" }], 4000);
     render(); if (!DEMO) load();
   }
@@ -232,6 +233,7 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
         }
         ids = r.data?.ids || [id];
       }
+      onChanged();
       toast(`已删除 ${ids.length} 条`, "ok", [{ label: "撤销", run: async () => {
         if (!DEMO) { const r = await getSb().rpc("screen_unhide", { p_ids: ids }); if (r.error) return toast(`撤销失败：${r.error.message}`, "bad"); load(); }
         else { V.items = restoreSoftHide(V.items, removed); render(); }
