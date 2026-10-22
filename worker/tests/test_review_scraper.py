@@ -219,3 +219,10 @@ def test_ensure_display_spawns_xvfb(monkeypatch):
     assert not R.ensure_display(":77", False, spawn=spawn) and len(calls) == 1
     def bad(cmd, **kw): raise OSError("no Xvfb")
     assert not R.ensure_display(":77", True, spawn=bad)
+
+
+def test_ehunt_busy_ignores_stale_queue(monkeypatch):
+    st = R.Store("http://x", "k"); seen = []
+    monkeypatch.setattr(st, "_req", lambda m, path, *a, **k: seen.append(path) or [])
+    assert st.ehunt_busy(now=1_800_000_000) is False
+    assert all("gte.2027-01-15T07%3A45%3A00Z" in p for p in seen) and "heartbeat_at" in seen[0] and "requested_at" in seen[1]

@@ -312,10 +312,12 @@ class Store:
                                                                  "p_source": source, "p_error": error}, "return=minimal")
     def requeue(self, lid):  # 认领后没来得及抓（暂停/冷却）→ 放回 pending，attempts 不算
         self._req("POST", "/rest/v1/rpc/requeue_review_scrape", {"p_listing": int(lid)}, "return=minimal")
-    def ehunt_busy(self):
-        """EHunt 获取链接/计数在跑，或预筛选有主图查询排队 → 让路。"""
-        a = self._req("GET", "/rest/v1/sel_runs?status=in.(count_queued,counting,queued,running)&select=id&limit=1") or []
-        b = self._req("GET", "/rest/v1/ehunt_lookup_requests?status=in.(queued,running)&select=listing_id&limit=1") or []
+    def ehunt_busy(self, now=None):
+        """EHunt 获取链接/计数在跑（15 分钟内有心跳），或近 15 分钟有排队/进行中的任务或预筛选主图查询 → 让路。
+        选品 worker 没在跑时留下的陈旧队列（如 11:07 起没人处理的 lookup）不算忙，否则评论抓取会被永远挡住。"""
+        since = urllib.parse.quote(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime((now or time.time()) - 15 * 60)))
+        a = self._req("GET", f"/rest/v1/sel_runs?status=in.(count_queued,counting,queued,running)&or=(heartbeat_at.gte.{since},created_at.gte.{since},queue_at.gte.{since})&select=id&limit=1") or []
+        b = self._req("GET", f"/rest/v1/ehunt_lookup_requests?status=in.(queued,running)&or=(requested_at.gte.{since},claimed_at.gte.{since})&select=listing_id&limit=1") or []
         return bool(a or b)
 
 
