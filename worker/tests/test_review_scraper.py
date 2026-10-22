@@ -226,3 +226,10 @@ def test_ehunt_busy_ignores_stale_queue(monkeypatch):
     monkeypatch.setattr(st, "_req", lambda m, path, *a, **k: seen.append(path) or [])
     assert st.ehunt_busy(now=1_800_000_000) is False
     assert all("gte.2027-01-15T07%3A45%3A00Z" in p for p in seen) and "heartbeat_at" in seen[0] and "requested_at" in seen[1]
+
+
+def test_empty_first_page_is_failure_not_zero_and_shop_break():
+    with pytest.raises(R.FetchError, match="没读到日期"): R.read_listing(FakeNav([[]]), 1, today=TODAY)
+    out, _ = R.read_listing(FakeNav([[D(300), D(400)]]), 1, today=TODAY); assert out == []      # 全部超过 200 天 → 合法的 0 条
+    n = FakeNav([[]], view_all=False, shop=False, html="<p>This shop is taking a short break.</p>")
+    with pytest.raises(R.FetchError, match="暂停营业"): R.read_listing(n, 1, today=TODAY)

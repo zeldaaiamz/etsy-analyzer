@@ -121,7 +121,11 @@ def read_listing(nav, lid, today=None, days=None, max_pages=None, log_pages=None
     if st != 200: raise FetchError(f"Etsy 商品页 HTTP {st}")
     info = {"header_count": nav.shop_count(), "pages": 0}   # 商品页评分旁「(N)」（打开的是店铺评论弹窗）
     hdr = nav.open_item_reviews()
-    if hdr is None: raise FetchError("仅店铺评论（商品页没有「View all reviews for this item」）") if nav.has_shop_reviews() else FetchError("商品暂无评论区")
+    if hdr is None:
+        if nav.has_shop_reviews(): raise FetchError("仅店铺评论（商品页没有「View all reviews for this item」）")
+        if "taking a short break" in (nav.html() or "").lower() or "taking a short break" in (getattr(nav, "body_text", lambda: "")() or "").lower():
+            raise FetchError("店铺暂停营业（页面不显示评论）")
+        raise FetchError("商品暂无评论区")
     kind, n = heading_kind(hdr)
     if kind != "item": raise FetchError(f"仅店铺评论（弹窗标题：{(hdr or '')[:40]}）")
     info["item_count"] = n
@@ -129,6 +133,7 @@ def read_listing(nav, lid, today=None, days=None, max_pages=None, log_pages=None
     out = []
     for i in range(max_pages or MAX_PAGES):
         ds = nav.page_dates(today); info["pages"] = i + 1
+        if i == 0 and not ds: raise FetchError("评论弹窗里没读到日期（页面结构可能变了）")   # 不把读取失败当成「0 条」
         if log_pages is not None: log_pages.append(ds)
         if is_blocked(None, nav.html()): raise Blocked("Etsy 反爬拦截（翻页时出现验证）")
         out += [d for d in ds if d >= cutoff]
@@ -152,6 +157,9 @@ class PlaywrightNav:
         r = self.pg.goto(f"https://www.etsy.com/listing/{int(lid)}", wait_until="domcontentloaded", timeout=60000, referer="https://www.etsy.com/")
         self.views += 1; self._pause(5, 8); return r.status if r else None
     def html(self): return self.pg.content()[:20000]
+    def body_text(self):
+        try: return self.pg.inner_text("body", timeout=5000)[:3000]
+        except Exception: return ""  # noqa: BLE001
     def shop_count(self):
         t = self.pg.locator("[data-reviews-deep-dive-trigger]").first
         try: return int(re.sub(r"[^\d]", "", t.inner_text(timeout=3000)) or 0) if t.count() else None
