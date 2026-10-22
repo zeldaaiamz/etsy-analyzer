@@ -21,6 +21,15 @@ export function velocityBadge(v, esc) {
   const M = v.shot ? '<span class="pb pb-man" title="来自评论截图 OCR（已核对）">截图</span>' : v.manual ? '<span class="pb pb-man" title="手动填写的评论速度">手动</span>' : "";
   return M + `<span class="pb pb-vel${v.stale ? " stale" : ""}" title="${esc(tip)}">速度 ${v.months}/6 · ${v.n6}条 ${TR[v.trend][0]}${v.stale ? " · 停滞?" : ""}</span>`;
 }
+// 049 自动抓取状态徽标（无速度数据时显示）：pending/fetching → 抓取中；failed → 重试按钮；其它 → ""
+export const SCRAPE_BUSY = new Set(["pending", "fetching"]);
+export function scrapeChip(status, id) {
+  if (SCRAPE_BUSY.has(status)) return `<span class="pb pb-scr" title="新加入产品库，后台正在自动抓取 Etsy 评论日期（低优先级，不影响获取链接/预筛选）">评论抓取中</span>`;
+  if (status === "failed") return `<button type="button" class="pb pb-scr bad" data-rretry="${Number(id)}" title="自动抓取 Etsy 评论日期失败；点击重新排队抓取（也可上传截图或手动填写）">抓取失败 重试</button>`;
+  return "";
+}
+// 速度模式下的卡片徽标：有速度 → 速度徽标；没有 → 抓取状态；都没有 → 「无评论日期数据」
+export function cardVelocityBadge(v, status, id, esc) { return v ? velocityBadge(v, esc) : scrapeChip(status, id) || velocityBadge(null, esc); }
 // 数据适配器：返回 Map<listing_id, 日期数组>；没有数据的 listing 不在 Map 中
 export async function loadReviewDates(sb, ids) {
   const out = new Map();

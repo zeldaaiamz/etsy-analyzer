@@ -435,6 +435,7 @@ a{color:var(--primary);text-decoration:none}a:hover{text-decoration:underline}
 .lvel{display:flex;align-items:center;gap:10px;margin:6px 0}
 .pb-vel{background:#1f6f4a;color:#fff}.pb-vel.stale{background:#8a5a12}.pb-vel.none{background:#444;color:#ccc}
 .pb-man{background:#5b3fa0;color:#fff}
+.pb-scr{background:#2d4f7c;color:#fff}.pb-scr.bad{background:#8b2b2b;border:0;cursor:pointer;font:inherit}.pb-scr.bad:hover{background:#a83434}
 .scr-warn{background:#3a2a10;color:#f2b84b;border:1px solid #8a5a12;border-radius:999px;padding:3px 10px;cursor:pointer;font-size:12px}
 .manf{border-top:1px dashed rgba(127,127,127,.35);padding-top:8px;margin-top:6px;display:flex;flex-direction:column;gap:6px}
 .manf-t{font-size:12px;font-weight:600}.manf-m{display:grid;grid-template-columns:repeat(6,1fr);gap:4px}
