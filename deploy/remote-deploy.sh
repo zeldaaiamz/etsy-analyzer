@@ -56,7 +56,7 @@ if [ "$(sha1sum worker/requirements.txt | cut -c1-40)" != "$OLD_REQ" ]; then
   REQ_CHANGED=1; .venv/bin/pip install -q -r worker/requirements.txt
 fi
 .venv/bin/python -m compileall -q worker/analyzer worker/selection >/dev/null
-(cd worker && ../.venv/bin/python -c "import analyzer.main") 
+(cd worker && /opt/etsy-analyzer/.venv/bin/python -c "import analyzer.main")
 
 # 3) 重启前最后再确认一次空闲（缩小检查到重启之间的窗口）
 idle_check || { echo "重启前 worker 又领到任务，回滚" >&2; exit 4; }
