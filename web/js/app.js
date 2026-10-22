@@ -1101,7 +1101,7 @@ function friendlyErr(j) {
   if (/额度/.test(e) && j.status === "queued") return "";
   // 旧 worker 的误导文案：仅主图看图失败一律说“检查豆包 ARK 配置”，实际多为豆包读取图片超时 → 改说真实原因
   if (/检查豆包 ARK 配置/.test(e)) return "看图识别失败：多为豆包读取 Etsy 图片超时（账号配置正常），可点“重新提交”再试";
-  if (/豆包读取图片超时|图片下载失败|豆包 ARK 限流/.test(e) && j.status === "queued") return `看图暂时失败，将自动重试：${esc(e.replace(/，稍后自动重试$/, ""))}`;
+  if (/豆包读取图片超时|图片下载失败|豆包 ARK 限流|豆包 ARK 服务暂时异常/.test(e) && j.status === "queued") return `看图暂时失败，将自动重试：${esc(e.replace(/，稍后自动重试$/, ""))}`;
   return `${j.status === "queued" ? "上次尝试失败，将自动重试：" : ""}${esc(e)}`;
 }
 

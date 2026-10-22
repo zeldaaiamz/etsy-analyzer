@@ -27,35 +27,76 @@ Return ONLY a JSON object:
 Do not invent text that is not visible. No brand names; no words like handmade/custom/etsy."""
 
 
-IMG_TIMEOUT = float(os.environ.get("DOUBAO_IMAGE_TIMEOUT_SECONDS", "8"))
+IMG_TIMEOUT = float(os.environ.get("DOUBAO_IMAGE_TIMEOUT_SECONDS", "5"))
 IMG_MAX_BYTES = int(os.environ.get("DOUBAO_IMAGE_MAX_BYTES", str(5 * 1024 * 1024)))  # ARK base64 单图上限约 10MB
 _UA = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36"
 
 ARK_FORMATS = ("image/jpeg", "image/jpg", "image/png", "image/webp", "image/gif", "image/bmp")  # 不发 avif/heic（ARK 报 UnsupportedImageFormat）
 
 # 失败分类（kind）：pipeline 据此给出真实原因；只有 auth / billing 才提示检查配置或充值
-IMAGE_TIMEOUT, IMAGE_DOWNLOAD, AUTH, BILLING, RATE, OTHER = "image_timeout", "image_download", "auth", "billing", "rate", "other"
-RETRYABLE_KINDS = (IMAGE_TIMEOUT, IMAGE_DOWNLOAD, RATE)
+IMAGE_TIMEOUT, IMAGE_DOWNLOAD, AUTH, BILLING, RATE, SERVER, OTHER = "image_timeout", "image_download", "auth", "billing", "rate", "server", "other"
+RETRYABLE_KINDS = (IMAGE_TIMEOUT, IMAGE_DOWNLOAD, RATE, SERVER)
 MESSAGES = {IMAGE_TIMEOUT: "豆包读取图片超时", IMAGE_DOWNLOAD: "图片下载失败", AUTH: "豆包 ARK 鉴权失败（检查 ARK_API_KEY / 模型开通）",
-            BILLING: "豆包 ARK 余额不足或欠费（请充值）", RATE: "豆包 ARK 限流", OTHER: "豆包看图失败"}
+            BILLING: "豆包 ARK 余额不足或欠费（请充值）", RATE: "豆包 ARK 限流", SERVER: "豆包 ARK 服务暂时异常", OTHER: "豆包看图失败"}
+
+
+_HTTP_RE = re.compile(r"HTTP (\d{3})\b")
+_CODE_RE = re.compile(r'"code"\s*:\s*"([^"]+)"')
+_AUTH_CODES = ("authenticationerror", "invalidapikey", "unauthorized", "permissiondenied", "accessdenied",
+               "invalidendpointormodel.notfound", "modelnotopen", "invalidsubscription", "forbidden")
+_BILLING_CODES = ("accountoverdueerror", "accountoverdue", "insufficientbalance", "insufficientquota", "quotaexceeded",
+                  "servicenotopen.overdue", "arrears")
+_RATE_CODES = ("ratelimitexceeded", "ratelimit", "requestbursttoofast", "serveroverloaded", "toomanyrequests",
+               "setlimitexceeded")
+
+
+def parse_error(err):
+    """从 HttpError 文本取 HTTP 状态码与 ARK error.code（ARK 返回 {"error":{"code":..,"message":..}}）。"""
+    m = str(err or "")
+    st = _HTTP_RE.search(m)
+    code = _CODE_RE.search(m)
+    return (int(st.group(1)) if st else None), (code.group(1) if code else ""), m
 
 
 def classify(err):
-    """把 ARK / 下载异常归类。ARK 拉图超时是 HTTP 400 InvalidParameter "Timeout while downloading url"。"""
-    m = str(err or "")
-    low = m.lower()
+    """先看 HTTP 状态码 + error.code，再看文案。ARK 拉图超时 = HTTP 400 InvalidParameter "Timeout while downloading url"。"""
+    status, code, m = parse_error(err)
+    c, low = code.lower(), m.lower()
+    # 1) 结构化：error.code
+    if c:
+        if any(x in c for x in _BILLING_CODES):
+            return BILLING
+        if any(x in c for x in _AUTH_CODES):
+            return AUTH
+        if any(x in c for x in _RATE_CODES):
+            return RATE
+        if c.startswith("invalidparameter"):
+            if "unsupportedimageformat" in c or "invalid base64" in low or "invalid image" in low:
+                return IMAGE_DOWNLOAD
+            if "timeout" in low or "timed out" in low:
+                return IMAGE_TIMEOUT
+            if "download" in low or "image" in low:
+                return IMAGE_DOWNLOAD
+    # 2) 状态码
+    if status == 429:
+        return RATE
+    if status and status >= 500:
+        return SERVER
+    if status == 402:
+        return BILLING
+    if status in (401, 403):
+        return BILLING if re.search(r"overdue|arrear|balance|欠费|余额", low) else AUTH
+    # 3) 文案兜底（网络异常、自己下载失败等没有状态码的情况）
     if "timeout while downloading" in low or "timed out" in low or "timeout" in low:
         return IMAGE_TIMEOUT
     if re.search(r"downloading url|download.{0,20}(fail|error)|invalid image|invalid base64|unsupportedimageformat|image.{0,20}(fail|error)", low):
         return IMAGE_DOWNLOAD
-    if re.search(r"HTTP 40[13]\b", m) and re.search(r"overdue|arrear|balance|insufficient|欠费|余额", low):
+    if re.search(r"overdue|insufficient.?(balance|quota)", low):
         return BILLING
-    if re.search(r"HTTP 40[13]\b", m) or re.search(r"authenticationerror|invalid.?api.?key|unauthorized|permission|not activated|accountoverdue", low):
-        return BILLING if "overdue" in low else AUTH
-    if re.search(r"HTTP 402\b|insufficient.?(balance|quota)|overdue", low):
-        return BILLING
-    if re.search(r"HTTP 429\b|rate.?limit|too many requests", low):
+    if re.search(r"rate.?limit|too many requests", low):
         return RATE
+    if re.search(r"authenticationerror|invalid.?api.?key|unauthorized", low):
+        return AUTH
     return OTHER
 
 

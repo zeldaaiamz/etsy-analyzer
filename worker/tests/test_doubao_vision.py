@@ -174,3 +174,26 @@ def test_ark_rejects_base64_then_retries_url():
     v._post = ark
     url = "https://i.etsystatic.com/x.jpg"
     assert v.describe(url)["keywords"] == ["coffee mug"] and sent == ["data:image/avif;base64,AA", url]
+
+
+def test_classify_uses_status_and_error_code():
+    c = dv.classify
+    ark = lambda st, code, msg: f'HTTP {st} POST https://ark/chat/completions: {{"error":{{"code":"{code}","message":"{msg}","type":"x"}}}}'
+    assert c(ark(400, "InvalidParameter", "Timeout while downloading url: https://i.etsystatic.com/x.jpg")) == dv.IMAGE_TIMEOUT
+    assert c(ark(400, "InvalidParameter.UnsupportedImageFormat", "Invalid base64 image_url")) == dv.IMAGE_DOWNLOAD
+    assert c(ark(401, "AuthenticationError", "The API key in the request is missing or invalid")) == dv.AUTH
+    assert c(ark(403, "AccountOverdueError", "Your account has an overdue balance")) == dv.BILLING
+    assert c(ark(404, "InvalidEndpointOrModel.NotFound", "model not found")) == dv.AUTH
+    assert c(ark(429, "RateLimitExceeded.EndpointRPMExceeded", "Too many")) == dv.RATE
+    assert c(ark(429, "ServerOverloaded", "busy")) == dv.RATE
+    assert c("HTTP 429 POST x: <html>") == dv.RATE                 # 只有状态码
+    assert c("HTTP 403 POST x: forbidden") == dv.AUTH
+    assert c("HTTP 402 POST x: pay") == dv.BILLING
+    assert c(ark(400, "InvalidParameter", "max_tokens out of range")) == dv.OTHER  # 非图片参数错误不算读图
+    assert c(ark(500, "InternalServiceError", "oops")) == dv.SERVER and dv.SERVER in dv.RETRYABLE_KINDS
+    assert c(TimeoutError("image download timed out after 5s")) == dv.IMAGE_TIMEOUT
+    assert dv.parse_error(ark(401, "AuthenticationError", "x"))[:2] == (401, "AuthenticationError")
+
+
+def test_download_timeout_default_is_5s():
+    assert dv.IMG_TIMEOUT == 5.0
