@@ -7,6 +7,12 @@ class PermanentError(Exception):
     """不可重试的错误（如 URL 非法、商品不存在）。"""
 
 
+class RetryableError(Exception):
+    """可重试的临时错误（如豆包读图超时、图片下载失败）：受 max_attempts 限制；
+    keep_on_exhaust=True 时用尽次数后标记 failed 并保留原因，不走自动删除。"""
+    keep_on_exhaust = True
+
+
 class JobCanceled(Exception):
     """用户请求取消，worker 在阶段之间检测到。"""
 
@@ -16,6 +22,8 @@ _CODE = re.compile(r"HTTP (\d{3})")
 
 def is_retryable(e, attempts=1):
     """返回 True 表示值得重试（仍受 max_attempts 限制）。"""
+    if isinstance(e, RetryableError):
+        return True
     if isinstance(e, (PermanentError, JobCanceled)) or type(e).__name__ in ("EHuntQuotaError", "EHuntServiceError"):
         return False
     if type(e).__name__ == "HttpError":

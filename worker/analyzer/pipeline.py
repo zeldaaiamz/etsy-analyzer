@@ -3,7 +3,7 @@ import os
 from dataclasses import asdict, fields as dc_fields
 from .models import EtsyProduct
 from .etsy_url import parse_listing_id, parse_slug, is_short, resolve_short
-from .errors import PermanentError, JobCanceled, is_retryable
+from .errors import PermanentError, RetryableError, JobCanceled, is_retryable
 from .scoring import assess, classify
 from datetime import timedelta
 from .queue import _now, retry_delay, next_utc_midnight
@@ -14,6 +14,23 @@ from .amazon_keywords import build as build_keywords
 log = logging.getLogger("pipeline")
 LEVEL = {"low": "低", "medium": "中", "high": "高"}
 
+
+
+def vision_failure(llm):
+    """仅主图且看图失败：按豆包真实失败原因给出错误。读图超时 / 图片下载失败 / 限流 → 可重试；
+    只有鉴权失败（401/403）或欠费才提示检查配置或充值。"""
+    from .providers.doubao_vision import MESSAGES, RETRYABLE_KINDS, AUTH, BILLING
+    vision = getattr(llm, "vision", None)
+    pre = "未能识别出亚马逊搜索词：EHunt 网页回退只取到主图，且"
+    if vision is None:
+        return PermanentError(pre + "未启用豆包看图（DOUBAO_VISION_ENABLED / ARK_API_KEY 未配置）")
+    err = getattr(vision, "last_error", None) or {}
+    kind, msg = err.get("kind"), err.get("message") or MESSAGES["other"]
+    if kind in RETRYABLE_KINDS:
+        return RetryableError(f"{pre}{msg}，稍后自动重试")
+    if kind in (AUTH, BILLING):
+        return PermanentError(f"{pre}{msg}")
+    return PermanentError(f"{pre}{msg}" if kind else f"{pre}看图没有识别出可用的商品信息")
 
 def sales_source_note(matches):
     """按匹配逐个说明销量来源：monthlySold（亚马逊“过去一月购买”）还是 BSR 估算。"""
@@ -244,8 +261,7 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
         an = llm.analyze_product(prod, reviews)
         an.keywords = [k for k in (an.keywords or []) if isinstance(k, str) and k.strip()]
         if not an.keywords:  # 空搜索词不能拿去搜亚马逊（仅主图且看图失败时会发生）
-            raise PermanentError("未能识别出亚马逊搜索词：EHunt 网页回退只取到主图，且看图识别失败（检查豆包 ARK 配置）"
-                                 if image_only else "未能识别出亚马逊搜索词")
+            raise vision_failure(llm) if image_only else PermanentError("未能识别出亚马逊搜索词")
         if not getattr(an, "keyword_items", None):  # 旧缓存/旧 provider：用纯字符串关键词兜底（来源 title + 原标题短语）
             an.keyword_items = build_keywords([], prod.title, fallback=an.keywords)
         ev = an.audience_evidence
@@ -381,7 +397,11 @@ def process_job(job, store, etsy, amazon, llm, max_results=10, shot=None, snapsh
         retry = is_retryable(e, attempts) and attempts < job.get("max_attempts", 3)
         log.log(logging.ERROR if retry else logging.WARNING, "job %s failed (%s): %s", jid,
                 "will retry" if retry else "permanent", e, exc_info=not isinstance(e, PermanentError))
-        if not retry and is_retryable(e, attempts) and attempts >= job.get("max_attempts", 3):
+        if not retry and getattr(e, "keep_on_exhaust", False):
+            # 豆包读图超时等：次数用尽后标记失败并保留真实原因（不自动删除，可在任务列表重试）
+            store.update_job(jid, status="failed", error=f"{str(e).replace('，稍后自动重试', '')[:900]}（已重试 {attempts} 次仍失败）",
+                             finished_at=_now(), locked_by=None)
+        elif not retry and is_retryable(e, attempts) and attempts >= job.get("max_attempts", 3):
             # 第 max_attempts 次仍失败：自动删除任务（产品库内的 listing 则标记 failed 保留）
             try:
                 action = store.discard_exhausted_job(jid, str(e)[:1000])

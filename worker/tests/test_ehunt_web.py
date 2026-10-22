@@ -152,10 +152,11 @@ class VisionLLM:
     def __getattr__(self, k): return getattr(self.inner, k)
 
 
-def _run(store, etsy, clock, kws=None):
+def _run(store, etsy, clock, kws=None, vision_kind=None):
     from analyzer.main import run_loop
     _, amazon, llm = build_providers(Config())
     if kws is not None: llm = VisionLLM(llm, kws)
+    if vision_kind is not None: llm.vision = _Vis(vision_kind)
     with mock.patch.object(queue, "_now", clock), mock.patch.object(pipeline, "_now", clock):
         run_loop(store, (etsy, amazon, llm), Config(), once=True)
 
@@ -202,3 +203,47 @@ def test_image_only_without_keywords_fails_clearly_instead_of_empty_search():
     _run(st, e, clock, kws=[])
     j = st.jobs[ids[0]]
     assert j["status"] == "failed" and "只取到主图" in j["error"] and not st.matches
+
+
+
+class _Vis:
+    def __init__(self, kind):
+        from analyzer.providers import doubao_vision as dv
+        self.last_error = {"kind": kind, "message": dv.MESSAGES[kind], "detail": "x"}
+
+
+def test_vision_failure_messages_and_retry():
+    from analyzer import pipeline
+    from analyzer.errors import RetryableError, PermanentError, is_retryable
+    from analyzer.providers import doubao_vision as dv
+    class L: pass
+    l = L(); l.vision = _Vis(dv.IMAGE_TIMEOUT)
+    e = pipeline.vision_failure(l)
+    assert isinstance(e, RetryableError) and is_retryable(e) and "豆包读取图片超时" in str(e) and "ARK 配置" not in str(e)
+    l.vision = _Vis(dv.IMAGE_DOWNLOAD); e = pipeline.vision_failure(l)
+    assert isinstance(e, RetryableError) and "图片下载失败" in str(e)
+    l.vision = _Vis(dv.AUTH); e = pipeline.vision_failure(l)
+    assert isinstance(e, PermanentError) and "检查 ARK_API_KEY" in str(e)
+    l.vision = _Vis(dv.BILLING); e = pipeline.vision_failure(l)
+    assert isinstance(e, PermanentError) and "充值" in str(e)
+    l.vision = None; e = pipeline.vision_failure(l)
+    assert isinstance(e, PermanentError) and "未启用豆包看图" in str(e)
+
+
+def test_image_timeout_retries_then_fails_kept_not_deleted():
+    """读图超时：可重试，用尽 max_attempts 后 failed 并保留真实原因（不走自动删除）。"""
+    from analyzer.providers import doubao_vision as dv
+    st, ids = _setup({100: {"status": "done", "image_url": IMG}}, n=1)
+    clock = Clock(T0); e = prov(st)
+    _run(st, e, clock)
+    with mock.patch.object(queue, "_now", clock):
+        st.screen_confirm(ids, [])
+    jid = ids[0]
+    for n in range(1, 4):
+        st.jobs[jid]["run_after"] = clock() - timedelta(seconds=1)
+        _run(st, e, clock, kws=[], vision_kind=dv.IMAGE_TIMEOUT)
+        j = st.jobs[jid]
+        if n < 3:
+            assert j["status"] == "queued" and "豆包读取图片超时" in j["error"], j
+    assert j["status"] == "failed" and "豆包读取图片超时" in j["error"] and "已重试 3 次" in j["error"]
+    assert "ARK 配置" not in j["error"] and "稍后自动重试" not in j["error"]
