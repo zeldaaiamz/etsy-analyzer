@@ -233,3 +233,8 @@ def test_empty_first_page_is_failure_not_zero_and_shop_break():
     out, _ = R.read_listing(FakeNav([[D(300), D(400)]]), 1, today=TODAY); assert out == []      # 全部超过 200 天 → 合法的 0 条
     n = FakeNav([[]], view_all=False, shop=False, html="<p>This shop is taking a short break.</p>")
     with pytest.raises(R.FetchError, match="暂停营业"): R.read_listing(n, 1, today=TODAY)
+
+
+def test_unsorted_page_means_sort_failed():
+    with pytest.raises(R.FetchError, match="排序未生效"): R.read_listing(FakeNav([[D(1), D(300), D(5)]]), 1, today=TODAY)
+    _, info = R.read_listing(FakeNav([[D(1), D(1), D(5)]]), 1, today=TODAY); assert info["first_page"][0] == D(1).isoformat()

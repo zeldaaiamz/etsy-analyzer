@@ -134,6 +134,8 @@ def read_listing(nav, lid, today=None, days=None, max_pages=None, log_pages=None
     for i in range(max_pages or MAX_PAGES):
         ds = nav.page_dates(today); info["pages"] = i + 1
         if i == 0 and not ds: raise FetchError("评论弹窗里没读到日期（页面结构可能变了）")   # 不把读取失败当成「0 条」
+        if ds != sorted(ds, reverse=True): raise FetchError("「Most recent」排序未生效（日期不是新→旧）")   # 否则会在第 1 页提前停、少算
+        info.setdefault("first_page", [d.isoformat() for d in ds])
         if log_pages is not None: log_pages.append(ds)
         if is_blocked(None, nav.html()): raise Blocked("Etsy 反爬拦截（翻页时出现验证）")
         out += [d for d in ds if d >= cutoff]
