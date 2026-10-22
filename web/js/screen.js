@@ -33,6 +33,9 @@ export function restoreSoftHide(items, removed) {
   return (items || []).concat(removed || []).sort((a, b) => Number(a.listing_id) - Number(b.listing_id));
 }
 
+// 可确认 = 已取到（status=screening）且图片已加载/无图/图片失败；同批排队、取数中的不在内，取到后再确认。纯函数，便于测试。
+export function confirmableItems(items, isReady) { return (items || []).filter((it) => it.status === "screening" && isReady(it)); }
+
 export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDialog, getStatus = () => null }) {
   const V = { loadErr: null, items: [], batch: null, tab: "all", rej: new Set(), imgOk: new Set(), busy: new Set(), loaded: false, timer: null, demo: null, sbatches: null, sel: new Set() };
   const thumb = (u) => (/^https:\/\/i\.etsystatic\.com\//.test(u || "") ? u.replace(/\/il_[0-9a-zA-Z]+x[0-9a-zA-Z]+\./, "/il_570xN.") : u);
@@ -47,6 +50,9 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
   const groups = () => groupItems(V.items, V.sbatches || []); // 按实际发送批次（jobs.batch_id）分组，不再固定 50 条一组
   const batches = () => groups().map((G) => G.items);
   const pendingOf = (b) => b.filter((it) => it.status === "screening");
+  // 已取到且图片已加载（或无图/图片失败）的待确认条目：同批其他条目还在排队/取数中也可先确认（其余留在本批，之后再确认；
+  // screen_confirm 只更新 status='screening' 的条目，已确认的不会再被发送，不会重复）
+  const confirmableOf = (b) => confirmableItems(b, ready);
   const batchState = (b) => {
     const pend = pendingOf(b), fetching = b.filter(fetchingIt);
     if (!pend.length && !fetching.length) return "done";
@@ -133,21 +139,21 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     if (!tot) { box.innerHTML = `<div class="card empty"><div class="ico">◎</div><h3>${!DEMO && !V.loaded ? "加载中…" : "没有待筛选的链接"}</h3><p class="muted">在“任务”页粘贴链接并勾选“先预筛选”，取到 EHunt 数据后会出现在这里</p></div>`; $("screenFoot").innerHTML = ""; return; }
     const GS = groups(), demoTag = (V.sbatches || []).some((b) => b.demo) ? ' <span class="pill pill-bad">演示数字</span>' : "";
     box.innerHTML = banner + bs.map((b, i) => { const G = GS[i];
-      const st = batchState(b), pend = pendingOf(b), keep = pend.filter((it) => !V.rej.has(it.id)).length, rj = pend.length - keep;
+      const st = batchState(b), pend = confirmableOf(b), keep = pend.filter((it) => !V.rej.has(it.id)).length, rj = pend.length - keep;
       const nReady = b.filter((it) => hasData(it) && ready(it)).length;
       const show = b.filter((it) => V.tab === "all" || (V.tab === "pending" ? it.status === "screening" && !V.rej.has(it.id) : V.rej.has(it.id) || it.screen_state === "rejected"));
       const busy = V.busy.has(i);
       const btn = st === "done" ? `<span class="pill pill-ok">✓ 已确认${b.some((it) => it.screen_state === "kept") ? " · 已进入分析" : ""}</span>`
-        : `<button class="btn btn-primary btn-sm" data-sconfirm="${i}" ${st !== "ready" || busy || !pend.length ? "disabled" : ""} title="${st === "loading" ? "本批图片加载完成后可确认" : ""}">${busy ? '<span class="spin"></span>' : ""}分析剩余数据（${keep} 条${rj ? `，排除 ${rj}` : ""}）</button>`;
+        : `<button class="btn btn-primary btn-sm" data-sconfirm="${i}" ${busy || !pend.length ? "disabled" : ""} title="${st === "loading" ? (pend.length ? "只确认已取到且图片已加载的条目；其余排队/取数中的留在本批，取到后可再确认" : "本批还没有已取到的条目") : ""}">${busy ? '<span class="spin"></span>' : ""}${st === "loading" ? `确认已取到 ${keep} 条` : `分析剩余数据（${keep} 条`}${rj ? `，排除 ${rj}` : ""}${st === "loading" ? "" : "）"}</button>`;
       const allWait = st === "loading" && b.filter(fetchingIt).length && b.filter(fetchingIt).every(waiting) && !nReady;
       const prog = allWait ? `<span class="pill pill-warn">等待明日 EHunt 额度（${b.filter(waiting).length} 条）</span>` : st === "loading" ? `<span class="sc-prog"><span style="width:${Math.round((nReady / b.length) * 100)}%"></span></span><span class="hint">加载中 ${nReady}/${b.length}</span>`
         : st === "ready" ? `<span class="pill pill-info">可确认</span>` : "";
       return `<section class="sc-batch sc-${st}" data-sbatch="${i}" data-sgroup="${esc(G.key)}"><div class="sc-bh"><span class="sc-gdiv" aria-hidden="true"></span><button type="button" class="btn btn-ghost btn-xs" data-sselb="${esc(G.ids.join(","))}" aria-label="全选本组" title="选中本组所有可操作的链接"${G.items.some(deletable) ? "" : " disabled"}>全选本批</button>${prog}<span class="spacer"></span>${btn}</div>
         ${show.length ? `<div class="sc-grid">${show.map((it) => card(it, st)).join("")}</div>` : `<p class="hint sc-none">本批没有符合筛选的条目</p>`}</section>`;
     }).join("");
-    const readyAll = bs.filter((b) => batchState(b) === "ready").flatMap(pendingOf), keepAll = readyAll.filter((it) => !V.rej.has(it.id)).length;
-    $("screenFoot").innerHTML = `<div class="sc-foot"><div><b>分析剩余数据</b><p class="hint">只有未排除的条目会进入 DeepSeek 识别、Keepamore 匹配和截图；排除的不再产生任何调用${nFetch ? `。还有 ${nFetch} 条在取数，加载完成的批次可先确认` : ""}</p></div>
-      <button class="btn btn-primary" data-sconfirm="all" ${readyAll.length && !V.busy.has("all") ? "" : "disabled"}>分析剩余数据（全部已加载 · ${keepAll} 条${readyAll.length - keepAll ? `，排除 ${readyAll.length - keepAll}` : ""}）</button></div>`;
+    const readyAll = bs.flatMap(confirmableOf), keepAll = readyAll.filter((it) => !V.rej.has(it.id)).length;
+    $("screenFoot").innerHTML = `<div class="sc-foot"><div><b>分析剩余数据</b><p class="hint">只有未排除的条目会进入 DeepSeek 识别、Keepamore 匹配和截图；排除的不再产生任何调用${nFetch ? `。还有 ${nFetch} 条在取数，已取到的可先确认，其余取到后再确认` : ""}</p></div>
+      <button class="btn btn-primary" data-sconfirm="all" ${readyAll.length && !V.busy.has("all") ? "" : "disabled"}>${nFetch ? `确认已取到 ${keepAll} 条` : `分析剩余数据（全部已加载 · ${keepAll} 条`}${readyAll.length - keepAll ? `，排除 ${readyAll.length - keepAll}` : ""}${nFetch ? "" : "）"}</button></div>`;
     box.querySelectorAll("img[data-sid]").forEach((im) => { if (im.complete && im.naturalWidth) markImg(im); });
   }
   let rT = null; const rerender = () => { if (!rT) rT = requestAnimationFrame(() => { rT = null; render(); }); };
@@ -156,8 +162,8 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
   }
 
   async function confirm(which) {
-    const bs = batches(), idx = which === "all" ? bs.map((_, i) => i).filter((i) => batchState(bs[i]) === "ready") : [Number(which)];
-    const items = idx.flatMap((i) => pendingOf(bs[i])), keep = items.filter((it) => !V.rej.has(it.id)).map((it) => it.id), rej = items.filter((it) => V.rej.has(it.id)).map((it) => it.id);
+    const bs = batches(), idx = which === "all" ? bs.map((_, i) => i) : [Number(which)];
+    const items = idx.flatMap((i) => confirmableOf(bs[i] || [])), keep = items.filter((it) => !V.rej.has(it.id)).map((it) => it.id), rej = items.filter((it) => V.rej.has(it.id)).map((it) => it.id);
     if (!items.length) return;
     V.busy.add(which); render();
     let res = { kept: keep.length, rejected: rej.length }, err = null;
@@ -289,6 +295,11 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     // 演示数字
     const quotaFrom = n > 200 ? 200 : n; // 200 条以后等待明日额度（演示额度队列）
     const fill = (it, i) => { if (i >= quotaFrom) { it.error = "EHunt 今日额度已用完，明日自动继续"; return; } it.status = "screening"; it.screen_state = "awaiting"; it.title = it._t; it.image_url = it._img; it.price = it._p; };
+    if (shot === "partial") { // 演示数字：仿批次 caa8d6b3 —— 143 条已取到（图片已加载）+ 30 条仍在排队；已取到的可先确认
+      V.sbatches = [{ id: "demo-pb-caa", name: "获取链接 caa8d6b3 第1批（演示数字）", created_at: new Date().toISOString(), jobs_count: n, demo: true }];
+      V.items.forEach((it, i) => { it.batch_id = "demo-pb-caa"; if (i < n - 30) fill(it, 0); else { it.status = i % 10 === 0 ? "running" : "queued"; } });
+      return render();
+    }
     if (shot === "loading") { // 第 1 批已加载完成可确认；第 2、3 批部分加载；其余仍在取数
       V.items.forEach((it, i) => { if (i < 50 || (i < 100 && i % 3) || (i >= 100 && i < 150 && i % 4 === 0)) fill(it, i); else if (i < 150) it.status = "running"; });
       render();

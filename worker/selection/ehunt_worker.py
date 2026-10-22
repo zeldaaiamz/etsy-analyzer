@@ -99,6 +99,8 @@ class Store:
     def lookup_claim(self, n): return self._req("POST", "/rest/v1/rpc/ehunt_lookup_claim", {"p_worker": WID, "p_limit": n}, retries=1) or []
     def lookup_patch(self, lid, **kw): self._req("PATCH", f"/rest/v1/ehunt_lookup_requests?listing_id=eq.{int(lid)}", kw, "return=minimal")
     def lookup_purge(self): return self._req("POST", "/rest/v1/rpc/ehunt_lookup_purge", {})
+    def heartbeat(self, info): self._req("POST", "/rest/v1/worker_heartbeat?on_conflict=worker_id", {"worker_id": HB_ID, "last_seen": NOW(), "info": info},
+                                         "return=minimal,resolution=merge-duplicates", retries=1)
 
 # ---- 单页超时自动重试（2026-10-20 22:59 事故：第 14 页 reading rows 卡 637s，整个队列被堵约 10 分钟） ----
 # 每页（翻页/跳页 + 逐行读取）有硬超时；超时 → 记 warning → 关掉浏览器上下文，重新打开列表并设置筛选、跳回同一页重读，最多重试 PAGE_RETRIES 次。
@@ -351,13 +353,26 @@ def _click(pg, U, target, timeout=10000):
             if attempt == 2: dismiss_overlays(pg, U); raise
     time.sleep(0.5); dismiss_overlays(pg, U)
 
+BROWSER_CHANNEL = os.environ.get("EHUNT_BROWSER_CHANNEL", "")   # 空 = Playwright 自带 chromium；"chrome" = 系统 Chrome
+SYSTEM_CHROME = "/opt/google/chrome/chrome"
+def launch_ctx(p, headless=True, viewport=None):
+    """打开 EHunt 持久化上下文。2026-10-22 11:07 事故：box 上 playwright 被升级到 1.64.0 而 ~/.cache/ms-playwright 里没有对应浏览器
+    （“Executable doesn't exist … chrome-headless-shell”）→ 所有查询/抓取打不开浏览器。自带浏览器缺失时自动改用系统 Chrome（同一 profile），
+    不需要人工 playwright install；其它启动错误原样抛出。"""
+    kw = dict(headless=headless, viewport=viewport or {"width": 1440, "height": 1000}, locale="en-US")
+    if BROWSER_CHANNEL: return p.chromium.launch_persistent_context(PROFILE, channel=BROWSER_CHANNEL, **kw)
+    try: return p.chromium.launch_persistent_context(PROFILE, **kw)
+    except Exception as e:
+        if "Executable doesn't exist" not in str(e) or not os.path.exists(SYSTEM_CHROME): raise
+        log.warning("bundled Playwright browser missing; falling back to system Chrome (channel=chrome)")
+        return p.chromium.launch_persistent_context(PROFILE, channel="chrome", **kw)
+
 def _open_list(p, keyword, params):
     """打开 EHunt 产品研究页并通过界面设置 关键词 + 价格 + 总销量 + 排序，校验 Selected: 标签后返回。"""
     U, F = ui(), filters(params)
     counting = (_PROG[0].state.get("stage") or "").startswith("count") if _PROG[0] else False
     stage("count_open" if counting else "read_setup")
-    ctx = p.chromium.launch_persistent_context(PROFILE, headless=True,
-                                               viewport={"width": 1440, "height": 1000}, locale="en-US")
+    ctx = launch_ctx(p)
     pg = ctx.pages[0] if ctx.pages else ctx.new_page(); pg.goto(U["url"], wait_until="networkidle", timeout=60000)
     if "login" in pg.url: ctx.close(); raise RuntimeError("EHunt 登录已失效：需要在 box 上运行 --login 重新人工登录")
     if counting: stage("count_filter")
@@ -434,6 +449,30 @@ def match_image(rows, listing_id):
             hit = ""
     return hit
 
+# 商品详情页兜底（2026-10-22 核实：18 条“网页搜不到 listing”在 ehunt.ai/product-detail/{id} 都能打开，Listing Update Time 为 2026-08~10、
+# 有销量 —— 并未下架，是产品研究页按 listing id 搜索搜不到（该页只收录部分商品）。搜不到时再打开详情页取第一张 etsystatic 主图；
+# 详情页对不存在的 id 显示 “Product is not included or invalid” 且没有任何 etsystatic 图片 → 仍判定未找到。）
+DETAIL_URL = "https://ehunt.ai/product-detail/{}"
+DETAIL_FALLBACK = os.environ.get("EHUNT_DETAIL_FALLBACK", "1") != "0"
+def pick_detail_image(srcs, body_text, listing_id):
+    """srcs: 详情页所有 <img> 的 src；body_text: 页面文字（必须含该 listing id，防止读到别的商品）。返回 il_570xN 主图或 None。"""
+    import re
+    if str(int(listing_id)) not in (body_text or ""): return None
+    for u in srcs or []:
+        u = main_image(u)
+        if re.match(r"^https://i\.etsystatic\.com/.+/il_", u or ""): return u
+    return None
+def detail_image(dp, lid, reads=6):
+    _throttle(); dp.goto(DETAIL_URL.format(int(lid)), wait_until="domcontentloaded", timeout=45000)
+    if "login" in dp.url: raise LoginExpired(LOGIN_MSG)
+    for _ in range(reads):
+        time.sleep(1.5)
+        try: u = pick_detail_image(dp.eval_on_selector_all("img", "els => els.map(e => e.currentSrc || e.src)"), dp.inner_text("body"), lid)
+        except Exception: u = None
+        if u: return u
+        if "not included or invalid" in (dp.inner_text("body") or ""): return None
+    return None
+
 def _throttle():
     wait = _LAST_LOOKUP[0] + LOOKUP_INTERVAL - time.monotonic()
     if wait > 0: time.sleep(wait)
@@ -459,7 +498,20 @@ def page_finder(pg):
             u = match_image(rows(), lid)
             if u: return u
             seen = u if u is not None else seen
-        return seen   # "" = EHunt 有这条但没有主图（懒加载占位图）；None = 搜不到
+        if seen is None and DETAIL_FALLBACK:   # 搜索页搜不到 → 商品详情页兜底（同一上下文的另一个标签页，复用）
+            try:
+                if dp[0] is None or dp[0].is_closed(): dp[0] = pg.context.new_page()
+                u = detail_image(dp[0], lid)
+                if u: log.info("lookup %s: found via product-detail fallback", lid); return u
+            except LoginExpired: raise
+            except Exception as e: log.warning("lookup %s: product-detail fallback failed: %s", lid, str(e)[:160])
+        return seen   # "" = EHunt 有这条但没有主图（懒加载占位图）；None = 搜索和详情页都找不到
+    dp = [None]
+    def cleanup():
+        try:
+            if dp[0] is not None and not dp[0].is_closed(): dp[0].close()
+        except Exception: pass
+    finder.cleanup = cleanup
     return finder
 
 def open_lookup_page(ctx):
@@ -470,17 +522,24 @@ def open_lookup_page(ctx):
     dismiss_overlays(pg, U); _check_login(pg, U)
     return pg
 
+def _requeue_lookup(store, lid):
+    try: store.lookup_patch(lid, status="queued", claimed_by=None, claimed_at=None)
+    except Exception: log.warning("requeue lookup %s failed", lid, exc_info=True)
+
 def serve_lookups(store, finder_factory, limit=LOOKUP_BATCH, max_rounds=20):
     """认领并处理查询请求，直到队列空（或 max_rounds 轮）。finder_factory() 惰性打开页面（没有请求就不开浏览器）。
-    done=主图；not_found=EHunt 搜不到这个 listing；login_expired=登录失效（本轮剩余全部标记，不算失败，ECS 端熔断并提示重新登录）。"""
+    done=主图；not_found=EHunt 搜索和商品详情页都找不到；login_expired=登录失效（本轮剩余全部标记，不算失败，ECS 端熔断并提示重新登录）。
+    打不开查询页（goto 超时 / 浏览器起不来）不是这几条 listing 的问题 → 本轮已认领未处理的放回队列（不标 error），下一轮主循环再试；
+    Playwright 被污染 → 同样放回队列并抛 PlaywrightPoisoned，main() 换新进程。requested_at 不变，ECS 端排队超时判断照旧。"""
     finder, n = None, 0
     for _ in range(max_rounds):
         reqs = store.lookup_claim(limit)
         if not reqs: break
         for i, r in enumerate(reqs):
-            lid = r["listing_id"]
+            lid = r["listing_id"]; opening = finder is None
             try:
-                finder = finder or finder_factory()
+                if opening: finder = finder_factory()
+                opening = False
                 u = finder(lid)
                 store.lookup_patch(lid, status="not_found" if u is None else "done", image_url=u or None, error=None, finished_at=NOW())
                 log.info("lookup %s: %s", lid, "not found" if u is None else "image" if u else "found, no image")
@@ -488,25 +547,38 @@ def serve_lookups(store, finder_factory, limit=LOOKUP_BATCH, max_rounds=20):
                 for r2 in reqs[i:]: store.lookup_patch(r2["listing_id"], status="login_expired", error=f"{LOGIN_TAG}：{e}"[:300], finished_at=NOW())
                 log.warning("lookup: %s", e); return n
             except Exception as e:
+                if is_poisoned(e) or opening:
+                    for r2 in reqs[i:]: _requeue_lookup(store, r2["listing_id"])
+                    if is_poisoned(e): raise PlaywrightPoisoned(str(e)[:300]) from e
+                    log.warning("lookup page open failed; %d request(s) requeued: %s", len(reqs) - i, str(e)[:160]); return n
                 store.lookup_patch(lid, status="error", error=str(e)[:300], finished_at=NOW()); log.warning("lookup %s failed", lid, exc_info=True)
                 finder = None   # 页面可能已坏：下一条重开
             n += 1
     return n
 
 def serve_lookups_browser(store, ctx=None):
-    """ctx=None：自己开持久化上下文（主循环空闲时）；否则在选品抓取的同一上下文里开新标签页（翻页间穿插）。"""
+    """ctx=None：自己开持久化上下文（主循环空闲时）；否则在选品抓取的同一上下文里开新标签页（翻页间穿插）。
+    根因（2026-10-22 07:44 / 07:58 “Playwright Sync API inside the asyncio loop”）：旧版 factory 每次被调用都 enter 一个新的 sync_playwright()；
+    第一次打开查询页 goto 超时后 serve_lookups 把 finder 置空、下一条再调 factory → 在第一个 sync_playwright 仍未退出时又进入第二个 → 报错，
+    本轮剩余每条都被标 error（ECS 端显示取数失败）。现在：一个调用内只进入一次 sync_playwright、只开一次上下文，重开的只是页面。"""
     from contextlib import ExitStack
     with ExitStack() as es:
+        st = {"p": None, "c": ctx, "pg": None}
         def factory():
-            c = ctx
-            if c is None:
-                from playwright.sync_api import sync_playwright
-                p = es.enter_context(sync_playwright())
-                c = p.chromium.launch_persistent_context(PROFILE, headless=True, viewport={"width": 1440, "height": 1000}, locale="en-US")
-                es.callback(c.close)
-            pg = open_lookup_page(c)
-            if ctx is not None: es.callback(pg.close)
-            return page_finder(pg)
+            if st["c"] is None:
+                if st["p"] is None:
+                    if playwright_leaked(): raise PlaywrightPoisoned(ASYNCIO_LOOP_MSG + "（查询前检测到残留事件循环）")
+                    from playwright.sync_api import sync_playwright
+                    st["p"] = es.enter_context(sync_playwright())
+                c = launch_ctx(st["p"]); es.callback(c.close); st["c"] = c
+            if st["pg"] is not None:
+                try: st["pg"].close()
+                except Exception: pass
+                st["pg"] = None
+            pg = open_lookup_page(st["c"]); st["pg"] = pg
+            if ctx is not None: es.callback(lambda: (not pg.is_closed()) and pg.close())
+            f = page_finder(pg); es.callback(f.cleanup)   # 详情页兜底的标签页：抓取上下文里用完即关
+            return f
         return serve_lookups(store, factory)
 
 def lookup_dry(ids):
@@ -514,7 +586,7 @@ def lookup_dry(ids):
     from playwright.sync_api import sync_playwright
     out = []
     with sync_playwright() as p:
-        c = p.chromium.launch_persistent_context(PROFILE, headless=True, viewport={"width": 1440, "height": 1000}, locale="en-US")
+        c = launch_ctx(p)
         try:
             finder = page_finder(open_lookup_page(c))
             for lid in ids:
@@ -549,7 +621,7 @@ def purge_local():
 # ---- 豆包视觉并发（规则/投票/判定完全不变，只是并行发请求）----
 import threading, random, urllib.error
 from collections import deque
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeout
 VISION_CONC = max(1, int(os.environ.get("SEL_VISION_CONCURRENCY", "6")))      # 同时处理的条目数
 ARK_INFLIGHT = max(1, int(os.environ.get("SEL_ARK_MAX_INFLIGHT", "12")))     # 同时在途的 Ark 请求上限
 _ARK_SEM = threading.BoundedSemaphore(ARK_INFLIGHT); _TL = threading.local()
@@ -610,7 +682,8 @@ def playwright_leaked():
 def is_poisoned(e): return isinstance(e, PlaywrightPoisoned) or ASYNCIO_LOOP_MSG in str(e)
 
 SEEN = {}  # run_id → 本进程已见过的 listing（含被排除的，只在内存）；跨批去重
-def process_batch(store, run, batch, scraper):
+IDLE_LOOKUP_EVERY = float(os.environ.get("SEL_IDLE_LOOKUP_SECONDS", "10"))
+def process_batch(store, run, batch, scraper, idle=None):
     """抓取顺序进行；规则通过的条目丢进视觉线程池，不阻塞翻页。结果按抓取顺序（rank）在主线程依次落定：计数/进度/入库都只在主线程，天然线程安全。"""
     rid, bno = run["id"], batch["batch_no"]
     seen = SEEN.setdefault(rid, set()) | store.passed_ids(rid); SEEN[rid] = seen
@@ -659,6 +732,14 @@ def process_batch(store, run, batch, scraper):
             row, kind, v = pend[0]
             if kind == "vision":
                 if not block and not v.done(): return
+                # 列表已读完、只剩等豆包（长批次可能几分钟）：浏览器已关闭，期间每 IDLE_LOOKUP_EVERY 秒穿插处理预筛选主图查询，不让查询干等到本批结束
+                while block and idle and not v.done():
+                    try: v.result(timeout=IDLE_LOOKUP_EVERY)
+                    except FutureTimeout:
+                        try: idle()
+                        except PlaywrightPoisoned: raise
+                        except Exception: log.warning("lookups while waiting for vision failed", exc_info=True)
+                    except BaseException: break
                 v = v.result()
             pend.popleft(); finalize(row, kind, v); tick()
     pool = ThreadPoolExecutor(max_workers=VISION_CONC, thread_name_prefix="vision")
@@ -721,7 +802,7 @@ def login(url):
     from playwright.sync_api import sync_playwright
     os.environ.setdefault("DISPLAY", ":1"); os.makedirs(PROFILE, mode=0o700, exist_ok=True)
     with sync_playwright() as p:
-        ctx = p.chromium.launch_persistent_context(PROFILE, headless=False, viewport={"width": 1440, "height": 900}, locale="en-US")
+        ctx = launch_ctx(p, headless=False, viewport={"width": 1440, "height": 900})
         pg = ctx.pages[0] if ctx.pages else ctx.new_page(); pg.goto(url)
         print(f"已在 DISPLAY={os.environ['DISPLAY']} 打开 {url}；请人工登录 EHunt，完成后关闭浏览器窗口（登录状态保存在 {PROFILE}）", flush=True)
         try: pg.wait_for_event("close", timeout=0)
@@ -741,6 +822,7 @@ def main(argv=None):
     if a.login: return login(a.login_url)
     if a.lookup_dry: return lookup_dry([int(x) for x in a.lookup_dry.split(",") if x.strip()])
     store = Store(); last_purge = 0; last_words = 0
+    if not a.fake: start_heartbeat(store)
     while True:
         if time.time() - last_purge > 86400:  # 启动时 + 每 24 小时：DB 3 天清理（pg_cron 不可用时的兜底）+ 本地排除日志清理
             try: log.info("purge db=%s local=%s", store.purge(), purge_local())
@@ -753,6 +835,7 @@ def main(argv=None):
             except Exception: log.warning("exclude words load failed, using built-in", exc_info=True); C.set_words(None)
             last_words = time.time()
         lookups = LOOKUPS_ON and not a.fake
+        PHASE[0] = "lookups"
         if lookups:   # 预筛选主图查询优先于选品（很快：每条约 3-5 秒）；表未部署（033 未执行）→ 本进程内关闭
             try: serve_lookups_browser(store)
             except urllib.error.HTTPError as e:
@@ -764,13 +847,30 @@ def main(argv=None):
         run = store.claim()
         if run:
             log.info("claimed run %s kw=%s status=%s", run["id"], run["keyword"], run["status"])
-            _PROG[0] = Progress(store, run["id"])
+            _PROG[0] = Progress(store, run["id"]); PHASE[0] = "counting" if run["status"] == "counting" else "batch"
             try: handle_run(store, run, a, lookups)
             finally: _PROG[0] = None
+        PHASE[0] = "idle"
         if playwright_leaked():   # 兜底自检：任何路径漏关了 sync_playwright → 立即换新进程（守护脚本重启），绝不带病继续
             log.critical("asyncio loop still running after run (Playwright not closed); exiting %s for restart", EXIT_RECYCLE); recycle()
         if a.once: break
         time.sleep(POLL)
+
+# box 心跳（007 worker_heartbeat，worker_id = box-selection；无需迁移）：独立线程每 HB_EVERY 秒写一次，
+# 长时间抓取 / 豆包视觉批次期间也照常写 → ECS 端据此区分“box 离线（休眠/worker 没在跑）”与“box 在线但正忙”。
+HB_ID = os.environ.get("SEL_HEARTBEAT_ID", "box-selection")
+HB_EVERY = max(5, int(os.environ.get("SEL_HEARTBEAT_SECONDS", "30")))
+PHASE = ["idle"]
+def start_heartbeat(store, every=None):
+    every = every or HB_EVERY; t0 = time.time()
+    def loop():
+        warned = False
+        while True:
+            try: store.heartbeat({"pid": os.getpid(), "phase": PHASE[0], "uptime_s": int(time.time() - t0), "lookups": LOOKUPS_ON}); warned = False
+            except Exception as e:
+                if not warned: log.warning("heartbeat failed: %s", _brief(e) if is_transient(e) else str(e)[:120]); warned = True
+            time.sleep(every)
+    th = threading.Thread(target=loop, name="heartbeat", daemon=True); th.start(); return th
 
 def recycle(): logging.shutdown(); os._exit(EXIT_RECYCLE)
 
@@ -802,7 +902,7 @@ def handle_run(store, run, a, lookups):
         sc = fake_scrape(a.fake, s0, b["offset_end"]) if a.fake else scrape_ehunt(run["keyword"], run.get("params") or {}, s0, b["offset_end"],
                                                                                between=(lambda c: serve_lookups_browser(store, c)) if lookups and LOOKUPS_ON else None,
                                                                                should_stop=lambda: store.run(run["id"]).get("status") in ("canceled", "paused"))
-        process_batch(store, run, b, sc)
+        process_batch(store, run, b, sc, idle=(lambda: serve_lookups_browser(store)) if lookups and LOOKUPS_ON and not a.fake else None)
     except RunStopped:   # 重试间隙用户取消/暂停：同 process_batch 的暂停路径 —— 批次“已停止”，run 状态保持用户设的（不写错误）
         log.info("run %s stopped by user during page retry", run["id"])
         _safe(store.patch_batch, b["id"], status="canceled", finished_at=NOW())

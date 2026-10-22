@@ -264,6 +264,11 @@ class SupabaseStore(Store):
         r = self._call("POST", "/rpc/ehunt_lookup_request", {"p_listing": int(listing_id)}, prefer="")
         return (r[0] if isinstance(r, list) else r) or None
 
+    def box_heartbeat(self, worker_id="box-selection"):
+        """box 选品 worker 的心跳时间（007 worker_heartbeat，box 每 30 秒写一次）；没有行 → None。"""
+        rows = self._call("GET", "/worker_heartbeat", params={"worker_id": f"eq.{worker_id}", "select": "last_seen,info"}, prefer="")
+        return rows[0] if rows else None
+
     def lookup_get(self, listing_id):
         rows = self._call("GET", "/ehunt_lookup_requests", params={"listing_id": f"eq.{int(listing_id)}", "select": "*"}, prefer="")
         return rows[0] if rows else None
