@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 选品抓取 worker —— 运行在本 box（不在 ECS；原 etsy-selection-worker.service 设计已作废并删除）。
-# 用法：deploy/box-selection-worker.sh login | start | ensure | stop | status | once-fake <list.json>（start = 带自动重启的守护循环）
+# 用法：deploy/box-selection-worker.sh login | start | ensure | watch | stop | status | once-fake <list.json>（start = 带自动重启的守护循环）
 #       reviews-start | reviews-stop | reviews-status | reviews-dry <listing_id…>  —— 049 产品库评论日期自动抓取（独立进程，nice 10，不影响 EHunt 队列）
 # 环境：从 SEL_ENV_FILE（默认 ~/.config/etsy-selection/worker.env，权限 600）读取 SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY / ARK_API_KEY；本脚本不打印任何密钥。
 # 浏览器：自己的 Playwright 持久化目录 EHUNT_PROFILE_DIR（默认 ~/.local/share/etsy-selection/ehunt-profile），不使用桌面浏览器的 cookie/profile。
@@ -32,6 +32,13 @@ case "${1:-}" in
   ensure) # box 休眠/重启后守护进程会消失（2026-10-22 16:34 重启后 worker.pid 指向已不存在的进程）：没在运行才启动，已在运行什么都不做（不重启、不打断正在跑的批次）
          if [ -f "$PID" ] && kill -0 "$(cat "$PID")" 2>/dev/null; then exit 0; fi
          echo "$(date '+%F %T') ENSURE worker not running (stale pid $(cat "$PID" 2>/dev/null || echo -)); starting" >>"$LOG"; exec "$SELF" start ;;
+  watch) # 周期自检（box 无 cron/systemd）：每 WATCH_SECONDS（默认 300）秒对选品 worker 与评论 worker 各执行一次幂等 ensure；flock 保证只有一个 watch
+         exec 9>"$DATA/watch.lock"; flock -n 9 || exit 0
+         while true; do
+           "$SELF" ensure >/dev/null 2>&1 || true
+           [ ! -f "$ROOT/deploy/.reviews-disabled" ] && { "$SELF" reviews-start >/dev/null 2>&1 || true; }
+           sleep "${WATCH_SECONDS:-300}"
+         done ;;
   status) [ -f "$PID" ] && kill -0 "$(cat "$PID")" 2>/dev/null && echo "running ($(cat "$PID"))" || echo "not running"; tail -n 5 "$LOG" 2>/dev/null || true ;;
   reviews-start) load_env; RP="$DATA/reviews.pid"; [ -f "$RP" ] && kill -0 "$(cat "$RP")" 2>/dev/null && { echo "reviews already running ($(cat "$RP"))"; exit 0; }
          setsid nohup bash -c 'while true; do nice -n 10 python3 -m selection.review_scraper; echo "$(date "+%F %T") reviews worker exited $?; restart in 30s"; sleep 30; done' >>"$DATA/logs/reviews.log" 2>&1 &
