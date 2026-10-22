@@ -69,6 +69,15 @@ end $$;
 revoke all on function public.finish_review_scrape(bigint, text, date[], text, text) from public, anon, authenticated;
 grant execute on function public.finish_review_scrape(bigint, text, date[], text, text) to service_role;
 
+-- 5b) worker 认领后因暂停/冷却没抓 → 放回 pending（attempts 退回，不算一次尝试）
+create or replace function public.requeue_review_scrape(p_listing bigint) returns void
+language sql security definer set search_path = public as $$
+  update public.listing_scrape_status set status = 'pending', attempts = greatest(0, attempts - 1), updated_at = now()
+  where listing_id = p_listing and status = 'fetching';
+$$;
+revoke all on function public.requeue_review_scrape(bigint) from public, anon, authenticated;
+grant execute on function public.requeue_review_scrape(bigint) to service_role;
+
 -- 6) 用户重试（仅自己产品库里的、且当前为 failed 的）
 create or replace function public.retry_review_scrape(p_listing bigint) returns boolean
 language plpgsql security definer set search_path = public as $$

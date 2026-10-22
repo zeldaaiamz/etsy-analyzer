@@ -33,6 +33,13 @@ select pg_temp.ok((select count(*) from public.claim_review_scrapes(20)) = 0, 'f
 -- 卡死回收
 update public.listing_scrape_status set status = 'fetching', updated_at = now() - interval '16 minutes' where listing_id = 201;
 select pg_temp.ok((select array_agg(x) from public.claim_review_scrapes(5) x) = array[201::bigint], '卡死 >15 分钟的 fetching 可重新领取');
+-- 放回 pending
+update public.listing_scrape_status set status = 'fetching', attempts = 3 where listing_id = 201;
+select public.requeue_review_scrape(201);
+select pg_temp.ok(pg_temp.st(201) = 'pending' and (select attempts from public.listing_scrape_status where listing_id = 201) = 2, 'requeue：fetching → pending，attempts 退回');
+select public.requeue_review_scrape(101);
+select pg_temp.ok(pg_temp.st(101) = 'ok', 'requeue 不动非 fetching');
+select pg_temp.ok((select array_agg(x) from public.claim_review_scrapes(5) x) = array[201::bigint], 'requeue 后可再领取');
 -- 用户重试
 select set_config('request.jwt.claim.sub', '22222222-2222-2222-2222-222222222222', false);
 select pg_temp.ok(public.retry_review_scrape(104) = false and pg_temp.st(104) = 'failed', '别人产品库里的 listing 不能重试');

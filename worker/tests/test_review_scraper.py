@@ -13,11 +13,12 @@ def ts(d): return int(dt.datetime(d.year, d.month, d.day, 12, tzinfo=dt.timezone
 
 class FakeStore:
     def __init__(self, pending, busy=False):
-        self.pending, self.busy, self.done, self.claims = list(pending), busy, {}, 0
+        self.pending, self.busy, self.done, self.claims, self.requeued = list(pending), busy, {}, 0, []
     def claim(self, n):
         self.claims += 1; got, self.pending = self.pending[:n], self.pending[n:]; return got
     def finish(self, lid, status, dates=None, source="etsy_page", error=None): self.done[lid] = (status, list(dates or []), source, error)
     def ehunt_busy(self): return self.busy
+    def requeue(self, lid): self.requeued.append(lid)
 
 
 def test_api_fetcher_paginates_and_cuts_old():
@@ -98,3 +99,123 @@ def test_migration_local_postgres():
     out = subprocess.run(["bash", str(ROOT / "supabase/tests/run_049_local.sh")], capture_output=True, text=True, timeout=120, env={"PATH": "/usr/bin:/bin", "PORT": "55449"})
     assert out.returncode == 0, out.stdout[-2000:] + out.stderr[-2000:]
     assert "ALL 049 TESTS PASSED" in out.stdout
+
+
+# ---------------- 网页抓取（有头 Chrome）：read_listing / BrowserFetcher 节流 / 显示 ----------------
+def test_heading_kind_and_counts():
+    assert R.heading_kind("Reviews for this item (80)") == ("item", 80)
+    assert R.heading_kind("Reviews for this item (1k)") == ("item", 1000)
+    assert R.heading_kind("Reviews for this item (1,234)") == ("item", 1234)
+    assert R.heading_kind("Reviews for this shop (146)") == ("shop", 146)
+    assert R.heading_kind("Something else") == (None, None)
+
+
+class FakeNav:
+    def __init__(self, pages, status=200, header="Reviews for this item (80)", sort=True, html="<html>", view_all=True, shop=True):
+        self.pages, self.status, self.header, self.sort, self._html, self.view_all, self.shop = pages, status, header, sort, html, view_all, shop
+        self.i, self.views, self.warm, self.sorted = 0, 0, 0, False
+    def warm_up(self): self.warm += 1; self.views += 1
+    def open_listing(self, lid): self.views += 1; self.i = 0; return self.status
+    def html(self): return self._html
+    def shop_count(self): return 146
+    def has_shop_reviews(self): return self.shop
+    def open_item_reviews(self): return self.header if self.view_all else None
+    def sort_recent(self): self.sorted = True; return self.sort
+    def page_dates(self, today=None): return self.pages[self.i]
+    def next_page(self):
+        if self.i + 1 >= len(self.pages): return False
+        self.i += 1; self.views += 1; return True
+
+
+D = lambda n: TODAY - dt.timedelta(days=n)
+def test_read_listing_most_recent_stops_at_200_days():
+    nav = FakeNav([[D(1), D(5), D(9)], [D(30), D(150), D(199), D(201)], [D(300)]])
+    out, info = R.read_listing(nav, 1, today=TODAY)
+    assert nav.sorted and out == [D(1), D(5), D(9), D(30), D(150), D(199)] and info["pages"] == 2 and nav.i == 1   # 遇到 >200 天就停，不翻第 3 页
+    assert info["item_count"] == 80 and info["header_count"] == 146 and "truncated" not in info
+
+
+def test_read_listing_last_page_and_truncation():
+    out, info = R.read_listing(FakeNav([[D(1)], [D(2)]]), 1, today=TODAY); assert out == [D(1), D(2)] and info["pages"] == 2
+    out, info = R.read_listing(FakeNav([[D(i)] for i in range(1, 30)]), 1, today=TODAY, max_pages=5)
+    assert len(out) == 5 and info["truncated"]
+
+
+def test_read_listing_item_only_and_errors():
+    with pytest.raises(R.FetchError, match="仅店铺评论"): R.read_listing(FakeNav([[]], header="Reviews for this shop (146)"), 1, today=TODAY)
+    with pytest.raises(R.FetchError, match="仅店铺评论"): R.read_listing(FakeNav([[]], view_all=False), 1, today=TODAY)
+    with pytest.raises(R.FetchError, match="暂无评论"): R.read_listing(FakeNav([[]], view_all=False, shop=False), 1, today=TODAY)
+    with pytest.raises(R.FetchError, match="Most recent"): R.read_listing(FakeNav([[]], sort=False), 1, today=TODAY)
+    with pytest.raises(R.FetchError, match="404"): R.read_listing(FakeNav([[]], status=404), 1, today=TODAY)
+    with pytest.raises(R.Blocked): R.read_listing(FakeNav([[]], status=403), 1, today=TODAY)
+    with pytest.raises(R.Blocked): R.read_listing(FakeNav([[]], html="<script src=//ct.captcha-delivery.com>"), 1, today=TODAY)
+
+
+class Clock:
+    def __init__(self): self.t = 1_800_000_000.0
+    def __call__(self): return self.t
+
+
+def test_browser_fetcher_warmup_block_pause_and_requeue(monkeypatch):
+    navs = []
+    def factory():
+        n = FakeNav([[TODAY]]); navs.append(n); return n
+    c = Clock(); f = R.BrowserFetcher(clock=c, nav_factory=factory)
+    assert f.ready() == (True, "") and f(1) == [TODAY] and navs[0].warm == 1          # 会话开始先预热首页
+    navs[0].status = 403
+    with pytest.raises(R.Blocked): f(2)
+    ok, why = f.ready(); assert not ok and "反爬" in why and f.nav is None               # 暂停 30–60 分钟，浏览器已关
+    assert 30 * 60 <= f.pause_until - c.t <= 60 * 60
+    # 暂停中 run_once 不认领
+    s = FakeStore([5]); s.requeue = lambda lid: None
+    assert R.run_once(s, f) == 0 and s.claims == 0
+    c.t = f.pause_until + 1; assert f.ready()[0]
+    assert f(3) == [TODAY] and len(navs) == 2 and navs[1].warm == 1                     # 恢复后重开浏览器并重新预热
+
+
+def test_run_once_requeues_rest_when_paused_mid_batch(monkeypatch):
+    c = Clock(); n = FakeNav([[TODAY]], status=403); f = R.BrowserFetcher(clock=c, nav_factory=lambda: n)
+    s = FakeStore([1, 2, 3]); req = []; s.requeue = req.append
+    monkeypatch.setattr(R, "_sleep", lambda x: None)
+    assert R.run_once(s, f, batch=3, gap=0) == 3
+    assert s.done[1][0] == "failed" and "反爬" in s.done[1][3] and req == [2, 3] and 2 not in s.done   # 第 1 个被拦截 → 其余放回 pending
+
+
+def test_session_page_budget_cools_down(monkeypatch):
+    monkeypatch.setattr(R, "SESSION_PAGES", 6)
+    c = Clock(); f = R.BrowserFetcher(clock=c, nav_factory=lambda: FakeNav([[TODAY], [TODAY], [TODAY]]))
+    f(1)   # 预热 1 + 商品页 1 + 翻页 2 = 4
+    assert f.ready()[0]
+    f(2)   # 再 3 → 7 ≥ 6 → 冷却
+    ok, why = f.ready(); assert not ok and "冷却" in why and 20 * 60 <= f.pause_until - c.t <= 30 * 60
+
+
+def test_warm_every_10_and_daily_cap(monkeypatch):
+    monkeypatch.setattr(R, "DAILY_CAP", 12)
+    n = FakeNav([[TODAY]]); c = Clock(); f = R.BrowserFetcher(clock=c, nav_factory=lambda: n)
+    for i in range(12): assert f.ready()[0]; f(i)
+    assert n.warm == 2                                    # 第 1 个前 + 第 10 个之后
+    ok, why = f.ready(); assert not ok and "上限" in why
+    c.t += 86400; assert f.ready()[0]                     # 第二天清零
+
+
+def test_display_missing_no_crash(monkeypatch, tmp_path):
+    monkeypatch.setattr(R, "DISPLAY", ":93"); monkeypatch.setattr(R, "START_XVFB", False)
+    f = R.BrowserFetcher(clock=Clock())
+    ok, why = f.ready(); assert not ok and ":93" in why and f.pause_until > 0     # 不认领、暂停 10 分钟
+    s = FakeStore([1]); assert R.run_once(s, f) == 0 and s.claims == 0
+    f2 = R.BrowserFetcher(clock=Clock()); f2.pause_until = 0
+    with pytest.raises(R.DisplayUnavailable): f2(1)                                # 中途丢失 → 本条 failed（run_once 写）+ 暂停
+    assert f2.pause_until > 0
+
+
+def test_ensure_display_spawns_xvfb(monkeypatch):
+    calls = []; exists = {"v": False}
+    monkeypatch.setattr(R, "display_ok", lambda d: exists["v"])
+    monkeypatch.setattr(R, "_sleep", lambda s: None)
+    def spawn(cmd, **kw): calls.append(cmd); exists["v"] = True
+    assert R.ensure_display(":77", True, spawn=spawn) and calls[0][:2] == ["Xvfb", ":77"]
+    exists["v"] = False
+    assert not R.ensure_display(":77", False, spawn=spawn) and len(calls) == 1
+    def bad(cmd, **kw): raise OSError("no Xvfb")
+    assert not R.ensure_display(":77", True, spawn=bad)
