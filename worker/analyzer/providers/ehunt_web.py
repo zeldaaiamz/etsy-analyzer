@@ -6,6 +6,10 @@ ECS 写请求到 Supabase ehunt_lookup_requests（033）→ box 上已登录 EHu
 - EHUNT_WEB_PREFER_API=1：先试 API（买了 API 套餐后），API 服务异常/额度用完 → 自动回退网页；API 结果照常写缓存。
 - 等待：最多 EHUNT_WEB_TIMEOUT_SECONDS（默认 90 秒）；仍在排队 → EHuntWebPending（回队列 1 分钟，不计尝试次数）。
 - box 没响应（排队超过 EHUNT_WEB_STALE_SECONDS，默认 600 秒仍无人认领）/ EHunt 登录失效 → EHuntServiceError（熔断 30 分钟，不计尝试次数）。
+  2026-10-22：排队超时先看 box 心跳（worker_heartbeat 'box-selection'，box 每 30 秒写）：
+  · 心跳新鲜（< BOX_HB_FRESH 秒）= box 在线只是忙（长抓取/豆包批次）→ 继续排队（EHuntWebPending，不熔断），直到排队超过 BUSY_STALE（默认 30 分钟）；
+  · 心跳过期 = box 离线（box 休眠或 worker 没在运行）→ 熔断，错误里写明最后心跳时间；
+  · 没有心跳行（旧 box worker）→ 与以前相同。
 """
 import logging
 import time
@@ -39,6 +43,9 @@ def _ts(v):
 class EHuntWebEtsy(EtsyProvider):
     name = "ehunt_web"
     no_review_text = True
+
+    BOX_HB_FRESH = 180
+    BUSY_STALE = 1800
 
     def __init__(self, store, cache=None, ttl=86400, timeout=90, poll=3, stale=600, api=None, sleep=time.sleep, now=None):
         if store is None or not hasattr(store, "lookup_request"):
@@ -112,13 +119,32 @@ class EHuntWebEtsy(EtsyProvider):
                 raise HttpError(f"EHunt 网页取数失败：{str(row.get('error') or '')[:200]}")
             if st == "queued":
                 req = _ts(row.get("requested_at"))
-                if req and (self._now() - req).total_seconds() > self.stale:
-                    raise EHuntServiceError(f"{ANOMALY_PREFIX}（box 取数 worker 未响应：请求排队超过 {self.stale // 60} 分钟无人处理）",
-                                            "box worker 未响应")
+                waited = (self._now() - req).total_seconds() if req else 0
+                if waited > self.stale:
+                    hb_age = self._box_hb_age()
+                    if hb_age is not None and hb_age < self.BOX_HB_FRESH and waited <= self.BUSY_STALE:
+                        raise EHuntWebPending(f"EHunt 网页取数排队中（box 在线但正忙，已排队 {int(waited // 60)} 分钟），稍后自动继续")
+                    if hb_age is None:
+                        why = f"box 取数 worker 未响应：请求排队超过 {self.stale // 60} 分钟无人处理"
+                    elif hb_age >= self.BOX_HB_FRESH:
+                        why = f"box 取数 worker 离线：最后心跳 {int(hb_age // 60)} 分钟前（box 休眠或 worker 未运行），请求排队超过 {self.stale // 60} 分钟无人处理"
+                    else:
+                        why = f"box 取数 worker 在线但请求排队超过 {self.BUSY_STALE // 60} 分钟仍未处理"
+                    raise EHuntServiceError(f"{ANOMALY_PREFIX}（{why}）", "box worker 未响应")
             if time.monotonic() - t0 >= self.timeout:
                 raise EHuntWebPending(f"EHunt 网页取数排队中（box 处理中），稍后自动继续")
             self._sleep(self.poll)
             row = self.store.lookup_get(lid) or row
+
+    def _box_hb_age(self):
+        """box 心跳距今秒数；store 不支持 / 没有心跳行 / 查询失败 → None（按旧逻辑处理）。"""
+        try:
+            hb = self.store.box_heartbeat() if hasattr(self.store, "box_heartbeat") else None
+            t = _ts((hb or {}).get("last_seen"))
+            return (self._now() - t).total_seconds() if t else None
+        except Exception:  # noqa: BLE001
+            log.warning("box heartbeat lookup failed", exc_info=True)
+            return None
 
     def _clear_anomaly(self):
         """网页取数成功 → 清除熔断与横幅（API 时期留下的 'daily_limit' 异常、之前的未登录/box 未响应）。

@@ -1,7 +1,7 @@
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
 import { computeVelocity, computeManualVelocity, cmpVelocity, velocityBadge, cardVelocityBadge, scrapeChip, SCRAPE_BUSY, loadReviewDates, demoReviewDates, loadScrapeInfo } from "./velocity.js";
 import { amzBlock, amzUrls, openAll, applyEdit, kwList, MAX_KW, DIR_SELECT_HTML } from "./amzsearch.js";
-import { createScreen, ANOMALY_PREFIX, anomalyReason } from "./screen.js?v=fc16c45f";
+import { createScreen, ANOMALY_PREFIX, anomalyReason } from "./screen.js?v=ca18d8ce";
 import { createExWords } from "./exwords.js?v=c9174633";
 import { createSelScreen } from "./selscreen.js?v=9d530c70";
 
@@ -471,7 +471,8 @@ function lastGoodQuota() {
 function renderBanners() {
   const out = [], now = Date.now();
   // 取最新的心跳：多台 worker / 遗留的旧 worker 行并存时，只要任一 worker 近期有心跳即视为在线
-  const last = S.hb.reduce((m, h) => Math.max(m, ts(h.last_seen) || 0), 0);
+  // box 选品 worker 的心跳（worker_id 以 "box-" 开头）只用于 ECS 判断 box 是否在线，不算“分析服务”在线
+  const last = S.hb.filter((h) => !String(h.worker_id || "").startsWith("box-")).reduce((m, h) => Math.max(m, ts(h.last_seen) || 0), 0);
   if (S.statusLoaded && (!last || now - last > OFFLINE_MS))
     out.push(`<div class="banner banner-bad"><b>分析服务离线</b>　${last ? `最后心跳 ${dur(now - last)} 前` : "暂无心跳"}；排队任务会保留，服务恢复后自动继续。</div>`);
   const pu = ts(S.status?.ehunt_paused_until);
