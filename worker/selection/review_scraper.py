@@ -322,6 +322,16 @@ class Store:
                                                                  "p_source": source, "p_error": error}, "return=minimal")
     def requeue(self, lid):  # 认领后没来得及抓（暂停/冷却）→ 放回 pending，attempts 不算
         self._req("POST", "/rest/v1/rpc/requeue_review_scrape", {"p_listing": int(lid)}, "return=minimal")
+    def heartbeat(self, info=None):
+        """054：让产品库前端能判断评论抓取进程是否在跑（worker_heartbeat.worker_id=box-reviews）。失败静默。"""
+        try:
+            self._req("POST", "/rest/v1/worker_heartbeat?on_conflict=worker_id",
+                      {"worker_id": "box-reviews", "last_seen": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                       "info": info or {"pid": os.getpid()}},
+                      "return=minimal,resolution=merge-duplicates")
+        except Exception:  # noqa: BLE001
+            pass
+
     def ehunt_busy(self, now=None):
         """EHunt 获取链接/计数在跑（15 分钟内有心跳），或近 15 分钟有排队/进行中的任务或预筛选主图查询 → 让路。
         选品 worker 没在跑时留下的陈旧队列（如 11:07 起没人处理的 lookup）不算忙，否则评论抓取会被永远挡住。"""
@@ -338,6 +348,7 @@ def make_fetcher():
 
 def run_once(store, fetch, batch=BATCH, gap=None):
     """一轮：节流/显示检查 → 让路检查 → 认领 ≤batch → 逐个抓取写回。返回处理数量。"""
+    getattr(store, "heartbeat", lambda *a, **k: None)({"pid": os.getpid()})
     ok, why = fetch.ready() if hasattr(fetch, "ready") else (True, "")
     if not ok:
         log.info("reviews 本轮跳过：%s", why); return 0

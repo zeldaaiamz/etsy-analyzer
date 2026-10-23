@@ -125,7 +125,9 @@ async function boot() {
         const real = await (await fetch("./preview-fixture.json")).json();
         libItems = [...real, ...libItems.filter((r) => !(r.amazon_keywords || []).length)]; } catch { /* 无快照文件时用演示数据 */ } }
       S.lib = new Map(libItems.map((r) => [Number(r.etsy_listing_id), r]));
-      [...S.lib.keys()].forEach((id) => L.scr.set(id, [1488800014, 1488800016].includes(id) ? "failed" : id === 1488800015 ? "pending" : id === 1488800013 ? "fetching" : "ok")); // 演示：两个抓取失败，其中一个已手动填写
+      const failN = Math.max(0, Number(QS.get("nfails") || 0));
+      const failIds = failN ? [...S.lib.keys()].slice(-failN) : [1488800014, 1488800016];
+      [...S.lib.keys()].forEach((id) => L.scr.set(id, failIds.includes(id) ? "failed" : id === 1488800015 && !failN ? "pending" : id === 1488800013 && !failN ? "fetching" : "ok")); // 演示：默认两个抓取失败；?nfails=8 → 8 个无法抓取
       if (QS.get("ocr") === "review") L.ocr.set(1488800014, { id: "demo", status: "done", extracted_dates: DEMO_OCR(), total_reviews: 214 });
       L.man.set(1488800016, { listing_id: 1488800016, month_counts: [3, 2, 2, 1, 1, 0], latest_review_date: new Date(Date.now() - 9 * 864e5).toISOString().slice(0, 10) });
       if (QS.has("failed")) fx.jobs.push({ ...fx.jobs.find((j) => j.status === "failed"), id: "demo-failed-2", etsy_url: "https://www.etsy.com/listing/1700000009/y", etsy_listing_id: 1700000009, error: "亚马逊搜索超时（Keepamore 504）" });
@@ -665,7 +667,7 @@ const STAGE_NAME = Object.fromEntries(STAGES.map(([k, n]) => [k, n]));
 const REASONS = [["roi_low", "ROI 太低"], ["cost_high", "成本太高"], ["ip_risk", "侵权风险"], ["competition", "竞争太激烈"], ["demand_low", "市场需求太小"],
   ["seasonal", "季节性太强"], ["logistics", "物流难做（易碎/超大/超重）"], ["compliance", "认证合规问题"], ["supply", "供应链难找"], ["other", "其他"]];
 const REASON_NAME = Object.fromEntries(REASONS);
-const L = { kwOpen: new Set(), kwEdit: null, asinOn: new Set(), ocr: new Map(), scr: new Map(), man: new Map(), vel: false, velData: null, velBusy: false, stage: "all", q: "", reason: null, sel: new Set(), items: [], total: 0, counts: null, reasons: {}, limit: LPAGE, loaded: false, loading: false, selAll: false };
+const L = { kwOpen: new Set(), kwEdit: null, asinOn: new Set(), ocr: new Map(), scr: new Map(), man: new Map(), vel: false, velData: null, velBusy: false, manRevBusy: false, stage: "all", q: "", reason: null, sel: new Set(), items: [], total: 0, counts: null, reasons: {}, limit: LPAGE, loaded: false, loading: false, selAll: false };
 const stageOf = (r) => r.stage || "candidate";
 const libById = (id) => (DEMO ? [...S.lib.values()] : L.items).find((x) => x.id === id);
 const libMatch = (r, q) => !q || [r.title, r.etsy_listing_id, r.product_summary, r.target_audience, r.shop_name, r.stage_note, ...(r.keywords || [])]
@@ -702,6 +704,46 @@ async function retryScrape(id) {
     if (error || !data) return toast(`重试失败：${error?.message || "该商品不在你的产品库或不是失败状态"}`, "bad"); }
   L.scr.set(id, "pending"); toast("已重新排队，后台会自动抓取评论日期", "ok"); renderLibrary(); scheduleScrapePoll();
   if (DEMO) setTimeout(async () => { L.scr.set(id, "ok"); await recomputeVelocity([id]); renderLibrary(); }, 2500); // 演示：模拟 worker 抓取完成
+}
+// 054：产品库一键「手动抓取评论速度」——缺数据（failed / 无状态）重新排队；已 ok 不重抓；有选中则只排选中
+async function reviewsWorkerAlive() {
+  if (DEMO) return !QS.has("noworker");
+  try {
+    const since = new Date(Date.now() - 5 * 60e3).toISOString();
+    const { data } = await sb.from("worker_heartbeat").select("worker_id,last_seen").like("worker_id", "box-reviews%").gte("last_seen", since).limit(1);
+    return !!(data && data.length);
+  } catch { return true; } // 心跳表不可用时不误报
+}
+async function queueManualReviews() {
+  if (L.manRevBusy) return; L.manRevBusy = true; renderLibrary();
+  const selected = [...L.sel].map(libById).filter(Boolean).map((r) => Number(r.etsy_listing_id)).filter(Boolean);
+  const useSel = selected.length > 0;
+  let total = 0, queued = 0;
+  try {
+    if (DEMO) {
+      const pool = useSel ? selected : [...S.lib.keys()];
+      for (const id of pool) {
+        const st = L.scr.get(id);
+        if (st === "ok" || st === "fetching") continue;
+        if (st === "pending") { total++; continue; }
+        L.scr.set(id, "pending"); queued++; total++; // failed / 无状态
+      }
+    } else {
+      const { data, error } = await sb.rpc("queue_library_review_scrapes", { p_listings: useSel ? selected : null });
+      if (error) { toast(`排队失败：${error.message}`, "bad"); L.manRevBusy = false; return renderLibrary(); }
+      queued = Number(data?.queued || 0); total = Number(data?.total || 0);
+      await refreshScrape();
+    }
+  } catch (e) { toast(`排队失败：${e.message}`, "bad"); L.manRevBusy = false; return renderLibrary(); }
+  L.manRevBusy = false; renderLibrary(); scheduleScrapePoll();
+  if (!total) return toast(useSel ? "所选商品都已有评论数据（或正在抓取），无需排队" : "产品库里没有需要抓取评论的商品", "");
+  const alive = await reviewsWorkerAlive();
+  if (!alive) toast(`评论抓取进程未运行，已排队 ${total} 个，进程起来后会抓`, "warn", null, 5000);
+  else toast(`已排队 ${total} 个评论抓取${useSel ? "（仅所选）" : ""}，可离开本页，抓完徽标会更新`, "ok", null, 4000);
+  if (DEMO && !QS.has("noworker")) setTimeout(async () => {
+    const ids = [...L.scr].filter(([, v]) => v === "pending").map(([id]) => id);
+    ids.forEach((id) => L.scr.set(id, "ok")); await recomputeVelocity(ids); renderLibrary();
+  }, 2800);
 }
 // 抓取失败：已确认的截图日期优先，其次手动填写，都没有 → null（排最后）
 function velFor(id, dates, now) {
@@ -954,8 +996,8 @@ function renderLibrary() {
       : `<button class="btn btn-ghost btn-sm" data-lbulk="candidate">↩ 移回备选 (${n})</button>`}
       ${libExportMenu()}<button class="btn btn-ghost btn-sm" data-lbulk="remove">移出产品库</button><button class="btn btn-ghost btn-sm" data-lbulk="clear">取消选择</button>`
       : `<span class="hint">勾选卡片可批量${L.stage === "candidate" ? "移到进行中 / 不考虑" : L.stage === "all" ? "移动阶段 / 移出" : "移回备选"}</span>`}</div>` : "";
-  if (L.stage === "failed") bar = `<div class="lvel"><span class="hint">这些商品的 Etsy 评论抓取失败。上传评论弹窗截图（服务器本地 OCR 识别日期，核对后计入排序，带「截图」标记）；或手动填写近 6 月每月评论数 + 最近评论日期（「手动」）。都没有的排在最后。</span></div>`;
-  else if (vis.length) bar += `<div class="lvel"><button class="btn btn-sm ${L.vel ? "btn-primary" : "btn-ghost"}" data-lvel="1"${L.velBusy ? " disabled" : ""}>${L.velBusy ? "计算中…" : L.vel ? "✓ 按评论速度排序（点击恢复原顺序）" : "按评论速度排序"}</button>${L.vel ? '<span class="hint">连续月数 → 6 月新增；悬停徽标看明细；仅用于同类产品对比</span>' : ""}<span class="spacer"></span>${nf ? `<button class="scr-warn" data-lstage="failed" title="查看并手动填写">⚠ 无法抓取 <b>${nf}</b></button>` : ""}</div>`;
+  if (L.stage === "failed") bar = `<div class="lvel"><button class="btn btn-sm btn-ghost" data-lmanrev="1"${L.manRevBusy ? " disabled" : ""} title="把本页无法抓取的商品重新排队给评论抓取进程">${L.manRevBusy ? "排队中…" : "手动抓取评论速度"}</button><span class="hint">这些商品的 Etsy 评论抓取失败。点上方按钮可一键重新排队；或上传评论弹窗截图 / 手动填写。都没有的排在最后。</span></div>`;
+  else if (vis.length) bar += `<div class="lvel"><button class="btn btn-sm ${L.vel ? "btn-primary" : "btn-ghost"}" data-lvel="1"${L.velBusy ? " disabled" : ""}>${L.velBusy ? "计算中…" : L.vel ? "✓ 按评论速度排序（点击恢复原顺序）" : "按评论速度排序"}</button><button class="btn btn-sm btn-ghost" data-lmanrev="1"${L.manRevBusy ? " disabled" : ""} title="把缺评论数据的商品（抓取失败 / 尚未抓取）重新排队；已成功的不重抓；有勾选则只排所选">${L.manRevBusy ? "排队中…" : "手动抓取评论速度"}</button>${L.vel ? '<span class="hint">连续月数 → 6 月新增；悬停徽标看明细；仅用于同类产品对比</span>' : ""}<span class="spacer"></span>${nf ? `<button class="scr-warn" data-lstage="failed" title="查看并手动填写">⚠ 无法抓取 <b>${nf}</b></button>` : ""}</div>`;
   $("libBar").innerHTML = bar;
   const libMore = !DEMO && L.total > vis.length ? `<button class="btn btn-ghost load-more lib-more" data-lmore="1">加载更多（已显示 ${vis.length} / ${L.total}）</button>` : "";
   if (!ready) $("libBar").innerHTML = "";
@@ -1258,7 +1300,7 @@ function closeDrawer() {
   $("drawer").classList.remove("open"); $("drawer").setAttribute("aria-hidden", "true"); $("drawerMask").classList.add("hidden"); drawerState = null; }
 
 document.addEventListener("click", (ev) => {
-  const t = ev.target.closest("[data-amz],[data-akwtog],[data-akwedit],[data-akwcancel],[data-akwsave],[data-akwadd],[data-akwdel],[data-zoom],[data-detail],[data-tab],[data-cat],[data-act],[data-clear],[data-copy],[data-copyall],[data-export],[data-more],[data-dupe],[data-view],[data-bulk],[data-unlib],[data-lstage],[data-lmove],[data-lreason],[data-lbulk],[data-libgo],[data-reana],[data-lmore],[data-lexp],[data-ldelrej],[data-lvel],[data-msave],[data-oconf]") || ev.target;
+  const t = ev.target.closest("[data-amz],[data-akwtog],[data-akwedit],[data-akwcancel],[data-akwsave],[data-akwadd],[data-akwdel],[data-zoom],[data-detail],[data-tab],[data-cat],[data-act],[data-clear],[data-copy],[data-copyall],[data-export],[data-more],[data-dupe],[data-view],[data-bulk],[data-unlib],[data-lstage],[data-lmove],[data-lreason],[data-lbulk],[data-libgo],[data-reana],[data-lmore],[data-lexp],[data-ldelrej],[data-lvel],[data-lmanrev],[data-msave],[data-oconf]") || ev.target;
   if (t.dataset?.amz) return amzOpen(t.dataset.amz); // 同步调用 window.open，前面不能有 await
   if (t.dataset?.akwtog) { const k = t.dataset.akwtog; L.kwOpen.has(k) ? L.kwOpen.delete(k) : L.kwOpen.add(k); return renderLibrary(); }
   if (t.dataset?.akwedit) { L.kwEdit = t.dataset.akwedit; L.kwOpen.add(t.dataset.akwedit); return renderLibrary(); }
@@ -1297,6 +1339,7 @@ document.addEventListener("click", (ev) => {
   if (t.dataset?.clear) { ev.preventDefault(); F.cat = "all"; F.q = ""; $("q").value = ""; return render(); }
   if (t.dataset?.zoom) { $("lbImg").src = t.dataset.zoom; $("lbCap").textContent = t.dataset.cap || ""; $("lightbox").classList.remove("hidden"); return; }
   if (t.dataset?.lvel) return toggleVelocity();
+  if (t.dataset?.lmanrev) return queueManualReviews();
   if (t.dataset?.rretry) return retryScrape(Number(t.dataset.rretry));
   if (t.dataset?.oconf) return confirmShots(Number(t.dataset.oconf));
   if (t.dataset?.msave) return saveManual(Number(t.dataset.msave));
