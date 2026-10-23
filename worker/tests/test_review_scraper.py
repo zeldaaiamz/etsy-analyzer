@@ -101,6 +101,26 @@ def test_migration_local_postgres():
     assert "ALL 049 TESTS PASSED" in out.stdout
 
 
+SQL054 = (ROOT / "supabase/migrations/054_manual_reviews.sql").read_text()
+def test_migration_054_static():
+    assert "queue_library_review_scrapes" in SQL054 and "skipped_ok" in SQL054
+    assert "status = 'failed'" in SQL054
+    body = "\n".join(l for l in SQL054.splitlines() if not l.strip().startswith("--"))
+    assert "sel_keyword_log" not in body
+
+def test_reviews_heartbeat_box_reviews():
+    src = (ROOT / "worker/selection/review_scraper.py").read_text()
+    assert "box-reviews" in src and "def heartbeat" in src
+    # run_once 每轮先心跳，便于产品库判断进程是否在跑
+    assert "getattr(store, \"heartbeat\"" in src or "store.heartbeat" in src
+
+@pytest.mark.skipif(not glob.glob("/usr/lib/postgresql/*/bin/initdb") or not shutil.which("psql"), reason="no local postgres")
+def test_migration_054_local_postgres():
+    out = subprocess.run(["bash", str(ROOT / "supabase/tests/run_054_local.sh")], capture_output=True, text=True, timeout=120, env={"PATH": "/usr/bin:/bin", "PORT": "55454"})
+    assert out.returncode == 0, out.stdout[-2000:] + out.stderr[-2000:]
+    assert "ALL 054 TESTS PASSED" in out.stdout
+
+
 # ---------------- 网页抓取（有头 Chrome）：read_listing / BrowserFetcher 节流 / 显示 ----------------
 def test_heading_kind_and_counts():
     assert R.heading_kind("Reviews for this item (80)") == ("item", 80)
