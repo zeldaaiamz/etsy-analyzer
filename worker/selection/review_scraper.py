@@ -8,7 +8,7 @@
     遇到早于 REVIEW_DAYS（200）天的评论 / REVIEW_MAX_PAGES（20）页 / 最后一页即停；每条评论只取评论人旁的日期
   4 节奏：商品之间 30–60s，翻页 3–6s；一个会话最多 REVIEW_SESSION_PAGES（30）页，然后冷却 20–30 分钟
   5 被拦截（403/验证）→ 该商品 failed「Etsy 反爬拦截」，整个 worker 暂停 30–60 分钟；本轮剩余的放回 pending
-  6 低优先级：nice 10；EHunt 获取链接/计数/预筛选查询忙时跳过本轮
+  6 评论抓取优先：默认不因 EHunt 获取链接/计数/预筛选忙而让路（REVIEW_YIELD_TO_EHUNT=1 才恢复旧让路）；与选品并行时选品 worker nice 更高（更低 OS 优先级）
   7 每日上限 REVIEW_DAILY_CAP（60）个
   显示不可用 → 不认领、暂停 10 分钟；抓取中途丢失 → 该商品 failed + 暂停（不崩溃）。
 不重复抓取：只处理 pending（新加入/回填/用户点重试）及卡死 >15 分钟的 fetching；ok/failed 不会自动再抓。
@@ -33,6 +33,8 @@ BLOCK_PAUSE_S = (30 * 60, 60 * 60)                                  # 403 后暂
 LISTING_GAP_S = (float(os.environ.get("REVIEW_GAP_MIN_S", "30")), float(os.environ.get("REVIEW_GAP_MAX_S", "60")))
 WARM_EVERY = 10                                                     # 每 10 个商品回首页预热一次
 DAILY_CAP = int(os.environ.get("REVIEW_DAILY_CAP", "60"))
+# 默认 OFF：评论抓取不因 EHunt/选品忙而跳过；设 REVIEW_YIELD_TO_EHUNT=1 才恢复旧「让路」行为
+YIELD_TO_EHUNT = os.environ.get("REVIEW_YIELD_TO_EHUNT", "0").strip().lower() not in ("0", "false", "no", "")
 DISPLAY = os.environ.get("REVIEW_DISPLAY", ":77")                   # 专用 Xvfb（agent 桌面 :1/:4… 随会话消失，不能依赖）
 START_XVFB = os.environ.get("REVIEW_START_XVFB", "1") not in ("0", "false", "no")
 DISPLAY_PAUSE_S = 10 * 60
@@ -333,8 +335,9 @@ class Store:
             pass
 
     def ehunt_busy(self, now=None):
-        """EHunt 获取链接/计数在跑（15 分钟内有心跳），或近 15 分钟有排队/进行中的任务或预筛选主图查询 → 让路。
-        选品 worker 没在跑时留下的陈旧队列（如 11:07 起没人处理的 lookup）不算忙，否则评论抓取会被永远挡住。"""
+        """EHunt 获取链接/计数在跑（15 分钟内有心跳），或近 15 分钟有排队/进行中的任务或预筛选主图查询。
+        仅当 REVIEW_YIELD_TO_EHUNT 开启时 run_once 才据此让路（默认不让路，评论抓取优先）。
+        选品 worker 没在跑时留下的陈旧队列不算忙。"""
         since = urllib.parse.quote(time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime((now or time.time()) - 15 * 60)))
         a = self._req("GET", f"/rest/v1/sel_runs?status=in.(count_queued,counting,queued,running)&or=(heartbeat_at.gte.{since},created_at.gte.{since},queue_at.gte.{since})&select=id&limit=1") or []
         b = self._req("GET", f"/rest/v1/ehunt_lookup_requests?status=in.(queued,running)&or=(requested_at.gte.{since},claimed_at.gte.{since})&select=listing_id&limit=1") or []
@@ -347,13 +350,13 @@ def make_fetcher():
 
 
 def run_once(store, fetch, batch=BATCH, gap=None):
-    """一轮：节流/显示检查 → 让路检查 → 认领 ≤batch → 逐个抓取写回。返回处理数量。"""
+    """一轮：节流/显示检查 →（可选）让路检查 → 认领 ≤batch → 逐个抓取写回。返回处理数量。"""
     getattr(store, "heartbeat", lambda *a, **k: None)({"pid": os.getpid()})
     ok, why = fetch.ready() if hasattr(fetch, "ready") else (True, "")
     if not ok:
         log.info("reviews 本轮跳过：%s", why); return 0
-    if getattr(fetch, "uses_browser", False) and store.ehunt_busy():
-        log.info("EHunt 队列忙，本轮跳过"); return 0
+    if YIELD_TO_EHUNT and getattr(fetch, "uses_browser", False) and store.ehunt_busy():
+        log.info("EHunt 队列忙，本轮跳过（REVIEW_YIELD_TO_EHUNT）"); return 0
     ids = store.claim(batch)
     for i, lid in enumerate(ids):
         if i and hasattr(fetch, "ready") and not fetch.ready()[0]:   # 中途被拦截/冷却 → 余下的放回 pending（不算失败）
@@ -397,7 +400,7 @@ def main(argv=None):
             if a.json: Path(a.json).write_text(json.dumps(res, ensure_ascii=False, indent=1))
             return 0
         store = Store()
-        os.nice(10) if hasattr(os, "nice") else None
+        # 评论抓取优先：不主动 nice 降权；选品 worker 在 deploy 脚本里 nice 更高（更低 OS 优先级）
         while True:
             try:
                 n = run_once(store, fetch)

@@ -24,7 +24,7 @@ export function velocityBadge(v, esc) {
 // 049 自动抓取状态徽标（无速度数据时显示）：pending/fetching → 抓取中；failed → 重试按钮；其它 → ""
 export const SCRAPE_BUSY = new Set(["pending", "fetching"]);
 export function scrapeChip(status, id) {
-  if (SCRAPE_BUSY.has(status)) return `<span class="pb pb-scr" title="新加入产品库，后台正在自动抓取 Etsy 评论日期（低优先级，不影响获取链接/预筛选）">评论抓取中</span>`;
+  if (SCRAPE_BUSY.has(status)) return `<span class="pb pb-scr" title="新加入产品库，后台正在自动抓取 Etsy 评论日期（评论抓取优先，可与获取链接/预筛选并行）">评论抓取中</span>`;
   if (status === "failed") return `<button type="button" class="pb pb-scr bad" data-rretry="${Number(id)}" title="自动抓取 Etsy 评论日期失败；点击重新排队抓取（也可上传截图或手动填写）">抓取失败 重试</button>`;
   return "";
 }

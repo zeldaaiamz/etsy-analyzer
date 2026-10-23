@@ -62,12 +62,22 @@ def test_run_once_ok_and_failed_never_stuck(monkeypatch):
     assert sleeps == [8, 8]                                                        # 每个之间间隔
 
 
-def test_browser_yields_to_ehunt_queue():
+def test_browser_does_not_yield_to_ehunt_by_default(monkeypatch):
+    """默认评论抓取优先：EHunt/选品忙时仍认领并抓取。"""
+    monkeypatch.setattr(R, "YIELD_TO_EHUNT", False)
     s = FakeStore([1], busy=True)
     f = lambda lid: [TODAY]; f.source, f.uses_browser = "etsy_page", True
-    assert R.run_once(s, f) == 0 and s.claims == 0 and not s.done       # EHunt 忙 → 不认领
+    assert R.run_once(s, f, gap=0) == 1 and s.claims == 1 and s.done[1][0] == "ok"
+
+
+def test_browser_yields_to_ehunt_when_env_on(monkeypatch):
+    """REVIEW_YIELD_TO_EHUNT=1 时恢复旧让路：浏览器模式 EHunt 忙 → 不认领；API 模式不让路。"""
+    monkeypatch.setattr(R, "YIELD_TO_EHUNT", True)
+    s = FakeStore([1], busy=True)
+    f = lambda lid: [TODAY]; f.source, f.uses_browser = "etsy_page", True
+    assert R.run_once(s, f) == 0 and s.claims == 0 and not s.done
     g = lambda lid: [TODAY]; g.source, g.uses_browser = "etsy_api", False
-    assert R.run_once(s, g, gap=0) == 1 and s.done[1][2] == "etsy_api"   # API 不占浏览器 → 不需要让路
+    assert R.run_once(s, g, gap=0) == 1 and s.done[1][2] == "etsy_api"
 
 
 def test_make_fetcher(monkeypatch):
@@ -86,6 +96,8 @@ def test_separate_process_and_profile():
     src = (ROOT / "worker/selection/review_scraper.py").read_text()
     assert "ehunt_worker" not in src.split('"""', 2)[2]          # 不 import EHunt worker（独立进程，不阻塞其队列）
     assert R.PROFILE.endswith("reviews-profile")
+    assert R.YIELD_TO_EHUNT is False                            # 默认不让路：评论抓取优先
+    assert "YIELD_TO_EHUNT and" in src                          # 让路仅在显式开启时
 
 
 SQL = (ROOT / "supabase/migrations/049_auto_reviews.sql").read_text()

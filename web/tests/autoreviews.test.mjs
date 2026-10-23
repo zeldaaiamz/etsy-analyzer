@@ -26,3 +26,8 @@ test("app.js 接线：重试 RPC、点击处理、轮询", () => {
   assert.match(a, /cardVelocityBadge\(velOf\(r\)/);
   assert.match(a, /function scheduleScrapePoll/);
 });
+test("评论抓取中徽标：评论抓取优先提示", () => {
+  assert.match(scrapeChip("pending", 1), /评论抓取优先/);
+  assert.doesNotMatch(scrapeChip("pending", 1), /低优先级/);
+});
+
