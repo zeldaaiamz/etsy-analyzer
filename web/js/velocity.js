@@ -70,3 +70,23 @@ export async function loadScrapeInfo(sb, ids) {
   (a.data || []).forEach((r) => st.set(Number(r.listing_id), r.status)); (b.data || []).forEach((r) => man.set(Number(r.listing_id), r));
   return { st, man, ocr };
 }
+
+// 产品库评论抓取进度：聚合 listing_scrape_status（pending/fetching/ok/failed）；仅有排队/进行中时显示
+export function scrapeProgress(statusMap) {
+  let ok = 0, pending = 0, fetching = 0, failed = 0;
+  if (statusMap && typeof statusMap.values === "function") for (const v of statusMap.values()) {
+    if (v === "ok") ok++;
+    else if (v === "pending") pending++;
+    else if (v === "fetching") fetching++;
+    else if (v === "failed") failed++;
+  }
+  const busy = pending + fetching, total = ok + pending + fetching + failed;
+  return { ok, pending, fetching, failed, busy, total, show: busy > 0 && total > 0 };
+}
+// 「评论抓取 已完成 A / 合计 B（排队 C · 进行中 D · 失败 E）」+ A/B 进度条；无 busy 时返回 ""
+export function scrapeProgressBar(p) {
+  if (!p?.show || !(p.total > 0)) return "";
+  const pct = Math.min(100, Math.round((p.ok / p.total) * 100));
+  const lab = `评论抓取 已完成 ${p.ok} / 合计 ${p.total}（排队 ${p.pending} · 进行中 ${p.fetching} · 失败 ${p.failed}）`;
+  return `<div class="lrev-prog" title="本人产品库评论抓取进度（listing_scrape_status）；有排队/进行中时约每 30 秒刷新">${lab}<div class="lrev-prog-bar" role="progressbar" aria-label="评论抓取进度" aria-valuenow="${p.ok}" aria-valuemin="0" aria-valuemax="${p.total}"><i style="width:${pct}%"></i></div></div>`;
+}
