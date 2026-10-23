@@ -21,7 +21,7 @@ test("worker 原始报错 → 中文提示", () => {
   assert.equal(friendlyErr(null), "");
 });
 test("最近 3 天标签按状态显示", () => {
-  assert.equal(chipText({ status: "counted", total_count: 296 }), "自动入队 · 共 296 条");
+  assert.equal(chipText({ status: "counted", total_count: 296 }), "待抓取 · 共 296 条");
   assert.equal(chipText({ status: "counted", total_count: 0 }), "0 条 · 不抓取");
   assert.equal(chipText({ status: "counting" }), "查询中");
   assert.equal(chipText({ status: "failed", total_count: null }), "查询失败");

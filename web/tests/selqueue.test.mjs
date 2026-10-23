@@ -51,7 +51,8 @@ test("page retry labels (timeout vs paging/keyword)", () => {
   assert.equal(queueItem({ id: "r", status: "running", progress: { stage: "reading", retry: 0, at: ago(2) } }, null, NOW).label, "抓取中");
 });
 
-test("052 counted 标签：有结果=自动入队中，0 条单独标", () => {
-  assert.equal(queueItem({ id: "c", status: "counted", total_count: 296 }, null, NOW).label, "自动入队中");
+test("052 counted 标签：有结果=待抓取（未入队），0 条单独标；queued 才算已入队", () => {
+  assert.equal(queueItem({ id: "c", status: "counted", total_count: 296 }, null, NOW).label, "待抓取");
   assert.equal(queueItem({ id: "z", status: "counted", total_count: 0 }, null, NOW).label, "0 条");
+  assert.equal(queueItem({ id: "q", status: "queued", total_count: 296 }, null, NOW).label, "等待");
 });

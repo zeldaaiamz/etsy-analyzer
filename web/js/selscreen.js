@@ -3,7 +3,7 @@
 // ② 查到数量（counted 且 >0）后自动入队抓取（052，lim=min(total,5000)=EHunt/MAX_ROWS；0 条不抓）；也可手动改条数兜底
 // ③ 标题规则先筛：排除的不调豆包、不显示、不入库（页面只一行汇总；原因写 box 本地日志 3 天）→ ④ 通过的调豆包视觉 → 显示符合要求 N 条 + 纯 Etsy 链接
 // ⑤ >1000 分批，每批 1000，最多 5 批 / 5,000；“还剩 N 条未读”只在每批完成后更新 ⑥ 只有符合要求的入库，保留 3 天 ⑦ 网页无搜索，查询找序猿
-import { createSelQueue } from "./selqueue.js?v=2d23e5e1";
+import { createSelQueue } from "./selqueue.js?v=608800a5";
 const BATCH = 1000, MAX_ROWS = 5000; // 每批 1000；自动入队上限 min(total_count, MAX_ROWS)=5000（与 052 / EHunt 前 5,000 条一致）
 const RORDER = ["定制", "IP", "材质", "素材/数字文件", "7天销量≤3", "其他"];
 // ---- 纯函数（web/tests/selscreen.test.mjs）----
@@ -26,7 +26,7 @@ export function friendlyErr(e) {
 export function chipText(r) {
   const n = (v) => (v || 0).toLocaleString();
   if (["count_queued", "counting"].includes(r.status)) return "查询中";
-  if (r.status === "counted") return r.total_count == null ? "待抓取" : (r.total_count > 0 ? `自动入队 · 共 ${n(r.total_count)} 条` : "0 条 · 不抓取");
+  if (r.status === "counted") return r.total_count == null ? "待抓取" : (r.total_count > 0 ? `待抓取 · 共 ${n(r.total_count)} 条` : "0 条 · 不抓取");
   if (["queued", "running"].includes(r.status)) return `读取中 · 已符合 ${n(r.passed_count)} 条`;
   if (r.status === "failed") return r.total_count == null ? "查询失败" : `失败 · 符合 ${n(r.passed_count)} 条`;
   if (r.status === "canceled") return `已停止 · 符合 ${n(r.passed_count)} 条`;
@@ -517,9 +517,9 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
       <p class="hint">筛选：$8–40 · 总销量 ≥100 · 7 天销量 >3 · 按 7 天销量降序</p>`;
     if (r.status === "counted" && n === 0) return `<div class="ss-count">${head}<div class="ss-form"><button class="btn btn-primary" disabled>抓取 →</button><span class="warn">0 条：${/[぀-ヿ㐀-鿿가-힯]/.test(r.keyword) ? "EHunt 只收录英文标题，请改用英文关键词再查" : "建议放宽关键词或换个词再查"}</span></div></div>`;
     if (r.status !== "counted") return `<div class="ss-count">${head}<p class="hint">本次最多读取 ${esc((r.max_rows ?? 0).toLocaleString())} 条（每页 20 条${(r.max_rows || 0) > BATCH ? `，每批 1000` : ""}）</p></div>`;
-    // 052：查完自动入队；提示排队中，并保留手动改条数兜底（迁移未上线或触发失败时）
+    // 052：counted 仍是待抓取（未入队）；真正 queued 才算已入队。保留手动改条数兜底（触发未跑或失败时）
     const autoLim = Math.min(n, MAX_ROWS);
-    return `<div class="ss-count">${head}<div class="ss-form"><span class="pill pill-info">正在自动加入抓取队列</span><span class="hint">最多 ${autoLim.toLocaleString()} 条（EHunt 前 5,000）${n > BATCH ? " · 先读第 1 批（1–1000）" : ""} · 可点取消停止</span></div>
+    return `<div class="ss-count">${head}<div class="ss-form"><span class="pill pill-info">待抓取</span><span class="hint">最多 ${autoLim.toLocaleString()} 条（EHunt 前 5,000）${n > BATCH ? " · 先读第 1 批（1–1000）" : ""} · 有结果将自动入队 · 可点取消</span></div>
       <details class="ss-auto-fb"><summary class="hint">手动改条数（一般不用）</summary><div class="ss-form"><label>最多读取 <input id="ssLimit" class="input input-sm ss-thr" type="number" min="1" max="${autoLim}" value="${esc(V.limErr && $("ssLimit") ? $("ssLimit").value : String(autoLim))}"> 条</label>
       <button class="btn btn-primary" id="ssGo">抓取 →</button><span id="ssLimErr" class="warn" role="alert">${esc(V.limErr)}</span></div></details></div>`;
   }
