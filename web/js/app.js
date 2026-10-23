@@ -629,7 +629,7 @@ async function deleteJobs(ids) {
   const all = ids.map((id) => S.jobs.get(id)).filter(Boolean), run = all.filter((j) => j.status === "running"), jobs = all.filter((j) => j.status !== "running");
   if (!jobs.length) return confirmDialog({ title: "无法删除", body: "运行中的任务不能删除，请先点“■ 停止”，停下后再删除。", ok: "知道了" });
   const libN = jobs.filter(inLib).length;
-  if (libN === jobs.length) return confirmDialog({ title: "已在产品库，不会删除", ok: "知道了", body: `<p>${libN > 1 ? `这 ${libN} 个任务` : "这个任务"}对应的产品在产品库中，分析结果会保留，供产品库“查看分析”使用。如需删除，请到产品库点「移出产品库」（将一并删除任务与分析，删除不可恢复）。</p>` });
+  if (libN === jobs.length) return confirmDialog({ title: "已在产品库，不会删除", ok: "知道了", body: `<p>${libN > 1 ? `这 ${libN} 个任务` : "这个任务"}对应的产品在产品库中，分析结果会保留，供产品库“查看分析”使用。如需删除，请到产品库点「删除产品」（将一并删除任务与分析，删除不可恢复）。</p>` });
   const ok = await confirmDialog({ title: `删除 ${jobs.length - libN} 个任务？`, danger: true, ok: libN === jobs.length ? "知道了" : `删除 ${jobs.length - libN} 个`,
     body: `<p>将永久删除任务及其分析结果、亚马逊匹配和证据截图，<b>不可恢复</b>。</p>
       ${run.length ? `<p class="warn-t">已跳过 ${run.length} 个运行中的任务（请先停止）。</p>` : ""}
@@ -917,7 +917,7 @@ function libCard(r) {
       ${L.stage === "failed" ? ocrBlock(r) + `<details class="mand"${L.man.has(Number(r.etsy_listing_id)) ? " open" : ""}><summary>手动填写（备用）</summary>${manualForm(r)}</details>` : `<div class="pacts">${acts}</div>`}
       <div class="pacts2">${r.job_id && (!job || job.status === "succeeded") ? `<button class="btn btn-link btn-sm" data-detail="${esc(r.job_id)}">查看分析 →</button>`
         : S.libPending.has(Number(r.etsy_listing_id)) ? '<span class="hint">重新分析中…</span>' : `<button class="btn btn-link btn-sm" data-reana="${esc(r.id)}" title="为这个商品提交新的分析（24 小时内的数据走缓存，几乎不耗额度）">↻ 重新分析</button>`}
-        <span class="spacer"></span><button class="btn btn-link btn-sm muted" data-unlib="${esc(r.id)}">移出产品库</button></div></div></article>`;
+        <span class="spacer"></span><button class="btn btn-link btn-sm muted" data-unlib="${esc(r.id)}">删除产品</button></div></div></article>`;
 }
 // ---------- PM-001 一键亚马逊搜索 ----------
 function amzOpen(id) {
@@ -1056,8 +1056,8 @@ function renderLibrary() {
     ${n ? `<span class="bulk-n">已选 <b>${n}</b></span><span class="spacer"></span>${L.stage === "all" ? libAllBulk() : L.stage === "candidate"
       ? `<button class="btn btn-primary btn-sm" data-lbulk="active">▶ 进行中 (${n})</button><button class="btn btn-danger-ghost btn-sm" data-lbulk="rejected">✕ 不考虑 (${n})</button>`
       : `<button class="btn btn-ghost btn-sm" data-lbulk="candidate">↩ 移回备选 (${n})</button>`}
-      ${libExportMenu()}<button class="btn btn-ghost btn-sm" data-lbulk="remove">移出产品库</button><button class="btn btn-ghost btn-sm" data-lbulk="clear">取消选择</button>`
-      : `<span class="hint">勾选卡片可批量${L.stage === "candidate" ? "移到进行中 / 不考虑" : L.stage === "all" ? "移动阶段 / 移出" : "移回备选"}</span>`}</div>` : "";
+      ${libExportMenu()}<button class="btn btn-ghost btn-sm" data-lbulk="remove">删除产品</button><button class="btn btn-ghost btn-sm" data-lbulk="clear">取消选择</button>`
+      : `<span class="hint">勾选卡片可批量${L.stage === "candidate" ? "移到进行中 / 不考虑" : L.stage === "all" ? "移动阶段 / 删除" : "移回备选"}</span>`}</div>` : "";
   const revProg = scrapeProgressBar(scrapeProgress(L.scr), L.cool);
   if (L.stage === "failed") bar = `<div class="lvel"><button class="btn btn-sm btn-ghost" data-lmanrev="1"${L.manRevBusy ? " disabled" : ""} title="把本页无法抓取的商品重新排队给评论抓取进程">${L.manRevBusy ? "排队中…" : "手动抓取评论速度"}</button><span class="hint">这些商品的 Etsy 评论抓取失败。点上方按钮可一键重新排队；或上传评论弹窗截图 / 手动填写。都没有的排在最后。</span></div>${revProg}`;
   else if (vis.length) bar += `<div class="lvel"><button class="btn btn-sm ${L.vel ? "btn-primary" : "btn-ghost"}" data-lvel="1"${L.velBusy ? " disabled" : ""}>${L.velBusy ? "计算中…" : L.vel ? "✓ 按评论速度排序（点击恢复原顺序）" : "按评论速度排序"}</button><button class="btn btn-sm btn-ghost" data-lmanrev="1"${L.manRevBusy ? " disabled" : ""} title="把缺评论数据的商品（抓取失败 / 尚未抓取）重新排队；已成功的不重抓；有勾选则只排所选">${L.manRevBusy ? "排队中…" : "手动抓取评论速度"}</button>${L.vel ? '<span class="hint">连续月数 → 6 月新增；悬停徽标看明细；仅用于同类产品对比</span>' : ""}<span class="spacer"></span>${nf ? `<button class="scr-warn" data-lstage="failed" title="查看并手动填写">⚠ 无法抓取 <b>${nf}</b></button>` : ""}</div>${revProg}`;

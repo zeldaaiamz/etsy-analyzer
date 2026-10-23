@@ -1,4 +1,4 @@
-// node --test web/tests/ —— 055 产品库「移出产品库」直接删除
+// node --test web/tests/ —— 055 产品库「删除产品」直接删除
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -30,7 +30,15 @@ test("app.js：卡片+批量走 delete_library_items；确认「删除不可恢�
   assert.match(app, /不会回到「我的任务」/);
   assert.match(app, /data-unlib/);
   assert.match(app, /data-lbulk="remove"/);
-  assert.match(app, /移出产品库/);
+  assert.match(app, /删除产品/);
+  assert.match(app, /data-unlib[^>]*>删除产品/);
+  assert.match(app, /data-lbulk="remove">删除产品/);
+  // 硬删入口不得再用「移出产品库」；软移出（任务列表 libBtn / libToggle toast）仍保留旧文案
+  const cardBulk = [...app.matchAll(/data-unlib[^>]*>[^<]+|data-lbulk="remove">[^<]+/g)].map((m) => m[0]).join("\n");
+  assert.match(cardBulk, /删除产品/);
+  assert.doesNotMatch(cardBulk, /移出产品库/);
+  assert.match(app, /title="点击移出产品库"/);
+  assert.match(app, /已移出产品库 \$\{jobs\.length\} 个，已回到任务列表/);
   // 卡片/批量都调 removeLibItems（不再传 ask=false 跳过确认）
   assert.match(app, /dataset\?\.unlib[\s\S]*?removeLibItems\(\[r\]\)/);
   assert.match(app, /lbulk === "remove"\) return removeLibItems/);
