@@ -224,3 +224,45 @@ def test_handle_run_keyword_exhaustion_chinese_reason(monkeypatch, tmp_path):
     rp, bp = _handle(monkeypatch, tmp_path, scrape, ["running"])
     err = [k for k in rp if k.get("status") == "canceled"][-1]["error"]
     assert "第 1 页关键词未生效" in err and "已重试 2 次" in err and "继续本批" in err
+
+
+def test_subprocess_watchdog_disarm_kills_proc():
+    """子进程看门狗：disarm 后不应再杀；短超时 Timer 仍标 fired。"""
+    import time
+    killed = []
+    d = W._Watchdog(0.08, kill=lambda: killed.append(1))
+    assert d.proc.poll() is None
+    d.disarm(); time.sleep(0.25)
+    assert d.proc.poll() is not None and not killed and not d.fired   # disarm 取消 Timer + 终止子进程
+
+def test_subprocess_watchdog_fires_timer():
+    import time
+    killed = []
+    d = W._Watchdog(0.05, kill=lambda: killed.append(1))
+    time.sleep(0.2)
+    assert d.fired and killed == [1]
+    d.disarm()
+
+def test_profile_from_cmd_equals_and_space():
+    assert W._profile_from_cmd(["chrome", "--user-data-dir=/tmp/p"], "/tmp/p")
+    assert W._profile_from_cmd(["chrome", "--user-data-dir", "/tmp/p"], "/tmp/p")
+    assert not W._profile_from_cmd(["chrome", "--user-data-dir=/tmp/other"], "/tmp/p")
+
+def test_target_closed_after_deadline_retried_as_timeout():
+    """浏览器被看门狗杀掉 → TargetClosedError，过 deadline 后按超时重试。"""
+    class TargetClosedError(Exception): pass
+    TargetClosedError.__name__ = "TargetClosedError"
+    c = Clock(); calls = []
+    def open_(page):
+        class S:
+            ctx = None
+            def next(s, n, d): pass
+            def read(s, n, deadline):
+                calls.append(n)
+                if len(calls) == 1:
+                    c.t = deadline + 1; raise TargetClosedError("Target page, context or browser has been closed")
+                return [(1, {"rank": 1})], False
+            def close(s): pass
+        return S()
+    assert [r["rank"] for r in W.page_loop(open_, 1, 1, PS, timeout=90, retries=2, clock=c, watchdog=lambda x: NoDog())] == [1]
+    assert calls == [1, 1]

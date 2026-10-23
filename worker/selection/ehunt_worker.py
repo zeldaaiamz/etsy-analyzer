@@ -23,6 +23,9 @@ NOW = lambda: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 import random, http.client, socket as _socket
 RETRIES = max(1, int(os.environ.get("SEL_HTTP_RETRIES", "5")))
 BACKOFF_BASE = float(os.environ.get("SEL_HTTP_BACKOFF", "1.0"))
+BACKOFF_CAP = float(os.environ.get("SEL_HTTP_BACKOFF_CAP", "5"))   # 2026-10-23：原 30s 上限 + timeout=60 → 主循环可堵数分钟
+HTTP_TIMEOUT = float(os.environ.get("SEL_HTTP_TIMEOUT", "12"))     # 原 hardcoded 60；TimeoutError/SSL 尽快失败，不堵主循环
+HB_TIMEOUT = float(os.environ.get("SEL_HB_TIMEOUT", "5"))          # 心跳独立短超时：失败就跳过，绝不堵 60s+
 _sleep = time.sleep
 def is_transient(e):
     if isinstance(e, urllib.error.HTTPError): return e.code == 429 or e.code >= 500
@@ -64,20 +67,21 @@ class Store:
     """最小 PostgREST 客户端（service_role，只在 box 的 worker.env 中；绝不打印）。只写：run/batch 汇总数 + 符合要求的 sel_items。"""
     def __init__(self):
         self.u = os.environ["SUPABASE_URL"].rstrip("/"); self.k = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
-    def _req(self, method, path, body=None, prefer="return=representation", retries=None):
+    def _req(self, method, path, body=None, prefer="return=representation", retries=None, timeout=None):
         """瞬时网络错误（断连/超时/5xx/429）指数退避重试，默认共 RETRIES 次；PATCH/幂等插入可安全重试。
-        非幂等的认领（sel_claim_run / ehunt_lookup_claim）传 retries=1：重试可能多认领一条，交给超时回收。"""
+        非幂等的认领（sel_claim_run / ehunt_lookup_claim）传 retries=1：重试可能多认领一条，交给超时回收。
+        timeout 默认 HTTP_TIMEOUT（12s）；心跳用 HB_TIMEOUT（5s）。2026-10-23：原 timeout=60 遇 TimeoutError/SSL 可堵主循环 60s+ → 前端 offline。"""
         data = None if body is None else json.dumps(body, default=str).encode()
-        tries = retries or RETRIES
+        tries = retries or RETRIES; to = HTTP_TIMEOUT if timeout is None else timeout
         for a in range(tries):
             r = urllib.request.Request(self.u + path, data, method=method,
                                        headers={"apikey": self.k, "Authorization": "Bearer " + self.k, "Content-Type": "application/json", "Prefer": prefer})
             try:
-                with urllib.request.urlopen(r, timeout=60) as f:
+                with urllib.request.urlopen(r, timeout=to) as f:
                     t = f.read(); return json.loads(t) if t else None
             except Exception as e:
                 if not is_transient(e) or a == tries - 1: raise
-                d = min(30, BACKOFF_BASE * 2 ** a) + random.random() * BACKOFF_BASE
+                d = min(BACKOFF_CAP, BACKOFF_BASE * 2 ** a) + random.random() * BACKOFF_BASE
                 log.warning("supabase %s %s: %s, retry %d/%d in %.1fs", method, path.split("?")[0], _brief(e), a + 1, tries - 1, d); _sleep(d)
     def claim(self): r = self._req("POST", "/rest/v1/rpc/sel_claim_run", {"p_worker": WID}, retries=1); return r if r and r.get("id") else None
     def run(self, rid): return (self._req("GET", f"/rest/v1/sel_runs?id=eq.{rid}&select=*") or [{}])[0]
@@ -100,12 +104,14 @@ class Store:
     def lookup_patch(self, lid, **kw): self._req("PATCH", f"/rest/v1/ehunt_lookup_requests?listing_id=eq.{int(lid)}", kw, "return=minimal")
     def lookup_purge(self): return self._req("POST", "/rest/v1/rpc/ehunt_lookup_purge", {})
     def heartbeat(self, info): self._req("POST", "/rest/v1/worker_heartbeat?on_conflict=worker_id", {"worker_id": HB_ID, "last_seen": NOW(), "info": info},
-                                         "return=minimal,resolution=merge-duplicates", retries=1)
+                                         "return=minimal,resolution=merge-duplicates", retries=1, timeout=HB_TIMEOUT)
 
-# ---- 单页超时自动重试（2026-10-20 22:59 事故：第 14 页 reading rows 卡 637s，整个队列被堵约 10 分钟） ----
+# ---- 单页超时自动重试（2026-10-20 22:59 事故：第 14 页 reading rows 卡 637s；2026-10-23 14:35 第 43 页又卡 1131s） ----
 # 每页（翻页/跳页 + 逐行读取）有硬超时；超时 → 记 warning → 关掉浏览器上下文，重新打开列表并设置筛选、跳回同一页重读，最多重试 PAGE_RETRIES 次。
 # 一页先整页读进内存、读完才 yield：超时的那一页一行都没有交出去 → 重读不会重复；已交出（已落定/在判断中）的 rank 绝不重读。
 # 全部重试都失败 → 抛 PageTimeout，走 handle_run 现有失败路径（本批“已停止”+中文原因，「继续本批」从断点接着读），队列继续往下走。
+# 2026-10-23 根因：逐格 ElementHandle 读 DOM 在 CDP 卡住时可不响应 Playwright timeout；threading.Timer 看门狗要 GIL → 主线程卡死时杀不了浏览器，心跳线程也饿死 → UI offline。
+# 修复：整页一次 page.evaluate 抽取（单次超时边界）+ 子进程看门狗（不依赖 GIL）杀 chromium。
 PAGE_TIMEOUT_S = float(os.environ.get("EHUNT_PAGE_TIMEOUT_S", "90"))     # 正常一页 8-17s
 PAGE_RETRIES = max(0, int(os.environ.get("EHUNT_PAGE_RETRIES", "2")))   # 超时后重试次数（共 1 + 2 = 3 次）
 PAGE_KILL_GRACE_S = float(os.environ.get("EHUNT_PAGE_KILL_GRACE_S", "20"))  # 超过硬超时这么久仍卡在单个浏览器调用里 → 看门狗杀掉本 profile 的 chromium
@@ -115,9 +121,21 @@ class KeywordNotApplied(RuntimeError): pass  # 关键词未生效（Selected: �
 class RunStopped(BaseException): pass        # 重试间隙发现用户已取消/暂停：立即停（BaseException：不被页内 except Exception 吞掉）
 RETRY_KINDS = {PageTimeout: "超时", PageStuck: "翻页卡住", KeywordNotApplied: "关键词未生效"}
 
-def _kill_profile_browser(profile=None):
-    """看门狗（另一线程）：只杀本进程后代中 --user-data-dir=本 profile 的 chromium，让主线程卡住的 Playwright 调用立即报错返回。"""
-    profile = os.path.realpath(profile or PROFILE); me = os.getpid(); killed = []
+def _profile_from_cmd(cmd, profile):
+    """匹配 --user-data-dir=PATH 或 --user-data-dir PATH。"""
+    for i, a in enumerate(cmd):
+        if a.startswith("--user-data-dir="):
+            try: return os.path.realpath(a.split("=", 1)[1]) == profile
+            except Exception: return False
+        if a == "--user-data-dir" and i + 1 < len(cmd):
+            try: return os.path.realpath(cmd[i + 1]) == profile
+            except Exception: return False
+    return False
+
+def _kill_profile_browser(profile=None, owner_pid=None):
+    """看门狗：杀 owner 进程树里 --user-data-dir=本 profile 的 chromium，让卡住的 Playwright 调用立即报错返回。
+    owner_pid 默认本进程；子进程看门狗传入父 python pid。不要求持有父进程 GIL。"""
+    profile = os.path.realpath(profile or PROFILE); me = int(owner_pid or os.getpid()); killed = []
     try:
         procs = {}
         for d in os.listdir("/proc"):
@@ -134,21 +152,69 @@ def _kill_profile_browser(profile=None):
                 if pid <= 1: return False
             return False
         for pid, (_, cmd) in procs.items():
-            if any(a.startswith("--user-data-dir=") and os.path.realpath(a.split("=", 1)[1]) == profile for a in cmd) and descends(pid):
+            if _profile_from_cmd(cmd, profile) and descends(pid):
                 try: os.kill(pid, 9); killed.append(pid)
                 except Exception: pass
     except Exception: log.warning("page watchdog kill failed", exc_info=True)
     return killed
 
+# 子进程看门狗脚本：sleep 后杀 chromium。独立进程，不依赖主进程 GIL（2026-10-23 第 43 页卡 1131s 时 Timer 线程未能开火）。
+_WATCHDOG_PY = r"""
+import os, sys, time
+sec, profile, owner = float(sys.argv[1]), sys.argv[2], int(sys.argv[3])
+time.sleep(sec)
+profile = os.path.realpath(profile); killed = []
+try:
+    procs = {}
+    for d in os.listdir("/proc"):
+        if not d.isdigit(): continue
+        try:
+            ppid = int(open(f"/proc/{d}/stat").read().rsplit(")", 1)[1].split()[1])
+            cmd = open(f"/proc/{d}/cmdline", "rb").read().decode(errors="replace").split("\0")
+            procs[int(d)] = (ppid, cmd)
+        except Exception: continue
+    def descends(pid):
+        for _ in range(20):
+            pid = procs.get(pid, (0,))[0]
+            if pid == owner: return True
+            if pid <= 1: return False
+        return False
+    def match(cmd):
+        for i, a in enumerate(cmd):
+            if a.startswith("--user-data-dir="):
+                try: return os.path.realpath(a.split("=", 1)[1]) == profile
+                except Exception: return False
+            if a == "--user-data-dir" and i + 1 < len(cmd):
+                try: return os.path.realpath(cmd[i + 1]) == profile
+                except Exception: return False
+        return False
+    for pid, (_, cmd) in procs.items():
+        if match(cmd) and descends(pid):
+            try: os.kill(pid, 9); killed.append(pid)
+            except Exception: pass
+except Exception: pass
+"""
+
 class _Watchdog:
-    """一页一次：deadline + grace 后仍未 disarm → 调 kill()。正常页（8-17s）只多一个空闲计时器线程，不影响速度。"""
-    def __init__(self, seconds, kill):
-        import threading
-        self.fired = False; self.kill = kill
+    """一页一次：deadline + grace 后仍未 disarm → 杀浏览器。
+    线程 Timer 标 fired + 打日志；子进程备份杀 chromium（主线程 Playwright 卡死持 GIL 时 Timer 回调跑不了）。"""
+    def __init__(self, seconds, kill=None, profile=None, owner_pid=None):
+        import threading, subprocess
+        self.fired = False
+        self.kill = kill or (lambda: _kill_profile_browser(profile, owner_pid))
         self.t = threading.Timer(seconds, self._fire); self.t.daemon = True; self.t.start()
+        self.proc = subprocess.Popen(
+            [sys.executable, "-c", _WATCHDOG_PY, str(seconds), os.path.realpath(profile or PROFILE), str(owner_pid or os.getpid())],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        )
     def _fire(self):
         self.fired = True; log.warning("ehunt page watchdog: browser call stuck past hard timeout, killing browser to unblock"); self.kill()
-    def disarm(self): self.t.cancel()
+    def disarm(self):
+        self.t.cancel()
+        p = getattr(self, "proc", None)
+        if p is not None and p.poll() is None:
+            try: p.terminate()
+            except Exception: pass
 
 def page_loop(open_session, start_rank, end_rank, ps, between=None, timeout=None, retries=None, clock=time.monotonic, watchdog=None, should_stop=None):
     """与浏览器无关的翻页/超时/重试骨架（单测直接用假 session）。
@@ -156,7 +222,7 @@ def page_loop(open_session, start_rank, end_rank, ps, between=None, timeout=None
     超过 deadline 抛 PageTimeout；翻页卡住 PageStuck、关键词未生效 KeywordNotApplied 同样重试；should_stop() 为真 → 抛 RunStopped（取消/暂停）。
     session.next(page, deadline) 翻到第 page 页；session.ctx 给 between；session.close()。"""
     timeout = PAGE_TIMEOUT_S if timeout is None else timeout; retries = PAGE_RETRIES if retries is None else retries
-    watchdog = watchdog or (lambda s: _Watchdog(s, _kill_profile_browser))
+    watchdog = watchdog or (lambda s: _Watchdog(s))
     page = (start_rank - 1) // ps + 1; done = start_rank - 1; sess = None; need_next = False
     try:
         while done < end_rank:
@@ -174,7 +240,10 @@ def page_loop(open_session, start_rank, end_rank, ps, between=None, timeout=None
                 except LoginExpired: raise
                 except Exception as e:
                     kind = next((v for k, v in RETRY_KINDS.items() if isinstance(e, k)), None)
-                    if kind is None and (wd.fired or clock() > deadline or "Timeout" in type(e).__name__): kind = "超时"
+                    err_n = type(e).__name__; err_s = str(e)
+                    if kind is None and (wd.fired or clock() > deadline or "Timeout" in err_n
+                                        or "TargetClosed" in err_n or "Browser" in err_n
+                                        or "closed" in err_s.lower() or "connection" in err_s.lower()): kind = "超时"
                     if kind is None: raise
                     last = (kind, e)
                     log.warning("ehunt page %s: %s after %.0fs (attempt %d/%d, limit %.0fs): %s — reopening same page (rank %s→)",
@@ -246,25 +315,44 @@ def scrape_ehunt(keyword, params, start_rank, end_rank, between=None, should_sto
         def next(s, n, deadline):
             old = s.first_href(); _click(s.pg, U, U["next"], timeout=left_ms(deadline)); s.wait_page(n, old, deadline)
         def read(s, page, deadline):
+            # 2026-10-23：原逐格 ElementHandle（query_selector/inner_text）在 CDP 卡住时可无视 timeout 挂死十几分钟。
+            # 改为一次 page.evaluate 抽整页（单次超时 = left_ms）；看门狗子进程兜底杀浏览器。
             pg = s.pg; pg.set_default_timeout(left_ms(deadline))
             pg.wait_for_selector(U["row"], timeout=left_ms(deadline)); dismiss_overlays(pg, U); t_page = time.time()
-            rank = (page - 1) * ps; out = []
-            log.info("ehunt page %s: reading rows (rank %s→, target %s)", page, rank + 1, end_rank); stage("reading", page=page)
-            for tr in pg.query_selector_all(U["row"]):
-                pg.set_default_timeout(left_ms(deadline))
-                a = tr.query_selector(U["title"])
-                if not a: continue
+            rank0 = (page - 1) * ps; out = []
+            log.info("ehunt page %s: reading rows (rank %s→, target %s)", page, rank0 + 1, end_rank); stage("reading", page=page)
+            left_ms(deadline)
+            raw = pg.evaluate(
+                """(u) => {
+                  const rows = [];
+                  for (const tr of document.querySelectorAll(u.row)) {
+                    const a = tr.querySelector(u.title); if (!a) continue;
+                    const lk = tr.querySelector(u.link);
+                    const href = ((lk && lk.getAttribute('href')) || a.getAttribute('href') || '');
+                    const img = tr.querySelector(u.img);
+                    const price = (tr.querySelector(u.price) || {}).innerText || '';
+                    const total = (tr.querySelector(u.total) || {}).innerText || '';
+                    const d7 = (tr.querySelector(u.d7) || {}).innerText || '';
+                    rows.push({ title: (a.innerText || '').trim(), href, image_url: (img && img.getAttribute('src')) || '', price, total, d7 });
+                  }
+                  const next = document.querySelector(u.next);
+                  return { rows, has_next: !!(next && !next.disabled) };
+                }""",
+                {"row": U["row"], "title": U["title"], "link": U["link"], "img": U["img"],
+                 "price": U["price"], "total": U["total"], "d7": U["d7"], "next": U["next"]},
+            )
+            left_ms(deadline)
+            rank = rank0
+            for item in (raw or {}).get("rows") or []:
                 rank += 1
                 if rank < start_rank: continue
                 if rank > end_rank: break
-                lk = tr.query_selector(U["link"]); href = (lk.get_attribute("href") if lk else "") or a.get_attribute("href") or ""
+                href = item.get("href") or ""
                 lid = "".join(ch for ch in href.rstrip("/").split("/listing/")[-1].split("/product-detail/")[-1].split("/")[0] if ch.isdigit())
-                img = tr.query_selector(U["img"]); cell = lambda k: (lambda e: e.inner_text() if e else "")(tr.query_selector(U[k]))
-                out.append((rank, {"rank": rank, "page": page, "title": a.inner_text().strip(), "listing_id": lid, "url": f"https://www.etsy.com/listing/{lid}", "image_url": img.get_attribute("src") if img else "",
-                                   "price": num(cell("price")), "total_sales": total_of(cell("total")), "sales_7d": d7_of(cell("d7"))}))
-                time.sleep(0.3)
-            left_ms(deadline)
-            has_next = rank < end_rank and pg.query_selector(U["next"]) is not None
+                out.append((rank, {"rank": rank, "page": page, "title": (item.get("title") or "").strip(), "listing_id": lid,
+                                   "url": f"https://www.etsy.com/listing/{lid}", "image_url": item.get("image_url") or "",
+                                   "price": num(item.get("price")), "total_sales": total_of(item.get("total")), "sales_7d": d7_of(item.get("d7"))}))
+            has_next = rank < end_rank and bool((raw or {}).get("has_next"))
             pg.set_default_timeout(30000)
             log.info("ehunt page %s done: rank=%s, %.0fs", page, rank, time.time() - t_page)
             return out, has_next
@@ -381,19 +469,19 @@ def _open_list(p, keyword, params):
         if b and b.is_visible(): b.click(); time.sleep(0.5)
         dismiss_overlays(pg, U); _check_login(pg, U)
         for attempt in range(3):   # 页面水合前填写的关键词会被清空 → 以 Selected: 的 Keyword 标签为准，最多重试 3 次
-            dismiss_overlays(pg, U); pg.fill(U["search_input"], keyword); _click(pg, U, U["search_btn"]); pg.wait_for_load_state("networkidle"); time.sleep(2 + attempt * 2)
+            dismiss_overlays(pg, U); pg.fill(U["search_input"], keyword); _click(pg, U, U["search_btn"]); pg.wait_for_load_state("networkidle", timeout=30000); time.sleep(2 + attempt * 2)
             dismiss_overlays(pg, U)
             if U["chip_keyword"].format(keyword=keyword).replace(" ", "").lower() in pg.locator(U["selected_row"]).first.inner_text().replace(" ", "").lower(): break
         else: raise KeywordNotApplied(f"关键词未生效：Selected: 中没有 Keyword: {keyword}")
         # Basic: Price(USD) → 自定义 Min/Max → OK（都在展开的 popover 里）
         _click(pg, U, U["price_dd"]); time.sleep(1); pop = pg.locator(U["popover"])
         pop.locator(U["min_input"]).first.fill(str(F["price_min"])); pop.locator(U["max_input"]).first.fill(str(F["price_max"]))
-        _click(pg, U, pop.locator(U["ok_btn"]).first); pg.wait_for_load_state("networkidle"); time.sleep(2)
+        _click(pg, U, pop.locator(U["ok_btn"]).first); pg.wait_for_load_state("networkidle", timeout=30000); time.sleep(2)
         # Sales → Total sales: Min 100 + 7-day sales: Min 4（>3）→ OK
         _click(pg, U, U["sales_dd"]); time.sleep(1); pop = pg.locator(U["popover"])
         pop.locator(U["total_sales_line"]).locator(U["min_input"]).first.fill(str(F["min_sales"]))
         pop.locator(U["sales7_line"]).locator(U["min_input"]).first.fill(str(F["min_sales_7d"]))
-        _click(pg, U, pop.locator(U["ok_btn"]).first); pg.wait_for_load_state("networkidle"); time.sleep(2)
+        _click(pg, U, pop.locator(U["ok_btn"]).first); pg.wait_for_load_state("networkidle", timeout=30000); time.sleep(2)
         dismiss_overlays(pg, U)
         # 排序默认 ↓7-day sales，校验
         st = pg.locator(U["sort_dd"]).first.inner_text().strip()
