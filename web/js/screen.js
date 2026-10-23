@@ -2,7 +2,7 @@
 // → 每批“分析剩余数据”或底部“全部已加载”一键确认 → 只有保留的进入 DeepSeek / Keepamore / 截图（017 screen_confirm）
 export const BATCH = 50;
 const POLL_MS = 3000;
-import { screenBatchGroups, batchIndex, itemSrc, batchCounts, batchCountRows, deletable, deletePlan, groupItems, groupCount } from "./batchname.js?v=1f34253d";
+import { screenBatchGroups, batchIndex, itemSrc, batchCounts, batchCountRows, deletable, deletePlan, refetchableGot, refetchPlan, groupItems, groupCount } from "./batchname.js?v=7b158eb8";
 // EHunt 账号/服务异常（与商品本身无关）：新 worker 写 'EHunt 服务异常（原因）'；旧 worker 写 'EHunt 错误 500: 查询失败: …'
 export const EHUNT_ANOMALY_RE = /EHunt 服务异常|EHunt 错误 5\d\d|查询失败|daily_limit/;
 export const ANOMALY_PREFIX = "EHunt 服务异常";
@@ -92,7 +92,7 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     const failed = it.status === "failed" && it.screen_state !== "kept";
     const left = (it.max_attempts ?? 3) - (it.attempts ?? 0);
     // EHunt 网页回退（ETSY_PROVIDER=ehunt_web）只取主图：没有标题/价格 → 显示 listing id，不当作“读取中”
-    const head = it.title ? esc(it.title) : hasData(it) ? `Etsy #${esc(it.listing_id || "")} <span class="hint" title="已获取成功，不再重复获取（除了获取失败，不重复获取）">· 仅主图 · ✓ 已获取</span>` : blocked(it) ? `<span class="sc-anom" title="${esc(it.error || "")}">EHunt 服务异常（${esc(anomalyReason(anomaly(it) ? it.error : getStatus()?.reason))}）<span class="hint">${it.status === "failed" ? " · 可一键刷新" : " · 已暂停，恢复后自动重试"}</span></span>` : waiting(it) ? "等待 EHunt 额度（明日自动继续）" : it.status === "failed" ? (left > 0 ? "取数失败" : `取数失败（已重试 ${it.attempts ?? 3} 次，已停止）`) : "读取 Etsy 数据中…";
+    const head = it.title ? esc(it.title) : hasData(it) ? `Etsy #${esc(it.listing_id || "")} <span class="hint" title="已获取成功。默认不重复获取；若要重取主图，请勾选后点「重新获取」">· 仅主图 · ✓ 已获取</span>` : blocked(it) ? `<span class="sc-anom" title="${esc(it.error || "")}">EHunt 服务异常（${esc(anomalyReason(anomaly(it) ? it.error : getStatus()?.reason))}）<span class="hint">${it.status === "failed" ? " · 可一键刷新" : " · 已暂停，恢复后自动重试"}</span></span>` : waiting(it) ? "等待 EHunt 额度（明日自动继续）" : it.status === "failed" ? (left > 0 ? "取数失败" : `取数失败（已重试 ${it.attempts ?? 3} 次，已停止）`) : "读取 Etsy 数据中…";
     const img = hasData(it) && imgUrl(it.image_url)
       ? `<img src="${imgUrl(thumb(it.image_url))}" alt="" data-sid="${esc(it.id)}" class="${V.imgOk.has(it.id) ? "on" : ""}">` : "";
     const ph = `<div class="sc-ph">${blocked(it) ? "⚠" : waiting(it) ? "⏳" : it.status === "failed" ? "!" : hasData(it) && !it.image_url ? "无图" : '<span class="spin"></span>'}</div>`;
@@ -118,8 +118,11 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
 
   function render() {
     V.bidx = batchIndex(V.sbatches || []); renderBatches();
-    { const el = $("screenCounts"); if (el) {       const nSel = [...V.sel].filter((id) => V.items.some((it) => it.id === id)).length, demoTag = (V.sbatches || []).some((b) => b.demo) ? ' <span class="pill pill-bad">演示数字</span>' : "";
-      el.innerHTML = `${nSel ? `<div class="sc-selbar"><b>已选 ${nSel} 条</b><button type="button" class="btn btn-danger-ghost btn-sm" data-sselact="rej">✕ 排除所选</button><button type="button" class="btn btn-ghost btn-sm" data-sselact="undo">撤销排除</button><button type="button" class="btn btn-danger btn-sm" data-sselact="del"${V.busy.has("seldel") ? " disabled" : ""}>${V.busy.has("seldel") ? '<span class="spin"></span>' : "🗑 "}删除所选</button><button type="button" class="btn btn-ghost btn-sm" data-sselact="clear">清除选择</button></div>` : ""}`; } }
+    { const el = $("screenCounts"); if (el) {
+      const nSel = [...V.sel].filter((id) => V.items.some((it) => it.id === id)).length;
+      const nGot = [...V.sel].filter((id) => refetchableGot(V.items.find((it) => it.id === id))).length;
+      const demoTag = (V.sbatches || []).some((b) => b.demo) ? ' <span class="pill pill-bad">演示数字</span>' : "";
+      el.innerHTML = `${nSel ? `<div class="sc-selbar"><b>已选 ${nSel} 条</b>${demoTag}<button type="button" class="btn btn-primary btn-sm" data-sselact="refetch"${nGot && !V.busy.has("refgot") ? "" : " disabled"} title="只重新获取已选中、已取到主图的条目（例外于「除了获取失败，不重复获取」；需确认）。失败项请用一键刷新。">${V.busy.has("refgot") ? '<span class="spin"></span>' : ""}重新获取${nGot ? `（${nGot}）` : ""}</button><button type="button" class="btn btn-danger-ghost btn-sm" data-sselact="rej">✕ 排除所选</button><button type="button" class="btn btn-ghost btn-sm" data-sselact="undo">撤销排除</button><button type="button" class="btn btn-danger btn-sm" data-sselact="del"${V.busy.has("seldel") ? " disabled" : ""}>${V.busy.has("seldel") ? '<span class="spin"></span>' : "🗑 "}删除所选</button><button type="button" class="btn btn-ghost btn-sm" data-sselact="clear">清除选择</button></div>` : ""}`; } }
     const box = $("screenBody"); if (!box) return;
     const bs = batches(), tot = V.items.length;
     const nRej = V.items.filter((it) => V.rej.has(it.id) || it.screen_state === "rejected").length;
@@ -134,7 +137,7 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     const nDone = V.items.filter((it) => it.screen_state === "rejected").length; // 只算「分析剩余数据」确认后的已排除（卡片 ✕ 已改软隐藏；本地排除仍靠「排除所选」）
     const nRetry = V.items.filter(canRefetch).length;
     const nDead = V.items.filter(deadFailed).length;
-    $("screenTabs").innerHTML += `<span class="spacer"></span>${tot ? `<span class="hint sc-norefetch" title="除了获取失败，不重复获取：已获取成功、排队中、处理中的条目不会再获取第二次">仅失败项可重新获取 · 已获取成功，不再重复获取</span>` : ""}${nRetry ? `<button class="btn btn-primary btn-sm" data-srefall="1" ${V.busy.has("refall") ? "disabled" : ""} title="除了获取失败，不重复获取：只重新取数获取失败且未达 3 次上限的条目（EHunt 服务异常导致的失败不受上限限制）">${V.busy.has("refall") ? '<span class="spin"></span>' : ""}一键刷新（${nRetry} 条失败）</button>` : ""}${nDead ? `<button class="btn btn-danger-ghost btn-sm" data-sdelfail="1" title="永久删除已重试 3 次仍失败的条目（不可恢复）">🗑 一键删除失败（${nDead} 条）</button>` : ""}${nDone ? `<button class="btn btn-danger-ghost btn-sm" data-shide="1" title="永久删除全部已排除条目（不可恢复，不消耗 EHunt 额度）">🗑 删除所有已排除 (${nDone})</button>` : ""}`;
+    $("screenTabs").innerHTML += `<span class="spacer"></span>${tot ? `<span class="hint sc-norefetch" title="除了获取失败，不重复获取：默认不会再次获取已成功/排队/处理中的条目。若要重取已获取的主图，请勾选后点「重新获取」（不会静默全量重取）。">默认不重复获取 · 已获取的需选中后「重新获取」</span>` : ""}${nRetry ? `<button class="btn btn-primary btn-sm" data-srefall="1" ${V.busy.has("refall") ? "disabled" : ""} title="除了获取失败，不重复获取：只重新取数获取失败且未达 3 次上限的条目（EHunt 服务异常导致的失败不受上限限制）">${V.busy.has("refall") ? '<span class="spin"></span>' : ""}一键刷新（${nRetry} 条失败）</button>` : ""}${nDead ? `<button class="btn btn-danger-ghost btn-sm" data-sdelfail="1" title="永久删除已重试 3 次仍失败的条目（不可恢复）">🗑 一键删除失败（${nDead} 条）</button>` : ""}${nDone ? `<button class="btn btn-danger-ghost btn-sm" data-shide="1" title="永久删除全部已排除条目（不可恢复，不消耗 EHunt 额度）">🗑 删除所有已排除 (${nDone})</button>` : ""}`;
     if (V.loadErr && !tot) { box.innerHTML = `<div class="card empty"><div class="ico">!</div><h3>加载失败</h3><p class="muted">${esc(V.loadErr)}</p><button class="btn btn-primary btn-sm" data-sreload="1">刷新</button></div>`; $("screenFoot").innerHTML = ""; return; }
     if (!tot) { box.innerHTML = `<div class="card empty"><div class="ico">◎</div><h3>${!DEMO && !V.loaded ? "加载中…" : "没有待筛选的链接"}</h3><p class="muted">在“任务”页粘贴链接并勾选“先预筛选”，取到 EHunt 数据后会出现在这里</p></div>`; $("screenFoot").innerHTML = ""; return; }
     const GS = groups(), demoTag = (V.sbatches || []).some((b) => b.demo) ? ' <span class="pill pill-bad">演示数字</span>' : "";
@@ -258,13 +261,50 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
       toast(`已删除 ${ids.length} 条`, "ok", [{ label: "撤销", run: async () => { if (!DEMO) { const r = await getSb().rpc("screen_unhide", { p_ids: ids }); if (r.error) return toast(`撤销失败：${r.error.message}`, "bad"); load(); } else { V.items = V.items.concat(removed).sort((a, b) => Number(a.listing_id) - Number(b.listing_id)); render(); } } }], 8000);
     } finally { V.busy.delete("seldel"); render(); }
   }
+  // 选中后「重新获取」（053）：仅已获取成功(screening)的条目；确认后回 queued，取完仍待确认。不碰 kept/产品库；失败仍用一键刷新。
+  async function refetchGotSelected() {
+    if (V.busy.has("refgot")) return;
+    const plan = refetchPlan([...V.sel], V.items, V.sbatches || []);
+    if (!plan.n) return toast("所选里没有已获取成功的条目（失败请用一键刷新；取数中的等结束后再选）", "bad");
+    V.busy.add("refgot"); render();
+    try {
+      const skip = V.sel.size - plan.n;
+      const ok = await confirmDialog({
+        title: `重新获取（${plan.n} 条）？`,
+        ok: `重新获取 ${plan.n} 条`,
+        body: `<p>将把以下 <b>${plan.n}</b> 条<strong>已获取成功</strong>的条目重新排队取主图（例外于「除了获取失败，不重复获取」，仅本次显式操作）：</p>
+          <ul class="ss-send-list">${plan.rows.map((r) => `<li>${esc(r.label)}：<b>${r.n}</b> 条</li>`).join("")}</ul>
+          ${skip > 0 ? `<p class="hint">另有 ${skip} 条不符合条件（失败 / 取数中 / 已进入分析），不会动。</p>` : ""}
+          <p class="hint">取数完成后仍是<strong>待确认</strong>；不会重复发送已确认进任务的条目，不碰产品库，也不改自动发送开关。不会静默全量重取。</p>
+          ${(V.sbatches || []).some((b) => b.demo) ? '<p><span class="pill pill-bad">演示数字</span></p>' : ""}`,
+      });
+      if (!ok) return;
+      let ids = plan.ids, n = plan.n;
+      if (!DEMO) {
+        const r = await getSb().rpc("screen_refetch_got", { p_ids: plan.ids });
+        if (r.error) return toast(/screen_refetch_got/.test(r.error.message) ? "重新获取失败：需要后台执行 053" : `重新获取失败：${r.error.message}`, "bad");
+        ids = r.data?.ids || plan.ids; n = r.data?.refetched ?? ids.length;
+      }
+      if (!n) { toast("没有可重新获取的条目（状态可能已变化）", "bad"); return DEMO ? render() : load(); }
+      const gone = new Set(ids);
+      V.items.forEach((it) => {
+        if (!gone.has(it.id)) return;
+        it.status = "queued"; it.screen_state = "awaiting"; it.title = null; it.image_url = null; it.price = null;
+        it.error = null; it.attempts = 0; V.imgOk.delete(it.id); V.rej.delete(it.id); V.sel.delete(it.id);
+      });
+      toast(`已重新排队取数 ${n} 条（取完仍待确认）`, "ok");
+      render(); if (!DEMO) load();
+    } finally { V.busy.delete("refgot"); render(); }
+  }
+
   document.addEventListener("click", (ev) => {
     if (!visible()) return;
     const cb = ev.target.closest("[data-ssel]"); if (cb) { ev.stopPropagation(); cb.checked ? V.sel.add(cb.dataset.ssel) : V.sel.delete(cb.dataset.ssel); render(); return; }
     const sb2 = ev.target.closest("[data-sselb],[data-sselact]");
     if (sb2) { ev.preventDefault();
-      if (sb2.dataset.sselb) { const ids = new Set(sb2.dataset.sselb.split(",")), L = V.items.filter((it) => ids.has(it.batch_id) && deletable(it)); L.forEach((it) => V.sel.add(it.id)); toast(`已选中本批 ${L.length} 条（可批量排除 / 撤销 / 删除）`, "ok"); }
+      if (sb2.dataset.sselb) { const ids = new Set(sb2.dataset.sselb.split(",")), L = V.items.filter((it) => ids.has(it.batch_id) && deletable(it)); L.forEach((it) => V.sel.add(it.id)); toast(`已选中本批 ${L.length} 条（可批量排除 / 撤销 / 删除 / 重新获取）`, "ok"); }
       else if (sb2.dataset.sselact === "del") { deleteSelected(); return; }
+      else if (sb2.dataset.sselact === "refetch") { refetchGotSelected(); return; }
       else { const a = sb2.dataset.sselact; if (a === "rej") V.sel.forEach((id) => { if (V.items.find((it) => it.id === id)?.status === "screening") V.rej.add(id); }); if (a === "undo") V.sel.forEach((id) => V.rej.delete(id)); if (a !== "clear") toast(a === "rej" ? `已排除 ${V.sel.size} 条（确认前可撤销）` : `已撤销 ${V.sel.size} 条`, "ok"); V.sel.clear(); }
       render(); return; }
     const t = ev.target.closest("[data-srej],[data-sundo],[data-srestore],[data-sconfirm],[data-stab],[data-shide],[data-srefall],[data-sdelfail],[data-sreload]"); if (!t) return;
@@ -336,6 +376,15 @@ export function createScreen({ $, esc, imgUrl, toast, getSb, DEMO, QS, confirmDi
     }
     if (shot === "ehuntlogin") V.items.forEach((it, i) => { if (i % 2) Object.assign(it, { status: "queued", screen_state: null, title: null, image_url: null, price: null,
       error: "EHunt 服务异常（EHunt 未登录：需要在 box 上运行 deploy/box-selection-worker.sh login 重新登录），已暂停取数，自动重试" }); else { it.title = null; it.price = null; } });
+    if (shot === "refetch" || shot === "refetchq") { // 053 演示数字：已获取成功的条目，勾选后可「重新获取」
+      V.items.forEach((it, i) => { if (i < 12) fill(it, i); else if (i < 16) { it.status = "failed"; it.screen_state = null; it.title = it.image_url = null; it.error = "EHunt 取数失败"; it.attempts = 1; it.max_attempts = 3; } else if (i < 18) { it.status = "queued"; it.screen_state = null; } });
+      [0, 1, 2, 4, 5].forEach((k) => { if (V.items[k]) V.sel.add(V.items[k].id); });
+      if (shot === "refetchq") { // 确认重新获取之后：所选变排队取数
+        [...V.sel].forEach((id) => { const it = V.items.find((x) => x.id === id); if (it && it.status === "screening") Object.assign(it, { status: "queued", screen_state: "awaiting", title: null, image_url: null, price: null, error: null, attempts: 0 }); });
+        V.sel.clear();
+        toast("已重新排队取数 5 条（取完仍待确认）", "ok");
+      }
+    }
     if (shot === "excluded") [1, 4, 7, 9, 12, 53, 58, 61].forEach((k) => { const it = V.items[k]; if (it) { it.status = "canceled"; it.screen_state = "rejected"; } });
     if (shot === "rejected" || shot === "confirm" || shot === "bottom") [1, 4, 7, 9, 12, 53, 58].forEach((k) => V.rej.add(V.items[k].id));
     render();

@@ -38,7 +38,7 @@ export const RECENT_N = 10, RECENT_KEY = "sel.recentOpen";
 export function recentOpen(store, narrow) { const v = store?.getItem?.(RECENT_KEY); return v === "1" ? true : v === "0" ? false : !narrow; }
 export function recentList(rows, now = Date.now()) { const since = now - 3 * 864e5; return (rows || []).filter((r) => Date.parse(r.created_at) > since).sort((a, b) => b.created_at.localeCompare(a.created_at)).slice(0, RECENT_N); }
 // 送去预筛选状态（按批次，sel_batches.sent_to_screen_at，038）：显示最近一次发送的批次，如「第二批已发送」；从未发送 →「未发送」
-import { cnNum, batchLabel, historySendNos } from "./batchname.js?v=1f34253d";
+import { cnNum, batchLabel, historySendNos } from "./batchname.js?v=7b158eb8";
 export { cnNum };
 // 039：sel_batches.sent_count = 本批已发送多少条（按 rank 顺序）；038 旧标记（sent_count 为空）视为整批已发送
 export function sendState(b, total = b?.passed_count) {

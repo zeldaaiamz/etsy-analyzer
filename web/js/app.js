@@ -1,10 +1,10 @@
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
 import { computeVelocity, computeManualVelocity, cmpVelocity, velocityBadge, cardVelocityBadge, scrapeChip, SCRAPE_BUSY, loadReviewDates, demoReviewDates, loadScrapeInfo } from "./velocity.js";
 import { amzBlock, amzUrls, openAll, applyEdit, kwList, MAX_KW, DIR_SELECT_HTML } from "./amzsearch.js";
-import { createScreen, ANOMALY_PREFIX, anomalyReason } from "./screen.js?v=2e0c6e88";
+import { createScreen, ANOMALY_PREFIX, anomalyReason } from "./screen.js?v=e8e4f1a9";
 import { createExWords } from "./exwords.js?v=c9174633";
 import { createReconcile, taskTotalLine, sortAt } from "./reconcile.js?v=16c285c9";
-import { createSelScreen } from "./selscreen.js?v=07ec6043";
+import { createSelScreen } from "./selscreen.js?v=f0a1307f";
 
 // ?demo=1：纯前端示例数据，不登录、不连 Supabase，仅用于预览界面（&offline=1 / &quota=1 预览横幅）
 const QS = new URLSearchParams(location.search);

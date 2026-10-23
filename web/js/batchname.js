@@ -48,9 +48,16 @@ export function batchCountRows(items, batches) {
 }
 // 「删除所选」可选范围（与 040 screen_hide_ids 一致）：待确认、取数失败、已确认排除；取数中（queued/running）与已进入分析的不可选
 export const deletable = (it) => !!it && it.screen_state !== "kept" && ["screening", "failed", "canceled"].includes(it.status);
+// 「重新获取」可选范围（053 screen_refetch_got）：仅已获取成功、仍待确认（screening，非 kept）；失败走一键刷新；取数中/已进入分析不可选
+export const refetchableGot = (it) => !!it && it.status === "screening" && it.screen_state !== "kept";
 // 确认框内容：总数 + 各批数量（按批次列表顺序，未知来源归「其他」）
 export function deletePlan(selIds, items, batches) {
   const S = new Set(selIds), L = (items || []).filter((it) => S.has(it.id) && deletable(it));
+  return { ids: L.map((it) => it.id), n: L.length, rows: batchCountRows(L, batches).map((r) => ({ label: r.label, n: r.n })).concat((() => { const M = batchIndex(batches), k = L.filter((it) => !M.has(it.batch_id)).length; return k ? [{ label: "其他", n: k }] : []; })()) };
+}
+// 「重新获取」确认框：只计已获取成功（screening）的所选；失败/取数中/kept 不计
+export function refetchPlan(selIds, items, batches) {
+  const S = new Set(selIds), L = (items || []).filter((it) => S.has(it.id) && refetchableGot(it));
   return { ids: L.map((it) => it.id), n: L.length, rows: batchCountRows(L, batches).map((r) => ({ label: r.label, n: r.n })).concat((() => { const M = batchIndex(batches), k = L.filter((it) => !M.has(it.batch_id)).length; return k ? [{ label: "其他", n: k }] : []; })()) };
 }
 // 条目来源标签：只按该任务自己的 jobs.batch_id（建任务的批次，之后从不改写）查批次列表，不看标题/关键词文字/位置。
