@@ -601,21 +601,35 @@ async function undoAdd(jobs) {
     if (error) return toast(error.message, "bad"); jobs.forEach((j) => S.lib.delete(lidOf(j))); await loadAll(); if (L.loaded) loadLibrary(); }
   toast("已撤销，任务已回到列表", "ok"); render(); renderLibrary(); if (drawerState) refreshDrawerActs();
 }
-async function removeLibItems(items, ask = false) {
+async function removeLibItems(items) {
+  // 055：直接删除（产品库 + 对应任务/分析），不回「我的任务」；删除不可恢复
   if (!items.length) return;
-  if (ask && !await confirmDialog({ title: `移出 ${items.length} 个产品？`, danger: true, ok: "移出", body: "<p>将从产品库删除这些条目（阶段、原因与备注一并删除），任务与分析结果不受影响。</p>" })) return;
+  if (!await confirmDialog({ title: `删除 ${items.length} 个产品？`, danger: true, ok: `删除 ${items.length} 个`,
+    body: `<p>将从产品库<strong>永久删除</strong>这些条目（阶段、原因、备注、搜索词），并删除对应的分析任务与结果，<b>删除不可恢复</b>。</p>
+      <p class="hint">不会回到「我的任务」。评论抓取记录保留（之后再加入同一商品可复用）。</p>` })) return;
   items.forEach((r) => L.sel.delete(r.id));
-  if (!DEMO) { const { error } = await sb.rpc("remove_from_library", { p_items: items.map((r) => r.id), p_jobs: null });
-    if (error) return toast(error.message, "bad"); }
-  items.forEach((r) => S.lib.delete(Number(r.etsy_listing_id)));
-  toast(`已移出 ${items.length} 个${items.some((r) => r.job_id) ? "，对应任务已回到“我的任务”" : ""}`, "ok"); render(); renderLibrary();
-  if (!DEMO) { loadAll(); loadLibrary(); } // 服务端过滤：重新拉取以让任务重新出现
+  if (!DEMO) {
+    const { data, error } = await sb.rpc("delete_library_items", { p_items: items.map((r) => r.id), p_jobs: null });
+    if (error) return toast(error.message, "bad");
+    const paths = data?.paths || [];
+    for (let i = 0; i < paths.length; i += 100) await sb.storage.from(BUCKET).remove(paths.slice(i, i + 100));
+    items.forEach((r) => { S.lib.delete(Number(r.etsy_listing_id)); if (r.job_id) { S.jobs.delete(r.job_id); S.sel.delete(r.job_id); } });
+    toast(`已删除 ${data?.deleted_library ?? items.length} 个产品${data?.deleted_jobs ? `（含 ${data.deleted_jobs} 个任务）` : ""}${data?.skipped_running ? `，跳过运行中 ${data.skipped_running} 个` : ""}`, "ok");
+    render(); renderLibrary(); loadAll(); loadLibrary();
+    return;
+  }
+  items.forEach((r) => {
+    S.lib.delete(Number(r.etsy_listing_id));
+    if (r.job_id) { S.jobs.delete(r.job_id); S.sel.delete(r.job_id); }
+    [...S.jobs.values()].filter((j) => Number(j.etsy_listing_id) === Number(r.etsy_listing_id)).forEach((j) => { S.jobs.delete(j.id); S.sel.delete(j.id); });
+  });
+  toast(`已删除 ${items.length} 个产品（演示，不可恢复）`, "ok"); render(); renderLibrary();
 }
 async function deleteJobs(ids) {
   const all = ids.map((id) => S.jobs.get(id)).filter(Boolean), run = all.filter((j) => j.status === "running"), jobs = all.filter((j) => j.status !== "running");
   if (!jobs.length) return confirmDialog({ title: "无法删除", body: "运行中的任务不能删除，请先点“■ 停止”，停下后再删除。", ok: "知道了" });
   const libN = jobs.filter(inLib).length;
-  if (libN === jobs.length) return confirmDialog({ title: "已在产品库，不会删除", ok: "知道了", body: `<p>${libN > 1 ? `这 ${libN} 个任务` : "这个任务"}对应的产品在产品库中，分析结果会保留，供产品库“查看分析”使用。如需删除，请先将产品移出产品库。</p>` });
+  if (libN === jobs.length) return confirmDialog({ title: "已在产品库，不会删除", ok: "知道了", body: `<p>${libN > 1 ? `这 ${libN} 个任务` : "这个任务"}对应的产品在产品库中，分析结果会保留，供产品库“查看分析”使用。如需删除，请到产品库点「移出产品库」（将一并删除任务与分析，删除不可恢复）。</p>` });
   const ok = await confirmDialog({ title: `删除 ${jobs.length - libN} 个任务？`, danger: true, ok: libN === jobs.length ? "知道了" : `删除 ${jobs.length - libN} 个`,
     body: `<p>将永久删除任务及其分析结果、亚马逊匹配和证据截图，<b>不可恢复</b>。</p>
       ${run.length ? `<p class="warn-t">已跳过 ${run.length} 个运行中的任务（请先停止）。</p>` : ""}
@@ -926,24 +940,32 @@ async function saveKeywords(id) {
     if (error) return toast(`保存失败：${error.message}`, "bad"); next = data; }
   r.amazon_keywords = next; L.kwEdit = null; renderLibrary(); toast(`已保存 ${next.length} 个搜索词`, "ok");
 }
-// 一键删除全部「不考虑」：二次确认（输入数量），服务端 delete_rejected_library()（022）；语义同“移出产品库”：只删产品库条目，不删任务/分析
+// 一键删除全部「不考虑」：二次确认（输入数量），服务端 delete_rejected_library()（055→delete_library_items）；直接删除，不回「我的任务」
 async function deleteAllRejected() {
   const all = [...S.lib.values()], n = !DEMO && L.counts ? L.counts.rejected || 0 : all.filter((r) => stageOf(r) === "rejected").length;
   if (!n) return;
   const ok = await confirmDialog({ title: `删除全部「不考虑」（${n} 个）`, danger: true, ok: `永久删除 ${n} 个`,
-    body: `<p>将永久删除 <b>${n}</b> 个「不考虑」的产品，无法撤销（每日备份可恢复）。确定删除？</p>
-      <p class="hint">只删除产品库条目（阶段、原因、备注、搜索词）；分析任务与结果保留，对应任务会回到“我的任务”。</p>
+    body: `<p>将永久删除 <b>${n}</b> 个「不考虑」的产品及其对应分析任务，<b>删除不可恢复</b>（每日备份可恢复）。确定删除？</p>
+      <p class="hint">不会回到「我的任务」。评论抓取记录保留。</p>
       <label class="delrej-l"><span>请输入数量 <b>${n}</b> 以确认：</span><input id="delRejN" class="input" inputmode="numeric" autocomplete="off" placeholder="${n}"></label><p id="delRejErr" class="rj-err"></p>`,
     validate: () => { const ok = $("delRejN").value.trim() === String(n); $("delRejErr").textContent = ok ? "" : `请输入 ${n}`; return ok; } });
   if (!ok) return;
   let deleted = n;
-  if (!DEMO) { const { data, error } = await sb.rpc("delete_rejected_library");
+  if (!DEMO) {
+    const { data, error } = await sb.rpc("delete_rejected_library");
     if (error) { toast(`删除失败：${error.message}`, "bad"); return loadLibrary(); }
-    deleted = data ?? 0; }
-  else all.filter((r) => stageOf(r) === "rejected").forEach((r) => S.lib.delete(Number(r.etsy_listing_id)));
+    deleted = data?.deleted_library ?? 0;
+    const paths = data?.paths || [];
+    for (let i = 0; i < paths.length; i += 100) await sb.storage.from(BUCKET).remove(paths.slice(i, i + 100));
+  } else {
+    all.filter((r) => stageOf(r) === "rejected").forEach((r) => {
+      S.lib.delete(Number(r.etsy_listing_id));
+      if (r.job_id) S.jobs.delete(r.job_id);
+    });
+  }
   L.sel.clear(); L.selAll = false; L.reason = null;
   toast(`已删除 ${deleted} 个`, "ok");
-  if (!DEMO) { await loadLibrary(); loadAll(); } else renderLibrary();
+  if (!DEMO) { await loadLibrary(); loadAll(); } else { render(); renderLibrary(); }
 }
 function libAllBulk() {
   const sel = [...L.sel].map(libById).filter(Boolean), c = sel.filter((r) => stageOf(r) === "candidate").length, o = sel.length - c;
@@ -1360,7 +1382,7 @@ document.addEventListener("click", (ev) => {
   if (t.dataset?.reana) { const r = libById(t.dataset.reana); return r && reanalyze(r); }
   if (t.dataset?.lmove) return moveStage([t.dataset.id], t.dataset.lmove);
   if (t.dataset?.lbulk) { if (t.dataset.lbulk === "clear") { L.sel.clear(); L.selAll = false; return renderLibrary(); }
-    if (t.dataset.lbulk === "remove") return removeLibItems([...L.sel].map(libById).filter(Boolean), true);
+    if (t.dataset.lbulk === "remove") return removeLibItems([...L.sel].map(libById).filter(Boolean));
     return moveStage([...L.sel], t.dataset.lbulk); }
   if (t.dataset?.libgo) { L.stage = t.dataset.libgo; L.sel.clear(); L.loaded = false; if (location.hash.startsWith("#/library")) DEMO ? renderLibrary() : libReload(); return; }
   if (t.dataset?.copy) return copyText(t.dataset.copy);
