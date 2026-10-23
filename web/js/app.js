@@ -1,5 +1,5 @@
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
-import { computeVelocity, computeManualVelocity, cmpVelocity, velocityBadge, cardVelocityBadge, scrapeChip, SCRAPE_BUSY, loadReviewDates, demoReviewDates, loadScrapeInfo } from "./velocity.js";
+import { computeVelocity, computeManualVelocity, cmpVelocity, velocityBadge, cardVelocityBadge, scrapeChip, SCRAPE_BUSY, loadReviewDates, demoReviewDates, loadScrapeInfo } from "./velocity.js?v=6e320ea4";
 import { amzBlock, amzUrls, openAll, applyEdit, kwList, MAX_KW, DIR_SELECT_HTML } from "./amzsearch.js";
 import { createScreen, ANOMALY_PREFIX, anomalyReason } from "./screen.js?v=e8e4f1a9";
 import { createExWords } from "./exwords.js?v=c9174633";
