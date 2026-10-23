@@ -13,12 +13,13 @@ def ts(d): return int(dt.datetime(d.year, d.month, d.day, 12, tzinfo=dt.timezone
 
 class FakeStore:
     def __init__(self, pending, busy=False):
-        self.pending, self.busy, self.done, self.claims, self.requeued = list(pending), busy, {}, 0, []
+        self.pending, self.busy, self.done, self.claims, self.requeued, self.beats = list(pending), busy, {}, 0, [], []
     def claim(self, n):
         self.claims += 1; got, self.pending = self.pending[:n], self.pending[n:]; return got
     def finish(self, lid, status, dates=None, source="etsy_page", error=None): self.done[lid] = (status, list(dates or []), source, error)
     def ehunt_busy(self): return self.busy
     def requeue(self, lid): self.requeued.append(lid)
+    def heartbeat(self, info=None): self.beats.append(info or {})
 
 
 def test_api_fetcher_paginates_and_cuts_old():
@@ -123,8 +124,9 @@ def test_migration_054_static():
 def test_reviews_heartbeat_box_reviews():
     src = (ROOT / "worker/selection/review_scraper.py").read_text()
     assert "box-reviews" in src and "def heartbeat" in src
-    # run_once 每轮先心跳，便于产品库判断进程是否在跑
-    assert "getattr(store, \"heartbeat\"" in src or "store.heartbeat" in src
+    # run_once 每轮先心跳，便于产品库判断进程是否在跑；冷却时 info 带 cool_until
+    assert "cool_heartbeat_info" in src and "cool_until" in src and "cool_remaining_s" in src
+    assert "getattr(store, \"heartbeat\"" in src or "store.heartbeat" in src or "beat(cool_heartbeat_info" in src
 
 @pytest.mark.skipif(not glob.glob("/usr/lib/postgresql/*/bin/initdb") or not shutil.which("psql"), reason="no local postgres")
 def test_migration_054_local_postgres():
@@ -220,6 +222,32 @@ def test_session_page_budget_cools_down(monkeypatch):
     assert f.ready()[0]
     f(2)   # 再 3 → 7 ≥ 6 → 冷却
     ok, why = f.ready(); assert not ok and "冷却" in why and 20 * 60 <= f.pause_until - c.t <= 30 * 60
+
+
+def test_cool_heartbeat_info_while_paused():
+    c = Clock(); f = R.BrowserFetcher(clock=c, nav_factory=lambda: FakeNav([[TODAY]]))
+    f.pause(1500, "本会话已看 30 页，冷却")
+    info = R.cool_heartbeat_info(f, pid=4242)
+    assert info["pid"] == 4242 and info["cool_remaining_s"] == 1500
+    assert info["cool_until"].endswith("Z") and "冷却" in info["cool_reason"]
+    # 未暂停 → 只有 pid
+    c.t = f.pause_until + 1
+    assert R.cool_heartbeat_info(f, pid=1) == {"pid": 1}
+    # 无 pause_until 的 fetcher
+    class Plain: pass
+    assert R.cool_heartbeat_info(Plain(), pid=9) == {"pid": 9}
+
+
+def test_run_once_writes_cool_into_heartbeat_when_cooling(monkeypatch):
+    c = Clock(); f = R.BrowserFetcher(clock=c, nav_factory=lambda: FakeNav([[TODAY]]))
+    f.pause(23 * 60, "本会话已看 30 页，冷却")
+    s = FakeStore([1])
+    assert R.run_once(s, f) == 0 and s.claims == 0
+    assert s.beats, "应写心跳"
+    # ready() 前 + 跳过时各一次，都带 cool_*
+    assert all(b.get("cool_remaining_s") == 23 * 60 for b in s.beats)
+    assert all(b.get("cool_until") for b in s.beats)
+    assert all("冷却" in (b.get("cool_reason") or "") for b in s.beats)
 
 
 def test_warm_every_10_and_daily_cap(monkeypatch):

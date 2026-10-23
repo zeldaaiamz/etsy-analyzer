@@ -83,10 +83,25 @@ export function scrapeProgress(statusMap) {
   const busy = pending + fetching, total = ok + pending + fetching + failed;
   return { ok, pending, fetching, failed, busy, total, show: busy > 0 && total > 0 };
 }
-// 「评论抓取 已完成 A / 合计 B（排队 C · 进行中 D · 失败 E）」+ A/B 进度条；无 busy 时返回 ""
-export function scrapeProgressBar(p) {
+// 会话冷却提示：worker_heartbeat.info.cool_until / cool_remaining_s → 「防拦截冷却中，约 N 分钟后继续」
+export function coolHint(cool, now = Date.now()) {
+  if (!cool) return "";
+  let rem = null;
+  if (cool.cool_remaining_s != null && Number.isFinite(Number(cool.cool_remaining_s))) rem = Math.max(0, Number(cool.cool_remaining_s));
+  else if (cool.cool_until) {
+    const t = new Date(cool.cool_until).getTime();
+    if (!isNaN(t)) rem = Math.max(0, Math.round((t - now) / 1000));
+  }
+  if (rem == null || rem <= 0) return "";
+  const mins = Math.max(1, Math.ceil(rem / 60));
+  return `防拦截冷却中，约 ${mins} 分钟后继续`;
+}
+// 「评论抓取 已完成 A / 合计 B（排队 C · 进行中 D · 失败 E）」[+ 冷却提示] + A/B 进度条；无 busy 时返回 ""
+export function scrapeProgressBar(p, cool) {
   if (!p?.show || !(p.total > 0)) return "";
   const pct = Math.min(100, Math.round((p.ok / p.total) * 100));
-  const lab = `评论抓取 已完成 ${p.ok} / 合计 ${p.total}（排队 ${p.pending} · 进行中 ${p.fetching} · 失败 ${p.failed}）`;
-  return `<div class="lrev-prog" title="本人产品库评论抓取进度（listing_scrape_status）；有排队/进行中时约每 30 秒刷新">${lab}<div class="lrev-prog-bar" role="progressbar" aria-label="评论抓取进度" aria-valuenow="${p.ok}" aria-valuemin="0" aria-valuemax="${p.total}"><i style="width:${pct}%"></i></div></div>`;
+  const hint = coolHint(cool);
+  const lab = `评论抓取 已完成 ${p.ok} / 合计 ${p.total}（排队 ${p.pending} · 进行中 ${p.fetching} · 失败 ${p.failed}）` + (hint ? ` · ${hint}` : "");
+  const tip = "本人产品库评论抓取进度（listing_scrape_status）；有排队/进行中时约每 30 秒刷新" + (hint ? `；${hint}` : "");
+  return `<div class="lrev-prog" title="${tip}">${lab}<div class="lrev-prog-bar" role="progressbar" aria-label="评论抓取进度" aria-valuenow="${p.ok}" aria-valuemin="0" aria-valuemax="${p.total}"><i style="width:${pct}%"></i></div></div>`;
 }

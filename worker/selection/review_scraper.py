@@ -6,7 +6,7 @@
   2 首页预热（会话开始、每 10 个商品、被拦截恢复后）
   3 商品页 →「View all reviews for this item」（只接受弹窗标题 Reviews for this item，否则 failed「仅店铺评论」）→ Most recent → 每页 8 条，
     遇到早于 REVIEW_DAYS（200）天的评论 / REVIEW_MAX_PAGES（20）页 / 最后一页即停；每条评论只取评论人旁的日期
-  4 节奏：商品之间 30–60s，翻页 3–6s；一个会话最多 REVIEW_SESSION_PAGES（30）页，然后冷却 20–30 分钟
+  4 节奏：商品之间 30–60s，翻页 3–6s；一个会话最多 REVIEW_SESSION_PAGES（30）页，然后冷却 20–30 分钟（冷却中 heartbeat.info 写 cool_until / cool_remaining_s，产品库进度条提示）
   5 被拦截（403/验证）→ 该商品 failed「Etsy 反爬拦截」，整个 worker 暂停 30–60 分钟；本轮剩余的放回 pending
   6 评论抓取优先：默认不因 EHunt 获取链接/计数/预筛选忙而让路（REVIEW_YIELD_TO_EHUNT=1 才恢复旧让路）；与选品并行时选品 worker nice 更高（更低 OS 优先级）
   7 每日上限 REVIEW_DAILY_CAP（60）个
@@ -349,11 +349,32 @@ def make_fetcher():
     return ApiFetcher(k) if k else BrowserFetcher()
 
 
+def cool_heartbeat_info(fetch, pid=None):
+    """054+：会话冷却/反爬暂停时把 until / remaining 写入 worker_heartbeat.info，产品库进度条读 box-reviews 显示「防拦截冷却中」。"""
+    info = {"pid": pid if pid is not None else os.getpid()}
+    until = getattr(fetch, "pause_until", None)
+    if until is None:
+        return info
+    clock = getattr(fetch, "clock", time.time)
+    now = clock() if callable(clock) else time.time()
+    if now >= until:
+        return info
+    rem = max(0, int(until - now))
+    info["cool_until"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(until))
+    info["cool_remaining_s"] = rem
+    why = getattr(fetch, "pause_reason", "") or ""
+    if why:
+        info["cool_reason"] = why
+    return info
+
+
 def run_once(store, fetch, batch=BATCH, gap=None):
     """一轮：节流/显示检查 →（可选）让路检查 → 认领 ≤batch → 逐个抓取写回。返回处理数量。"""
-    getattr(store, "heartbeat", lambda *a, **k: None)({"pid": os.getpid()})
+    beat = getattr(store, "heartbeat", lambda *a, **k: None)
+    beat(cool_heartbeat_info(fetch))
     ok, why = fetch.ready() if hasattr(fetch, "ready") else (True, "")
     if not ok:
+        beat(cool_heartbeat_info(fetch))  # ready() 可能刚写入 pause_until
         log.info("reviews 本轮跳过：%s", why); return 0
     if YIELD_TO_EHUNT and getattr(fetch, "uses_browser", False) and store.ehunt_busy():
         log.info("EHunt 队列忙，本轮跳过（REVIEW_YIELD_TO_EHUNT）"); return 0
@@ -361,7 +382,7 @@ def run_once(store, fetch, batch=BATCH, gap=None):
     for i, lid in enumerate(ids):
         if i and hasattr(fetch, "ready") and not fetch.ready()[0]:   # 中途被拦截/冷却 → 余下的放回 pending（不算失败）
             for rest in ids[i:]: store.requeue(rest)
-            break
+            beat(cool_heartbeat_info(fetch)); break
         try:
             dates = fetch(lid)
             store.finish(lid, "ok", dates, fetch.source)
@@ -372,6 +393,9 @@ def run_once(store, fetch, batch=BATCH, gap=None):
             log.warning("reviews %s → failed: %s", lid, msg)
         if i < len(ids) - 1:
             _sleep(gap if gap is not None else random.uniform(*LISTING_GAP_S))
+    # 最后一条可能刚触发会话页数冷却：补一次心跳让产品库立刻看到 cool_until
+    if getattr(fetch, "pause_until", 0) and cool_heartbeat_info(fetch).get("cool_until"):
+        beat(cool_heartbeat_info(fetch))
     return len(ids)
 
 
