@@ -1,9 +1,10 @@
 // 获取链接（#/selscreen[/<run>]，导航在「任务」前）。Hongyan 2026-10-16 定稿：
-// ① 关键词 → 查 EHunt 结果数（价格 8–40 · 总销量 ≥100 · 7 天销量 >3 · 按 7 天销量降序）→ ② 填最多读取条数 → 抓取（box 上的 worker，不在阿里云）
+// ① 关键词 → 查 EHunt 结果数（价格 8–40 · 总销量 ≥100 · 7 天销量 >3 · 按 7 天销量降序）
+// ② 查到数量（counted 且 >0）后自动入队抓取（052，lim=min(total,5000)=EHunt/MAX_ROWS；0 条不抓）；也可手动改条数兜底
 // ③ 标题规则先筛：排除的不调豆包、不显示、不入库（页面只一行汇总；原因写 box 本地日志 3 天）→ ④ 通过的调豆包视觉 → 显示符合要求 N 条 + 纯 Etsy 链接
 // ⑤ >1000 分批，每批 1000，最多 5 批 / 5,000；“还剩 N 条未读”只在每批完成后更新 ⑥ 只有符合要求的入库，保留 3 天 ⑦ 网页无搜索，查询找序猿
-import { createSelQueue } from "./selqueue.js?v=105c55e6";
-const BATCH = 1000, MAX_ROWS = 5000; // 每批 1000，最多读到 EHunt 第 5,000 条（分批次数不再单独限制，第 1 批可能不足 1000）
+import { createSelQueue } from "./selqueue.js?v=2d23e5e1";
+const BATCH = 1000, MAX_ROWS = 5000; // 每批 1000；自动入队上限 min(total_count, MAX_ROWS)=5000（与 052 / EHunt 前 5,000 条一致）
 const RORDER = ["定制", "IP", "材质", "素材/数字文件", "7天销量≤3", "其他"];
 // ---- 纯函数（web/tests/selscreen.test.mjs）----
 // 关键词：去首尾空格、连续空白合成一个（EHunt 的 Keyword 标签按单空格显示）
@@ -25,7 +26,7 @@ export function friendlyErr(e) {
 export function chipText(r) {
   const n = (v) => (v || 0).toLocaleString();
   if (["count_queued", "counting"].includes(r.status)) return "查询中";
-  if (r.status === "counted") return r.total_count == null ? "待抓取" : `待抓取 · 共 ${n(r.total_count)} 条`;
+  if (r.status === "counted") return r.total_count == null ? "待抓取" : (r.total_count > 0 ? `自动入队 · 共 ${n(r.total_count)} 条` : "0 条 · 不抓取");
   if (["queued", "running"].includes(r.status)) return `读取中 · 已符合 ${n(r.passed_count)} 条`;
   if (r.status === "failed") return r.total_count == null ? "查询失败" : `失败 · 符合 ${n(r.passed_count)} 条`;
   if (r.status === "canceled") return `已停止 · 符合 ${n(r.passed_count)} 条`;
@@ -129,7 +130,19 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
     V.demoRuns[id] = { run, batches: [], links: {} }; location.hash = `#/selscreen/${id}`;
     const ms = Number(QSP.get("countms")) || 1000; run.progress = { stage: "count_open", at: new Date().toISOString() };
     [["count_filter", 0.3], ["count_read", 0.7]].forEach(([st, f]) => setTimeout(() => { if (run.status === "counting") { run.progress = { stage: st, at: new Date().toISOString() }; refresh(); } }, ms * f));
-    setTimeout(() => { if (run.status === "canceled") return; run.status = "counted"; run.total_count = demoTotal(kw); run.progress = { stage: "count_done", total: run.total_count, at: new Date().toISOString() }; refresh(); }, ms);
+    setTimeout(() => {
+      if (run.status === "canceled") return;
+      run.status = "counted"; run.total_count = demoTotal(kw); run.progress = { stage: "count_done", total: run.total_count, at: new Date().toISOString() }; refresh();
+      // 052：演示也自动入队（lim=min(n, MAX_ROWS)）；0 条保持 counted
+      if (run.total_count > 0) {
+        const lim = Math.min(run.total_count, MAX_ROWS), e = Math.min(lim, BATCH);
+        Object.assign(run, { max_rows: lim, status: "queued", current_batch: 1, queue_at: new Date().toISOString() });
+        const bat = { id: `${run.id}-b1`, batch_no: 1, offset_start: 1, offset_end: e, status: "queued", scraped_count: 0, passed_count: 0, excluded_count: 0, demo: true };
+        (V.demoRuns[run.id] ||= { run, batches: [], links: {} }).batches = [bat];
+        if (QSP.has("demoqueue")) SQ.demoAdd({ id: run.id, keyword: run.keyword, status: "queued", max_rows: lim, current_batch: 1, queue_at: run.queue_at, total_count: run.total_count }, bat);
+        refresh();
+      }
+    }, ms);
   }
   const demoLinks = (run, bno, n) => { const seed = run.keyword.length * 7919 + bno * 104729; return Array.from({ length: n }, (_, i) => `https://www.etsy.com/listing/${9000000000 + ((seed + i * 7121) % 99999999)}`); };
   function demoBatch(run, bno, resume, s0) {
@@ -384,7 +397,7 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
     (V.recentFx?.[id]?.sel_batches || []).forEach((x) => { if (x.batch_no === b.batch_no) Object.assign(b, { sent_to_screen_at: x.sent_to_screen_at, sent_count: x.sent_count ?? null }); });
     V.demoRuns[id] = { run, batches: [b], links: { [b.id]: demoLinks(run, 1, pass) } };
   }
-  // 演示截图：?demo=1&sprog=counting|reading|vision|done|failed#/selscreen/demo-prog（数字都是演示数字）
+  // 演示截图：?demo=1&sprog=counting|counted|zero|reading|vision|done|failed#/selscreen/demo-prog（数字都是演示数字）
   function demoProgress(kind) {
     const id = "demo-prog", now = Date.now(), iso = (s) => new Date(now - s * 1000).toISOString();
     const run = { id, keyword: "acrylic sign", status: "running", total_count: 3260, max_rows: 2000, batch_size: BATCH, current_batch: 2, remaining_count: 1000, created_at: iso(900), heartbeat_at: iso(3), demoProgress: true };
@@ -392,6 +405,11 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
     const b2 = { id: `${id}-b2`, batch_no: 2, offset_start: 1001, offset_end: 2000, status: "running", scraped_count: 0, passed_count: 0, excluded_count: 0, excluded_by_reason: {}, demo: true };
     let batches = [b1, b2];
     if (kind === "counting") { Object.assign(run, { status: "counting", total_count: null, max_rows: null, current_batch: 0 }); batches = []; run.progress = { stage: "count_filter", at: iso(2) }; }
+    else if (kind === "counted") { // 052 截图：查完待自动入队（演示数字）
+      Object.assign(run, { status: "counted", total_count: 3260, max_rows: null, current_batch: 0 }); batches = []; run.progress = { stage: "count_done", total: 3260, at: iso(1) };
+    } else if (kind === "zero") { // 052：0 条不自动抓
+      Object.assign(run, { status: "counted", keyword: "no results", total_count: 0, max_rows: null, current_batch: 0 }); batches = []; run.progress = { stage: "count_done", total: 0, at: iso(1) };
+    }
     else if (kind === "reading" || kind === "vision") {
       const P = kind === "reading" ? { stage: "reading", read: 468, judged: 431, vision_pending: 37, passed: 149, excluded: 279, dup: 3, page: 74 } : { stage: "vision", read: 1000, judged: 962, vision_pending: 38, passed: 333, excluded: 621, dup: 8, page: 100 };
       Object.assign(b2, { scraped_count: P.judged, passed_count: P.passed, excluded_count: P.excluded }); run.progress = { ...P, batch_no: 2, target: 1000, at: iso(2) };
@@ -497,10 +515,13 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
     const tip = n > BATCH ? `<span class="pill pill-info">超过 1000：分批读取，每批 1000，共 ${nb} 批${n > MAX_ROWS ? "（EHunt 最多显示前 5,000 条）" : ""}</span>` : "";
     const head = `<div class="ss-count-n"><b>${esc(r.keyword)}</b>：<span class="ss-n ss-n-info">${n.toLocaleString()}</span> 条 ${tip}${label}</div>
       <p class="hint">筛选：$8–40 · 总销量 ≥100 · 7 天销量 >3 · 按 7 天销量降序</p>`;
-    if (r.status === "counted" && n === 0) return `<div class="ss-count">${head}<div class="ss-form"><button class="btn btn-primary" disabled>抓取 →</button><span class="warn">0 条：${/[\u3040-\u30ff\u3400-\u9fff\uac00-\ud7af]/.test(r.keyword) ? "EHunt 只收录英文标题，请改用英文关键词再查" : "建议放宽关键词或换个词再查"}</span></div></div>`;
+    if (r.status === "counted" && n === 0) return `<div class="ss-count">${head}<div class="ss-form"><button class="btn btn-primary" disabled>抓取 →</button><span class="warn">0 条：${/[぀-ヿ㐀-鿿가-힯]/.test(r.keyword) ? "EHunt 只收录英文标题，请改用英文关键词再查" : "建议放宽关键词或换个词再查"}</span></div></div>`;
     if (r.status !== "counted") return `<div class="ss-count">${head}<p class="hint">本次最多读取 ${esc((r.max_rows ?? 0).toLocaleString())} 条（每页 20 条${(r.max_rows || 0) > BATCH ? `，每批 1000` : ""}）</p></div>`;
-    return `<div class="ss-count">${head}<div class="ss-form"><label>最多读取 <input id="ssLimit" class="input input-sm ss-thr" type="number" min="1" max="${Math.min(n, MAX_ROWS)}" value="${esc(V.limErr && $("ssLimit") ? $("ssLimit").value : String(Math.min(n, MAX_ROWS)))}"> 条</label>
-      <button class="btn btn-primary" id="ssGo">抓取 →</button><span id="ssLimErr" class="warn" role="alert">${esc(V.limErr)}</span>${n > BATCH ? '<span class="hint">先读第 1 批（1–1000），完成后可读下一批或一键读取全部剩余</span>' : ""}</div></div>`;
+    // 052：查完自动入队；提示排队中，并保留手动改条数兜底（迁移未上线或触发失败时）
+    const autoLim = Math.min(n, MAX_ROWS);
+    return `<div class="ss-count">${head}<div class="ss-form"><span class="pill pill-info">正在自动加入抓取队列</span><span class="hint">最多 ${autoLim.toLocaleString()} 条（EHunt 前 5,000）${n > BATCH ? " · 先读第 1 批（1–1000）" : ""} · 可点取消停止</span></div>
+      <details class="ss-auto-fb"><summary class="hint">手动改条数（一般不用）</summary><div class="ss-form"><label>最多读取 <input id="ssLimit" class="input input-sm ss-thr" type="number" min="1" max="${autoLim}" value="${esc(V.limErr && $("ssLimit") ? $("ssLimit").value : String(autoLim))}"> 条</label>
+      <button class="btn btn-primary" id="ssGo">抓取 →</button><span id="ssLimErr" class="warn" role="alert">${esc(V.limErr)}</span></div></details></div>`;
   }
   // 链接列表：每条前面一个只读勾选框，已送去预筛选 = 勾选「已发送」，其余「未发送」
   function linkList(b, links) {
@@ -552,7 +573,7 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
         <button class="btn btn-primary" id="ssNext">读取下一批（${(re + 1).toLocaleString()}–${e.toLocaleString()}）</button><button class="btn btn-ghost${nb > 1 ? "" : " hidden"}" id="ssAll">一键读取全部（${add.toLocaleString()} 条，${nb} 批）</button><span id="ssAddErr" class="warn" role="alert">${esc(V.addErr)}</span></div>`; })() : "";
     const cum = done.length > 1 || (r && r.status !== "succeeded" && done.length) ? `<div class="card ss-cum"><b>累计符合要求 <span class="ss-n ss-n-ok">${all.length.toLocaleString()}</span> 条</b><span class="hint">（${done.length} 批 · 已读 ${done.reduce((a, b) => a + b.scraped_count, 0).toLocaleString()} 条）</span>${V.batches.some((b) => b.demo) ? '<span class="pill pill-bad">演示数字</span>' : ""}<span class="spacer"></span>
         <button class="btn btn-primary btn-sm" data-sscopy="all"${all.length ? "" : " disabled"}>复制全部批次</button><button class="btn btn-ghost btn-sm" data-ssdl="all"${all.length ? "" : " disabled"}>下载 TXT</button>${(() => { const P = sendPlan(done.filter((b) => (V.links[b.id] || []).length), (id) => V.links[id], false); return `<button class="btn btn-primary btn-sm" id="ssSendAll"${P.ids.length && !V.sending ? "" : " disabled"} title="${P.restoreOnly ? "所有批次都已发送；点此只恢复在预筛选里删除过的" : P.ids.length ? `发送 ${P.ids.length} 个未发送/部分发送的批次` : "所有批次都已发送"}">${V.sending === "all" ? '<span class="spin"></span> 发送中…' : P.restoreOnly ? "全部已发送 · 恢复已删除的" : P.ids.length ? `发送全部批次（${P.n.toLocaleString()} 条）` : "全部批次已发送"}</button>`; })()}</div>` : "";
-    body.innerHTML = !r ? '<div class="card empty"><div class="ico">◎</div><h3>输入关键词，先“查询数量”</h3><p class="muted">再填写最多读取条数点“抓取”</p></div>'
+    body.innerHTML = !r ? '<div class="card empty"><div class="ico">◎</div><h3>输入关键词，先“查询数量”</h3><p class="muted">查到数量后会自动加入抓取队列（0 条不抓；也可手动改条数）</p></div>'
       : `${cum}${V.batches.map(batchBlock).join("")}${nextBar}
         ${done.length ? `<p class="hint ss-note">已排除合计 ${exAll.toLocaleString()}${exAll ? `：${esc(sumReasons(exR))}` : ""}（原因只记在 box 本地日志，3 天后删除）· 仅保留最近 3 天的筛选结果 · 网页不提供搜索，查历史请在对话里问序猿</p>` : ""}`;
   }

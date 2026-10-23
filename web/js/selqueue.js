@@ -24,7 +24,7 @@ export function queueItem(r, batch, now = Date.now()) {
     const can = !!b; // 查询数量失败（没有批次）只能重新查询
     return { ...base, group: "problem", label: r.status === "failed" ? "失败" : "中断", reason: r.error || "", acts: can ? ["retry", "delete"] : ["delete"], done: b?.scraped_count || 0 };
   }
-  return { ...base, group: "end", label: { succeeded: "完成", batch_done: "本批完成", canceled: "已停止", counted: "待抓取" }[r.status] || r.status, passed: r.passed_count || 0, acts: r.status === "canceled" && b ? ["retry", "delete"] : ["delete"] };
+  return { ...base, group: "end", label: { succeeded: "完成", batch_done: "本批完成", canceled: "已停止", counted: (r.total_count > 0 ? "自动入队中" : "0 条") }[r.status] || r.status, passed: r.passed_count || 0, acts: r.status === "canceled" && b ? ["retry", "delete"] : ["delete"] };
 }
 // 整个队列：正在抓 → 等待（按 queue_at，即点「抓取」的先后 / 上移下移后的顺序）→ 有问题 → 已结束（最新在前）
 export function buildQueue(runs, batchOf = () => null, now = Date.now()) {
@@ -92,7 +92,7 @@ export function createSelQueue({ $, esc, toast, getSb, DEMO, confirmDialog, frie
       <div class="hint">已读 <b>${n0(x.read)}</b> / ${n0(x.target)} 条 · <b>${Math.floor(x.pctJ)}%</b>${x.page ? ` · 第 ${x.page} 页` : ""} · 通过 <b class="ss-n-ok">${n0(x.passed)}</b>${x.warn ? ' · <span class="warn">⚠ 3 分钟以上没有更新进度</span>' : ""}</div>`;
     else if (x.group === "wait") sub = `<div class="hint">${x.status === "paused" ? "已暂停，不会被抓取；点「继续」回到第 " + x.pos + " 位" : `排第 ${x.pos} 位，等前面的抓完自动开始`}${x.resumeAt ? ` · 从第 ${n0(x.resumeAt)} 条接着读` : ""}</div>`;
     else if (x.group === "problem") sub = `<div class="warn" title="${esc(x.reason)}">原因：${esc(friendlyErr(x.reason) || x.reason || "未知")}${x.done ? `<span class="hint"> · 已读 ${n0(x.done)} 条已保留，重新抓取从断点接着读</span>` : ""}</div>`;
-    else sub = x.status === "counted" ? `<div class="hint">已查数量，打开后填写条数点「抓取」加入队列</div>` : `<div class="hint">符合 ${n0(x.passed)} 条</div>`;
+    else sub = x.status === "counted" ? `<div class="hint">已查数量，正在自动加入抓取队列（0 条不抓）</div>` : `<div class="hint">符合 ${n0(x.passed)} 条</div>`;
     return `<li class="ss-q-row ss-q-${x.group}${x.status === "paused" ? " ss-q-paused" : ""}"><div class="ss-q-main"><span class="ss-q-pos">${x.group === "running" ? (x.counting ? "…" : '<span class="spin"></span>') : x.group === "wait" ? x.pos : x.group === "problem" ? "!" : "✓"}</span>
       <a class="ss-q-kw" href="#/selscreen/${esc(x.id)}">${esc(x.keyword)}</a><span class="hint">${rng}</span><span class="pill ${pill}">${esc(x.label)}</span><span class="spacer"></span><span class="ss-q-acts">${btns}</span></div>${sub}</li>`;
   }
@@ -103,7 +103,7 @@ export function createSelQueue({ $, esc, toast, getSb, DEMO, confirmDialog, frie
     const sec = (t, L, empty = "") => (L.length ? `<div class="ss-q-sec">${t}</div><ol class="ss-q-list">${L.map(row).join("")}</ol>` : empty);
     el.innerHTML = `<div class="card ss-queue"><div class="ss-q-head"><b>抓取队列</b><span class="hint">box 一次抓 1 个，其余按顺序等待 · 进行中 ${act} 个${q.problem.length ? ` · <span class="warn">有问题 ${q.problem.length} 个</span>` : ""}</span>${DEMO ? '<span class="pill pill-bad">演示数字</span>' : ""}</div>
       ${q.offline ? '<p class="warn ss-q-off">⚠ 有任务在等待，但 box 抓取进程没有在抓（box 可能离线或暂停）。恢复后会按顺序自动开始，不需要重新点。</p>' : ""}
-      ${act ? "" : '<p class="hint ss-q-empty">队列为空：在上方查询数量后点「抓取」，可以连续给多个关键词点「抓取」，会按顺序排队。</p>'}
+      ${act ? "" : '<p class="hint ss-q-empty">队列为空：查询数量成功后会自动加入（也可手动改条数）；多个关键词按顺序排队。</p>'}
       ${sec("正在抓取", q.running)}${sec(`等待中（${q.wait.length}）`, q.wait)}${sec("有问题", q.problem)}${q.end.length ? `<details class="ss-q-endd"${QSP.has("qend") ? " open" : ""}><summary class="ss-q-sec">已结束（${q.end.length}，最近 3 天）</summary><ol class="ss-q-list">${q.end.map(row).join("")}</ol></details>` : ""}</div>`;
   }
   async function act(a, id) {
@@ -133,6 +133,6 @@ export function createSelQueue({ $, esc, toast, getSb, DEMO, confirmDialog, frie
     const R = (id) => Q.runs.find((x) => x.id === id), ka = r.queue_at, ro = R(o.id); r.queue_at = ro.queue_at; ro.queue_at = ka; }
   document.addEventListener("click", (e) => { const t = e.target.closest?.("[data-sq]"); if (t) act(t.dataset.sq, t.dataset.sqid); });
   // 演示（?demoqueue=1）：新任务进入抓取队列末尾（演示数字）
-  function demoAdd(run, batch) { if (!DEMO) return; if (!Q.demo) Q.demo = demoFixtures(QSP.get("squeue") || "running"); Q.demo.runs.push({ created_at: new Date().toISOString(), ...run }); if (batch) Q.demo.bat[run.id] = [batch]; Q.runs = Q.demo.runs; Q.batches = Q.demo.bat; render(); }
+  function demoAdd(run, batch) { if (!DEMO) return; if (!Q.demo) Q.demo = demoFixtures(QSP.get("squeue") || "running"); Q.demo.runs.push({ created_at: new Date().toISOString(), ...run }); if (batch) Q.demo.bat[run.id] = batch; Q.runs = Q.demo.runs; Q.batches = Q.demo.bat; render(); }
   return { load, render, demoAdd, _state: Q };
 }

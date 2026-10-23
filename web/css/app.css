@@ -625,3 +625,6 @@ html,body{overflow-x:hidden}
 .recon-list{list-style:none;margin:0;padding:4px 12px 10px;max-height:320px;overflow:auto;font-size:13px}
 .recon-it{padding:3px 0;display:flex;gap:6px;align-items:center;flex-wrap:wrap}.recon-it.r-missing{color:var(--bad)}
 .recon-t{flex:1 1 160px;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+
+/* 052 自动入队：手动改条数兜底折叠 */
+.ss-auto-fb{margin-top:8px}.ss-auto-fb>summary{cursor:pointer;color:var(--text-2)}
