@@ -1,5 +1,5 @@
 import { SUPABASE_URL, SUPABASE_ANON_KEY } from "./config.js";
-import { computeVelocity, computeManualVelocity, cmpVelocity, velocityBadge, cardVelocityBadge, scrapeChip, SCRAPE_BUSY, loadReviewDates, demoReviewDates, loadScrapeInfo } from "./velocity.js?v=6e320ea4";
+import { computeVelocity, computeManualVelocity, cmpVelocity, velocityBadge, cardVelocityBadge, scrapeChip, SCRAPE_BUSY, loadReviewDates, demoReviewDates, loadScrapeInfo, scrapeProgress, scrapeProgressBar } from "./velocity.js?v=7847193b";
 import { amzBlock, amzUrls, openAll, applyEdit, kwList, MAX_KW, DIR_SELECT_HTML } from "./amzsearch.js";
 import { createScreen, ANOMALY_PREFIX, anomalyReason } from "./screen.js?v=e8e4f1a9";
 import { createExWords } from "./exwords.js?v=c9174633";
@@ -128,6 +128,11 @@ async function boot() {
       const failN = Math.max(0, Number(QS.get("nfails") || 0));
       const failIds = failN ? [...S.lib.keys()].slice(-failN) : [1488800014, 1488800016];
       [...S.lib.keys()].forEach((id) => L.scr.set(id, failIds.includes(id) ? "failed" : id === 1488800015 && !failN ? "pending" : id === 1488800013 && !failN ? "fetching" : "ok")); // 演示：默认两个抓取失败；?nfails=8 → 8 个无法抓取
+      if (QS.has("revprog")) { // 演示数字：已完成 12 / 合计 30（排队 10 · 进行中 3 · 失败 5）；幽灵 id 只进进度条
+        const n = (st) => [...L.scr.values()].filter((v) => v === st).length;
+        const pad = (st, want, base) => { let i = 0; while (n(st) < want) L.scr.set(base + i++, st); };
+        pad("ok", 12, 9100000000); pad("pending", 10, 9100001000); pad("fetching", 3, 9100002000); pad("failed", 5, 9100003000);
+      }
       if (QS.get("ocr") === "review") L.ocr.set(1488800014, { id: "demo", status: "done", extracted_dates: DEMO_OCR(), total_reviews: 214 });
       L.man.set(1488800016, { listing_id: 1488800016, month_counts: [3, 2, 2, 1, 1, 0], latest_review_date: new Date(Date.now() - 9 * 864e5).toISOString().slice(0, 10) });
       if (QS.has("failed")) fx.jobs.push({ ...fx.jobs.find((j) => j.status === "failed"), id: "demo-failed-2", etsy_url: "https://www.etsy.com/listing/1700000009/y", etsy_listing_id: 1700000009, error: "亚马逊搜索超时（Keepamore 504）" });
@@ -687,7 +692,15 @@ async function toggleVelocity() { // 只在点击时取数 + 计算；再点恢�
 }
 const isFailed = (r) => L.scr.get(Number(r.etsy_listing_id)) === "failed";
 const failedItems = () => (DEMO ? [...S.lib.values()] : L.items).filter(isFailed);
-async function refreshScrape() { if (DEMO) return; try { const x = await loadScrapeInfo(sb, L.items.map((r) => Number(r.etsy_listing_id))); L.scr = x.st; L.man = x.man; L.ocr = x.ocr; } catch { /* 019 未应用时静默 */ } scheduleScrapePoll(); }
+async function refreshScrape() { if (DEMO) return; try {
+    const cardIds = L.items.map((r) => Number(r.etsy_listing_id)).filter(Boolean);
+    let ids = cardIds;
+    try { // 进度条要覆盖本人产品库全部 listing（不仅当前页）；失败则退回当前页
+      const { data: lids } = await sb.from("product_library").select("etsy_listing_id");
+      if (lids?.length) ids = [...new Set([...cardIds, ...lids.map((r) => Number(r.etsy_listing_id)).filter(Boolean)])];
+    } catch { /* 仍用当前页 */ }
+    const x = await loadScrapeInfo(sb, ids); L.scr = x.st; L.man = x.man; L.ocr = x.ocr;
+  } catch { /* 019 未应用时静默 */ } scheduleScrapePoll(); }
 // 049：有「评论抓取中」的商品时每 30 秒刷新一次状态；抓完的商品若正在按速度排序，补算它的速度
 let scrapeTimer = null;
 function scheduleScrapePoll() {
@@ -695,7 +708,9 @@ function scheduleScrapePoll() {
   scrapeTimer = setTimeout(async () => { if (!location.hash.startsWith("#/library")) return scheduleScrapePoll();
     const before = new Map(L.scr); await refreshScrape();
     const done = [...before].filter(([id, v]) => SCRAPE_BUSY.has(v) && !SCRAPE_BUSY.has(L.scr.get(id))).map(([id]) => id);
-    if (done.length) { await recomputeVelocity(done); renderLibrary(); } }, 30000);
+    if (done.length) await recomputeVelocity(done);
+    renderLibrary(); // 进度条：排队/进行中变化也要刷新（不只等抓完）
+  }, 30000);
 }
 async function recomputeVelocity(ids) { if (!L.vel || !L.velData || !ids.length) return; const now = Date.now();
   try { const dates = DEMO ? demoReviewDates(ids, now) : await loadReviewDates(sb, ids); ids.forEach((id) => L.velData.set(id, velFor(id, dates, now))); } catch { /* 下次点击排序再算 */ } }
@@ -996,8 +1011,9 @@ function renderLibrary() {
       : `<button class="btn btn-ghost btn-sm" data-lbulk="candidate">↩ 移回备选 (${n})</button>`}
       ${libExportMenu()}<button class="btn btn-ghost btn-sm" data-lbulk="remove">移出产品库</button><button class="btn btn-ghost btn-sm" data-lbulk="clear">取消选择</button>`
       : `<span class="hint">勾选卡片可批量${L.stage === "candidate" ? "移到进行中 / 不考虑" : L.stage === "all" ? "移动阶段 / 移出" : "移回备选"}</span>`}</div>` : "";
-  if (L.stage === "failed") bar = `<div class="lvel"><button class="btn btn-sm btn-ghost" data-lmanrev="1"${L.manRevBusy ? " disabled" : ""} title="把本页无法抓取的商品重新排队给评论抓取进程">${L.manRevBusy ? "排队中…" : "手动抓取评论速度"}</button><span class="hint">这些商品的 Etsy 评论抓取失败。点上方按钮可一键重新排队；或上传评论弹窗截图 / 手动填写。都没有的排在最后。</span></div>`;
-  else if (vis.length) bar += `<div class="lvel"><button class="btn btn-sm ${L.vel ? "btn-primary" : "btn-ghost"}" data-lvel="1"${L.velBusy ? " disabled" : ""}>${L.velBusy ? "计算中…" : L.vel ? "✓ 按评论速度排序（点击恢复原顺序）" : "按评论速度排序"}</button><button class="btn btn-sm btn-ghost" data-lmanrev="1"${L.manRevBusy ? " disabled" : ""} title="把缺评论数据的商品（抓取失败 / 尚未抓取）重新排队；已成功的不重抓；有勾选则只排所选">${L.manRevBusy ? "排队中…" : "手动抓取评论速度"}</button>${L.vel ? '<span class="hint">连续月数 → 6 月新增；悬停徽标看明细；仅用于同类产品对比</span>' : ""}<span class="spacer"></span>${nf ? `<button class="scr-warn" data-lstage="failed" title="查看并手动填写">⚠ 无法抓取 <b>${nf}</b></button>` : ""}</div>`;
+  const revProg = scrapeProgressBar(scrapeProgress(L.scr));
+  if (L.stage === "failed") bar = `<div class="lvel"><button class="btn btn-sm btn-ghost" data-lmanrev="1"${L.manRevBusy ? " disabled" : ""} title="把本页无法抓取的商品重新排队给评论抓取进程">${L.manRevBusy ? "排队中…" : "手动抓取评论速度"}</button><span class="hint">这些商品的 Etsy 评论抓取失败。点上方按钮可一键重新排队；或上传评论弹窗截图 / 手动填写。都没有的排在最后。</span></div>${revProg}`;
+  else if (vis.length) bar += `<div class="lvel"><button class="btn btn-sm ${L.vel ? "btn-primary" : "btn-ghost"}" data-lvel="1"${L.velBusy ? " disabled" : ""}>${L.velBusy ? "计算中…" : L.vel ? "✓ 按评论速度排序（点击恢复原顺序）" : "按评论速度排序"}</button><button class="btn btn-sm btn-ghost" data-lmanrev="1"${L.manRevBusy ? " disabled" : ""} title="把缺评论数据的商品（抓取失败 / 尚未抓取）重新排队；已成功的不重抓；有勾选则只排所选">${L.manRevBusy ? "排队中…" : "手动抓取评论速度"}</button>${L.vel ? '<span class="hint">连续月数 → 6 月新增；悬停徽标看明细；仅用于同类产品对比</span>' : ""}<span class="spacer"></span>${nf ? `<button class="scr-warn" data-lstage="failed" title="查看并手动填写">⚠ 无法抓取 <b>${nf}</b></button>` : ""}</div>${revProg}`;
   $("libBar").innerHTML = bar;
   const libMore = !DEMO && L.total > vis.length ? `<button class="btn btn-ghost load-more lib-more" data-lmore="1">加载更多（已显示 ${vis.length} / ${L.total}）</button>` : "";
   if (!ready) $("libBar").innerHTML = "";
