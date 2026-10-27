@@ -635,3 +635,15 @@ html,body{overflow-x:hidden}
 
 /* 052 自动入队：手动改条数兜底折叠 */
 .ss-auto-fb{margin-top:8px}.ss-auto-fb>summary{cursor:pointer;color:var(--text-2)}
+/* 顶栏左上角「切换」下拉：关键词工作台 / VOC（新标签页） */
+.sitesw{position:relative;display:inline-flex;margin-left:var(--s2);font-size:13px;font-weight:500}
+.sitesw-btn{display:inline-flex;align-items:center;gap:3px;height:26px;padding:0 8px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--surface);color:var(--text-2);font:inherit;font-size:13px;cursor:pointer;white-space:nowrap}
+.sitesw-btn:hover,.sitesw.open .sitesw-btn{border-color:var(--primary);color:var(--text)}
+.sitesw-btn:focus-visible{outline:2px solid var(--primary);outline-offset:1px}
+.sitesw-car{font-size:10px;transition:transform .15s}.sitesw.open .sitesw-car{transform:rotate(180deg)}
+.sitesw-pop{position:absolute;top:calc(100% + 6px);left:0;z-index:40;min-width:168px;padding:6px;border:1px solid var(--border);border-radius:var(--r);background:var(--surface);box-shadow:0 8px 24px rgba(0,0,0,.18);display:flex;flex-direction:column;gap:2px}
+.sitesw-i{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:8px 10px;border-radius:6px;color:var(--text);font-size:13px;font-weight:500;white-space:nowrap}
+.sitesw-i span{color:var(--text-3);font-size:12px}
+.sitesw-i:hover,.sitesw-i:focus-visible{background:var(--primary-soft);text-decoration:none;outline:none}
+@media (max-width:480px){.sitesw{margin-left:6px}.sitesw-btn{padding:0 6px}}
+@media (prefers-reduced-motion:reduce){.sitesw-car{transition:none}}
