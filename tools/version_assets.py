@@ -15,8 +15,8 @@ for mod in ("screen", "selscreen", "exwords", "reconcile", "velocity"):   # app.
     h = hashlib.sha1((web / "js" / f"{mod}.js").read_bytes()).hexdigest()[:8]
     src = re.sub(rf'"\./{mod}\.js(\?v=[0-9a-f]+)?"', f'"./{mod}.js?v={h}"', src)
 app.write_text(src)
-for rel in ("css/app.css", "js/app.js"):
+for rel in ("css/app.css", "js/app.js", "js/siteswitch.js"):
     h = hashlib.sha1((web / rel).read_bytes()).hexdigest()[:8]
     html = re.sub(re.escape(rel) + r'(\?v=[0-9a-f]+)?"', f'{rel}?v={h}"', html)
 (web / "index.html").write_text(html)
-print("versioned", re.findall(r'(?:css/app\.css|js/app\.js)\?v=[0-9a-f]+', html))
+print("versioned", re.findall(r'(?:css/app\.css|js/app\.js|js/siteswitch\.js)\?v=[0-9a-f]+', html))
