@@ -647,3 +647,12 @@ html,body{overflow-x:hidden}
 .sitesw-i:hover,.sitesw-i:focus-visible{background:var(--primary-soft);text-decoration:none;outline:none}
 @media (max-width:480px){.sitesw{margin-left:6px}.sitesw-btn{padding:0 6px}}
 @media (prefers-reduced-motion:reduce){.sitesw-car{transition:none}}
+/* 056：产品不可售 / 手动录入 */
+.pb-scr.bad.unav{cursor:default}.pb-scr.bad.unav:hover{background:#8b2b2b}
+.pb-rechk,.pb-ment{border:0;cursor:pointer;font:inherit}.pb-rechk{background:rgba(127,127,127,.25);color:inherit}.pb-ment{background:#5b3fa0;color:#fff}.pb-ment:hover{background:#6e4fc0}
+.mand-b{display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin-top:6px}.mand-u{margin-top:6px;white-space:normal;overflow-wrap:anywhere}
+.mdlg-h{font-size:13px;line-height:1.55;margin:0 0 10px}.mdlg-g{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+.mdlg-g label,.mdlg-d{display:flex;flex-direction:column;gap:2px;font-size:12px}.mdlg-g small,.mdlg-d small{opacity:.65;font-size:11px}.mdlg-g input{width:100%}
+.mdlg-d{margin-top:10px;max-width:220px}.mdlg-p{margin-top:10px;min-height:22px;font-size:12px;display:flex;align-items:center;gap:4px;flex-wrap:wrap}
+.modal-card:has(.mdlg){width:min(520px,100%)}
+@media (max-width:520px){.mdlg-g{grid-template-columns:repeat(2,1fr)}}
