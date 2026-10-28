@@ -7,11 +7,13 @@
   3 商品页 →「View all reviews for this item」（只接受弹窗标题 Reviews for this item，否则 failed「仅店铺评论」）→ Most recent → 每页 8 条，
     遇到早于 REVIEW_DAYS（200）天的评论 / REVIEW_MAX_PAGES（20）页 / 最后一页即停；每条评论只取评论人旁的日期
   4 节奏：商品之间 30–60s，翻页 3–6s；一个会话最多 REVIEW_SESSION_PAGES（30）页，然后冷却 20–30 分钟（冷却中 heartbeat.info 写 cool_until / cool_remaining_s，产品库进度条提示）
+  4b 056 产品不可售：HTTP 404/410，或（仅在找不到商品评论按钮的失败路径上）页面标题/正文为 "This item is unavailable" /
+     "Sorry, this item is sold out" / "This shop is taking a short break" → finish(…, 'unavailable', 原因)，不再自动重试（正常抓取路径不多做任何检查）
   5 被拦截（403/验证）→ 该商品 failed「Etsy 反爬拦截」，整个 worker 暂停 30–60 分钟；本轮剩余的放回 pending
   6 评论抓取优先：默认不因 EHunt 获取链接/计数/预筛选忙而让路（REVIEW_YIELD_TO_EHUNT=1 才恢复旧让路）；与选品并行时选品 worker nice 更高（更低 OS 优先级）
   7 每日上限 REVIEW_DAILY_CAP（60）个
   显示不可用 → 不认领、暂停 10 分钟；抓取中途丢失 → 该商品 failed + 暂停（不崩溃）。
-不重复抓取：只处理 pending（新加入/回填/用户点重试）及卡死 >15 分钟的 fetching；ok/failed 不会自动再抓。
+不重复抓取：只处理 pending（新加入/回填/用户点重试）及卡死 >15 分钟的 fetching；ok/failed/unavailable 不会自动再抓。
 用法：python -m selection.review_scraper            # 常驻
       python -m selection.review_scraper --once     # 处理一轮
       python -m selection.review_scraper --dry-run 1346032769 1779663270 --json out.json   # 只抓取并打印，不读写数据库
@@ -47,13 +49,31 @@ class FetchError(RuntimeError):
     """抓取失败（写 failed + error，等用户重试）。"""
 
 
+class Unavailable(FetchError):
+    """056：Etsy 商品不可售（下架 / 售罄 / 店铺暂停）→ 写 unavailable + 原因，不再自动重试（用户仍可在卡片上显式重试）。"""
+
+
+# 只在失败路径上用（商品页没有「View all reviews for this item」/ 404 / 410）；按优先级匹配标题 + 正文
+_UNAVAIL = (("this item is unavailable", "商品已下架（This item is unavailable）"),
+            ("this item is no longer available", "商品已下架（no longer available）"),
+            ("sorry, this item is sold out", "商品已售罄（Sorry, this item is sold out）"),
+            ("this shop is taking a short break", "店铺暂停营业（This shop is taking a short break）"))
+def unavailable_reason(title="", text=""):
+    """页面标题/正文 → 不可售原因（中文）或 None。"""
+    t = f"{title or ''}\n{text or ''}".lower()
+    for needle, why in _UNAVAIL:
+        if needle in t: return why
+    return None
+
+
 def _get_json(url, headers, timeout=30):
     req = urllib.request.Request(url, headers=headers)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read() or b"null")
     except urllib.error.HTTPError as e:
-        raise FetchError({404: "Etsy 商品不存在或已下架 (404)", 429: "Etsy API 限流 (429)", 403: "Etsy API 拒绝 (403，检查 key)"}.get(e.code, f"Etsy API HTTP {e.code}")) from None
+        if e.code in (404, 410): raise Unavailable(f"商品已下架（Etsy API HTTP {e.code}）") from None
+        raise FetchError({429: "Etsy API 限流 (429)", 403: "Etsy API 拒绝 (403，检查 key)"}.get(e.code, f"Etsy API HTTP {e.code}")) from None
     except (urllib.error.URLError, TimeoutError, OSError) as e:
         raise FetchError(f"网络错误：{type(e).__name__}") from None
 
@@ -119,14 +139,16 @@ def read_listing(nav, lid, today=None, days=None, max_pages=None, log_pages=None
     today = today or dt.date.today(); cutoff = today - dt.timedelta(days=days or DAYS)
     st = nav.open_listing(lid)
     if is_blocked(st, nav.html()): raise Blocked(f"Etsy 反爬拦截（HTTP {st}）")
-    if st == 404: raise FetchError("Etsy 商品不存在或已下架 (404)")
+    if st in (404, 410): raise Unavailable(f"商品已下架（HTTP {st}）")
     if st != 200: raise FetchError(f"Etsy 商品页 HTTP {st}")
     info = {"header_count": nav.shop_count(), "pages": 0}   # 商品页评分旁「(N)」（打开的是店铺评论弹窗）
     hdr = nav.open_item_reviews()
-    if hdr is None:
+    if hdr is None:   # 失败路径才判断「不可售」（正常路径不多读页面）
+        why = unavailable_reason(getattr(nav, "title", lambda: "")() or "", getattr(nav, "body_text", lambda: "")() or "")
+        if why: raise Unavailable(why)
         if nav.has_shop_reviews(): raise FetchError("仅店铺评论（商品页没有「View all reviews for this item」）")
         if "taking a short break" in (nav.html() or "").lower() or "taking a short break" in (getattr(nav, "body_text", lambda: "")() or "").lower():
-            raise FetchError("店铺暂停营业（页面不显示评论）")
+            raise Unavailable("店铺暂停营业（页面不显示评论）")
         raise FetchError("商品暂无评论区")
     kind, n = heading_kind(hdr)
     if kind != "item": raise FetchError(f"仅店铺评论（弹窗标题：{(hdr or '')[:40]}）")
@@ -161,6 +183,9 @@ class PlaywrightNav:
         r = self.pg.goto(f"https://www.etsy.com/listing/{int(lid)}", wait_until="domcontentloaded", timeout=60000, referer="https://www.etsy.com/")
         self.views += 1; self._pause(5, 8); return r.status if r else None
     def html(self): return self.pg.content()[:20000]
+    def title(self):
+        try: return self.pg.title()
+        except Exception: return ""  # noqa: BLE001
     def body_text(self):
         try: return self.pg.inner_text("body", timeout=5000)[:3000]
         except Exception: return ""  # noqa: BLE001
@@ -320,6 +345,13 @@ class Store:
 
     def claim(self, n): return [int(x) for x in (self._req("POST", "/rest/v1/rpc/claim_review_scrapes", {"p_limit": n}) or [])]
     def finish(self, lid, status, dates=None, source="etsy_page", error=None):
+        if status == "unavailable":   # 056 未上线时 RPC 会拒绝 unavailable → 退回 failed（不让该条卡在 fetching）
+            try: return self._finish(lid, status, dates, source, error)
+            except urllib.error.HTTPError as e:
+                if e.code != 400: raise
+                return self._finish(lid, "failed", None, source, error)
+        return self._finish(lid, status, dates, source, error)
+    def _finish(self, lid, status, dates=None, source="etsy_page", error=None):
         self._req("POST", "/rest/v1/rpc/finish_review_scrape", {"p_listing": int(lid), "p_status": status, "p_dates": [d.isoformat() for d in (dates or [])],
                                                                  "p_source": source, "p_error": error}, "return=minimal")
     def requeue(self, lid):  # 认领后没来得及抓（暂停/冷却）→ 放回 pending，attempts 不算
@@ -387,6 +419,9 @@ def run_once(store, fetch, batch=BATCH, gap=None):
             dates = fetch(lid)
             store.finish(lid, "ok", dates, fetch.source)
             log.info("reviews %s → ok (%d dates) %s", lid, len(dates), getattr(fetch, "last_info", ""))
+        except Unavailable as e:   # 056：产品不可售 → unavailable，不再自动重试
+            store.finish(lid, "unavailable", None, fetch.source, str(e))
+            log.warning("reviews %s → unavailable: %s", lid, e)
         except Exception as e:  # noqa: BLE001  任何异常都写 failed（不留在 fetching）
             msg = str(e) if isinstance(e, FetchError) else f"{type(e).__name__}: {str(e)[:200]}"
             store.finish(lid, "failed", None, fetch.source, msg)
@@ -419,6 +454,9 @@ def main(argv=None):
                     res[lid] = {"status": "ok", "dates": [d.isoformat() for d in ds], **info, "page_dates": [[d.isoformat() for d in p] for p in pages], "secs": round(time.time() - t0, 1)}
                     print(f"{lid}: ok via {fetch.source}, {len(ds)} dates (近 {DAYS} 天)" + (f", newest {ds[0]}, oldest {ds[-1]}" if ds else "") + f" {info} {res[lid]['secs']}s")
                 except FetchError as e:
+                    if isinstance(e, Unavailable):
+                        res[lid] = {"status": "unavailable", "error": str(e), "secs": round(time.time() - t0, 1)}
+                        print(f"{lid}: unavailable via {fetch.source}: {e}"); continue
                     res[lid] = {"status": "failed", "error": str(e), "secs": round(time.time() - t0, 1)}
                     print(f"{lid}: failed via {fetch.source}: {e}")
             if a.json: Path(a.json).write_text(json.dumps(res, ensure_ascii=False, indent=1))

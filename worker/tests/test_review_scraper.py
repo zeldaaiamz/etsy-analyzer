@@ -298,3 +298,85 @@ def test_empty_first_page_is_failure_not_zero_and_shop_break():
 def test_unsorted_page_means_sort_failed():
     with pytest.raises(R.FetchError, match="排序未生效"): R.read_listing(FakeNav([[D(1), D(300), D(5)]]), 1, today=TODAY)
     _, info = R.read_listing(FakeNav([[D(1), D(1), D(5)]]), 1, today=TODAY); assert info["first_page"][0] == D(1).isoformat()
+
+
+# ---------- 056：产品不可售 ----------
+class UnavailNav(FakeNav):
+    def __init__(self, title="", body="", **kw):
+        super().__init__([[]], view_all=False, shop=False, **kw); self._title, self._body = title, body
+    def title(self): return self._title
+    def body_text(self): return self._body
+
+
+def test_unavailable_reason_real_pages():
+    # 2026-10-28 真实页面（headed Chrome）：标题 / 正文片段
+    assert "下架" in R.unavailable_reason("This item is unavailable - Etsy", "Sorry, this item is unavailable. Similar items on Etsy")   # 1332654646
+    assert "售罄" in R.unavailable_reason("Do Not Disturb Kindle Grip - Etsy", "Gift Cards Sorry, this item is sold out bookshopbykendra")  # 4363080306
+    assert "暂停营业" in R.unavailable_reason("Surprise Pack - Etsy", "Gift Cards This shop is taking a short break. BloomwolfStudio")      # 500326663
+    assert R.unavailable_reason("Kindle Grip - Etsy", "Add to cart  Reviews for this item (80)") is None
+    assert R.unavailable_reason(None, None) is None
+
+
+def test_read_listing_unavailable_paths():
+    with pytest.raises(R.Unavailable, match="410"): R.read_listing(FakeNav([[]], status=410), 1, today=TODAY)          # 1439586162
+    with pytest.raises(R.Unavailable, match="404"): R.read_listing(FakeNav([[]], status=404), 1, today=TODAY)
+    with pytest.raises(R.Unavailable, match="下架"): R.read_listing(UnavailNav("This item is unavailable - Etsy"), 1, today=TODAY)
+    with pytest.raises(R.Unavailable, match="售罄"): R.read_listing(UnavailNav("X - Etsy", "Sorry, this item is sold out"), 1, today=TODAY)
+    with pytest.raises(R.Unavailable, match="暂停营业"): R.read_listing(UnavailNav("X - Etsy", "This shop is taking a short break."), 1, today=TODAY)
+    # 在售但没评论按钮 → 仍是普通 failed（可重试 / 手动录入）
+    with pytest.raises(R.FetchError, match="暂无评论区") as e: R.read_listing(UnavailNav("X - Etsy", "Add to cart"), 1, today=TODAY)
+    assert not isinstance(e.value, R.Unavailable)
+    with pytest.raises(R.Blocked): R.read_listing(FakeNav([[]], status=403), 1, today=TODAY)   # 拦截优先，不误判为不可售
+
+
+def test_normal_path_never_reads_title_or_body():
+    class Strict(FakeNav):
+        def title(self): raise AssertionError("正常路径不应读标题")
+        def body_text(self): raise AssertionError("正常路径不应读正文")
+    out, _ = R.read_listing(Strict([[D(1), D(2)]]), 1, today=TODAY); assert out == [D(1), D(2)]
+
+
+def test_run_once_writes_unavailable_and_store_fallback(monkeypatch):
+    s = FakeStore([1, 2])
+    def fetch(lid):
+        if lid == 1: raise R.Unavailable("商品已下架（HTTP 410）")
+        return [TODAY]
+    fetch.source = "etsy_page"; monkeypatch.setattr(R, "_sleep", lambda *_: None)
+    assert R.run_once(s, fetch, batch=2, gap=0) == 2
+    assert s.done[1] == ("unavailable", [], "etsy_page", "商品已下架（HTTP 410）") and s.done[2][0] == "ok"
+    # 056 未上线：RPC 400 → 退回 failed
+    import urllib.error
+    st = R.Store("http://x", "k"); calls = []
+    def req(m, path, body=None, prefer=None):
+        calls.append(body["p_status"])
+        if body["p_status"] == "unavailable": raise urllib.error.HTTPError(path, 400, "bad", {}, None)
+    monkeypatch.setattr(st, "_req", req)
+    st.finish(9, "unavailable", None, "etsy_page", "商品已下架（HTTP 410）"); assert calls == ["unavailable", "failed"]
+
+
+def test_api_fetcher_404_410_unavailable():
+    import io, urllib.error
+    def boom(code):
+        def f(req, timeout=30): raise urllib.error.HTTPError("u", code, "x", {}, io.BytesIO(b""))
+        return f
+    for code in (404, 410):
+        orig = R.urllib.request.urlopen; R.urllib.request.urlopen = boom(code)
+        try:
+            with pytest.raises(R.Unavailable): R._get_json("http://x", {})
+        finally: R.urllib.request.urlopen = orig
+
+
+SQL056 = (ROOT / "supabase/migrations/056_reviews_unavailable.sql").read_text()
+def test_migration_056_static():
+    body = "\n".join(l for l in SQL056.splitlines() if not l.strip().startswith("--"))
+    assert "'unavailable'" in body and "skipped_unavailable" in body and "skipped_manual" in body
+    assert "status = 'failed'" in body and "除了获取失败，不重复获取" in SQL056
+    assert "sel_keyword_log" not in body and "claim_review_scrapes" not in body      # claim 不改：unavailable 永不自动领取
+    assert not any(w in body.lower() for w in ("drop table", "truncate", "delete from public.listing_scrape_status"))
+
+
+@pytest.mark.skipif(not glob.glob("/usr/lib/postgresql/*/bin/initdb") or not shutil.which("psql"), reason="no local postgres")
+def test_migration_056_local_postgres():
+    out = subprocess.run(["bash", str(ROOT / "supabase/tests/run_056_local.sh")], capture_output=True, text=True, timeout=120, env={"PATH": "/usr/bin:/bin", "PORT": "55456"})
+    assert out.returncode == 0, out.stdout[-2000:] + out.stderr[-2000:]
+    assert "ALL 056 TESTS PASSED" in out.stdout
