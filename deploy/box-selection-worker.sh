@@ -41,6 +41,8 @@ case "${1:-}" in
          done ;;
   status) [ -f "$PID" ] && kill -0 "$(cat "$PID")" 2>/dev/null && echo "running ($(cat "$PID"))" || echo "not running"; tail -n 5 "$LOG" 2>/dev/null || true ;;
   reviews-start) load_env; RP="$DATA/reviews.pid"; [ -f "$RP" ] && kill -0 "$(cat "$RP")" 2>/dev/null && { echo "reviews already running ($(cat "$RP"))"; exit 0; }
+         # 单实例锁：先拿 flock 再启动，锁 fd 由守护循环/python 继承持有 → 并发的第二次 start（ensure-worker.sh 与 watch 竞态）拿不到锁直接退出，不会出现两个 worker 抢同一个浏览器 profile
+         exec 8>"$DATA/reviews.lock"; flock -n 8 || { echo "reviews already running (lock $DATA/reviews.lock held)"; exit 0; }
          setsid nohup bash -c 'while true; do python3 -m selection.review_scraper; echo "$(date "+%F %T") reviews worker exited $?; restart in 30s"; sleep 30; done' >>"$DATA/logs/reviews.log" 2>&1 &
          echo $! >"$RP"; echo "reviews started $(cat "$RP"), log $DATA/logs/reviews.log" ;;
   # setsid → pid = 进程组，reviews-stop 连同 python/浏览器一起停
