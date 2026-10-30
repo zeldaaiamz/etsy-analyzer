@@ -35,6 +35,7 @@ case "${1:-}" in
           rm -f "$PID"; echo stopped
         else echo "not running"; fi ;;
   ensure) # box 休眠/重启后守护进程会消失（2026-10-22 16:34 重启后 worker.pid 指向已不存在的进程）：没在运行才启动，已在运行什么都不做（不重启、不打断正在跑的批次）
+         [ -f "$ROOT/deploy/.selection-disabled" ] && exit 0   # 2026-10-30：watch 的 ensure 之前不看开关，stop 后 5 分钟内又被拉起
          if ! flock -n "$DATA/worker.lock" true; then exit 0; fi   # 锁被持有 = 有 supervisor 在跑
          if [ -f "$PID" ] && kill -0 "$(cat "$PID")" 2>/dev/null; then exit 0; fi
          echo "$(date '+%F %T') ENSURE worker not running (stale pid $(cat "$PID" 2>/dev/null || echo -)); starting" >>"$LOG"; exec "$SELF" start ;;
