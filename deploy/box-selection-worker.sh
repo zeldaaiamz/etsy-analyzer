@@ -14,8 +14,13 @@ case "${1:-}" in
   login) export DISPLAY="${DISPLAY:-:1}"; exec python3 -m selection.ehunt_worker --login ;;
   start) load_env; [ -f "$PID" ] && kill -0 "$(cat "$PID")" 2>/dev/null && { echo "already running ($(cat "$PID"))"; exit 0; }
          # 守护循环：worker 任何原因退出（含 Playwright 自愈退出码 75、崩溃）都自动重启；连续快速退出时退避（5s→最多 300s）
+         # 单实例锁（同 reviews-start）：先拿 $DATA/worker.lock 再启动，锁 fd 7 由守护循环继承持有 → 第二次 start 拿不到锁直接退出，不会两个 supervisor 抢同一个 ehunt-profile
+         exec 7>"$DATA/worker.lock"; flock -n 7 || { echo "already running (lock $DATA/worker.lock held)"; exit 0; }
          nohup "$SELF" _supervise >>"$LOG" 2>&1 & echo $! >"$PID"; echo "started $(cat "$PID") (supervised), log $LOG" ;;
   _supervise)
+         # 兜底：直接调用 _supervise（不经 start）也必须拿到锁；经 start 时 fd 7 已继承（同一打开文件，flock 直接成功）
+         { true >&7; } 2>/dev/null || exec 7>"$DATA/worker.lock"
+         flock -n 7 || { echo "$(date '+%F %T') SUPERVISOR lock $DATA/worker.lock held by another supervisor; exiting"; exit 0; }
          child=""; trap '[ -n "$child" ] && kill -TERM "$child" 2>/dev/null; wait "$child" 2>/dev/null; exit 0' TERM INT
          delay=5
          while true; do
@@ -30,6 +35,7 @@ case "${1:-}" in
           rm -f "$PID"; echo stopped
         else echo "not running"; fi ;;
   ensure) # box 休眠/重启后守护进程会消失（2026-10-22 16:34 重启后 worker.pid 指向已不存在的进程）：没在运行才启动，已在运行什么都不做（不重启、不打断正在跑的批次）
+         if ! flock -n "$DATA/worker.lock" true; then exit 0; fi   # 锁被持有 = 有 supervisor 在跑
          if [ -f "$PID" ] && kill -0 "$(cat "$PID")" 2>/dev/null; then exit 0; fi
          echo "$(date '+%F %T') ENSURE worker not running (stale pid $(cat "$PID" 2>/dev/null || echo -)); starting" >>"$LOG"; exec "$SELF" start ;;
   watch) # 周期自检（box 无 cron/systemd）：每 WATCH_SECONDS（默认 300）秒对选品 worker 与评论 worker 各执行一次幂等 ensure；flock 保证只有一个 watch
@@ -39,7 +45,8 @@ case "${1:-}" in
            [ ! -f "$ROOT/deploy/.reviews-disabled" ] && { "$SELF" reviews-start >/dev/null 2>&1 || true; }
            sleep "${WATCH_SECONDS:-300}"
          done ;;
-  status) [ -f "$PID" ] && kill -0 "$(cat "$PID")" 2>/dev/null && echo "running ($(cat "$PID"))" || echo "not running"; tail -n 5 "$LOG" 2>/dev/null || true ;;
+  status) if ! flock -n "$DATA/worker.lock" true; then echo "running ($(cat "$PID" 2>/dev/null || echo ?), lock held)"
+          elif [ -f "$PID" ] && kill -0 "$(cat "$PID")" 2>/dev/null; then echo "running ($(cat "$PID"), no lock)"; else echo "not running"; fi; tail -n 5 "$LOG" 2>/dev/null || true ;;
   reviews-start) load_env; RP="$DATA/reviews.pid"; [ -f "$RP" ] && kill -0 "$(cat "$RP")" 2>/dev/null && { echo "reviews already running ($(cat "$RP"))"; exit 0; }
          # 单实例锁：先拿 flock 再启动，锁 fd 由守护循环/python 继承持有 → 并发的第二次 start（ensure-worker.sh 与 watch 竞态）拿不到锁直接退出，不会出现两个 worker 抢同一个浏览器 profile
          exec 8>"$DATA/reviews.lock"; flock -n 8 || { echo "reviews already running (lock $DATA/reviews.lock held)"; exit 0; }
