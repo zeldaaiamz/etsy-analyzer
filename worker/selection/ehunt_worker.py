@@ -443,17 +443,77 @@ def _click(pg, U, target, timeout=10000):
 
 BROWSER_CHANNEL = os.environ.get("EHUNT_BROWSER_CHANNEL", "")   # 空 = Playwright 自带 chromium；"chrome" = 系统 Chrome
 SYSTEM_CHROME = "/opt/google/chrome/chrome"
-def launch_ctx(p, headless=True, viewport=None):
+def launch_ctx(p, headless=True, viewport=None, apply_state=True):
     """打开 EHunt 持久化上下文。2026-10-22 11:07 事故：box 上 playwright 被升级到 1.64.0 而 ~/.cache/ms-playwright 里没有对应浏览器
     （“Executable doesn't exist … chrome-headless-shell”）→ 所有查询/抓取打不开浏览器。自带浏览器缺失时自动改用系统 Chrome（同一 profile），
     不需要人工 playwright install；其它启动错误原样抛出。"""
     kw = dict(headless=headless, viewport=viewport or {"width": 1440, "height": 1000}, locale="en-US")
-    if BROWSER_CHANNEL: return p.chromium.launch_persistent_context(PROFILE, channel=BROWSER_CHANNEL, **kw)
-    try: return p.chromium.launch_persistent_context(PROFILE, **kw)
-    except Exception as e:
-        if "Executable doesn't exist" not in str(e) or not os.path.exists(SYSTEM_CHROME): raise
-        log.warning("bundled Playwright browser missing; falling back to system Chrome (channel=chrome)")
-        return p.chromium.launch_persistent_context(PROFILE, channel="chrome", **kw)
+    if BROWSER_CHANNEL: ctx = p.chromium.launch_persistent_context(PROFILE, channel=BROWSER_CHANNEL, **kw)
+    else:
+        try: ctx = p.chromium.launch_persistent_context(PROFILE, **kw)
+        except Exception as e:
+            if "Executable doesn't exist" not in str(e) or not os.path.exists(SYSTEM_CHROME): raise
+            log.warning("bundled Playwright browser missing; falling back to system Chrome (channel=chrome)")
+            ctx = p.chromium.launch_persistent_context(PROFILE, channel="chrome", **kw)
+    if apply_state: apply_login_state(ctx)
+    return ctx
+
+# 2026-10-30 事故：人工登录成功（顶栏显示邮箱），但关窗后 profile 里的 token 仍是旧的（EHunt 登录态以会话 cookie/存储写入，Chrome 关闭即丢弃）
+# → login() 在窗口打开期间检测到已登录就把 storage_state 存到 $DATA/ehunt-login-state.json（600，会话 cookie 改成 +7 天），
+#   launch_ctx 启动时若该文件存在就 add_cookies + 注入 localStorage，覆盖 profile 里的旧 cookie。
+DATA_DIR = os.environ.get("SEL_DATA_DIR", os.path.dirname(os.path.realpath(PROFILE)))
+LOGIN_STATE = os.environ.get("EHUNT_LOGIN_STATE", os.path.join(DATA_DIR, "ehunt-login-state.json"))
+COOKIE_LOG = os.environ.get("EHUNT_COOKIE_LOG", os.path.join(DATA_DIR, "logs", "ehunt-login-cookies.log"))
+SESSION_EXTEND = 7 * 86400
+_TOKENISH = ("token", "sess", "auth", "login", "user", "jwt", "sid")
+
+def _cookie_meta(c):
+    """只记 name/domain/expires/session，绝不记 value。"""
+    e = c.get("expires", -1); sess = e is None or e < 0
+    return (c.get("name"), c.get("domain"), "session" if sess else time.strftime("%F %T", time.localtime(e)), sess)
+
+def _persistable_state(state, now=None):
+    now = now or time.time(); out = {"cookies": [], "origins": []}
+    for c in state.get("cookies", []):
+        if "ehunt" not in (c.get("domain") or ""): continue
+        c = dict(c)
+        if c.get("expires") is None or c["expires"] < 0: c["expires"] = now + SESSION_EXTEND
+        out["cookies"].append(c)
+    out["origins"] = [o for o in state.get("origins", []) if "ehunt" in (o.get("origin") or "")]
+    return out
+
+def save_login_state(state, path=None):
+    path = path or LOGIN_STATE; os.makedirs(os.path.dirname(path), exist_ok=True)
+    data = _persistable_state(state); tmp = path + ".tmp"
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f: json.dump(data, f)
+    os.chmod(tmp, 0o600); os.replace(tmp, path); return data
+
+def load_login_state(path=None):
+    path = path or LOGIN_STATE
+    try:
+        with open(path) as f: st = json.load(f)
+    except (OSError, ValueError): return None
+    now = time.time(); st["cookies"] = [c for c in st.get("cookies", []) if c.get("expires", -1) < 0 or c["expires"] > now]
+    return st if st["cookies"] else None
+
+def apply_login_state(ctx, path=None):
+    st = load_login_state(path)
+    if not st: return False
+    try:
+        names = {(c["name"], c["domain"]) for c in st["cookies"]}
+        stale = [c for c in ctx.cookies() if (c["name"], c["domain"]) not in names and c["name"] in {n for n, _ in names}]
+        if stale:   # 同名但不同 domain 的旧 cookie（如 .ehunt.ai 的旧 token）会遮住新的 → 删掉
+            for c in stale:
+                try: ctx.clear_cookies(name=c["name"], domain=c["domain"])
+                except Exception: pass
+        ctx.add_cookies(st["cookies"])
+        for o in st.get("origins", []):
+            items = {i["name"]: i["value"] for i in o.get("localStorage", [])}
+            if items: ctx.add_init_script("(() => { try { if (location.origin === %s) { const d = %s; for (const k in d) localStorage.setItem(k, d[k]); } } catch (e) {} })();" % (json.dumps(o["origin"]), json.dumps(items)))
+        return True
+    except Exception:
+        log.warning("apply login state failed", exc_info=True); return False
 
 def _open_list(p, keyword, params):
     """打开 EHunt 产品研究页并通过界面设置 关键词 + 价格 + 总销量 + 排序，校验 Selected: 标签后返回。"""
@@ -1006,19 +1066,52 @@ def process_batch(store, run, batch, scraper, idle=None):
         store.patch_run(rid, status="batch_done", **upd)
     return "done"
 
-def login(url):
-    """一次性人工登录：有头浏览器开在 box 显示器上，等人登录完成后关闭窗口；不自动填写任何账号信息。"""
+def _logged_in(pg, U):
+    try: return "login" not in pg.url and "ehunt.ai" in pg.url and not _visible(pg.locator(U["header_login"])) and bool(pg.locator(".EtsyHunt-navbar, .navbar").count())
+    except Exception: return False
+
+def login(url, poll=3.0):
+    """一次性人工登录：有头浏览器开在 box 显示器上，等人登录完成后关闭窗口；不自动填写任何账号信息。
+    窗口打开期间每 ~3s 轮询 cookie：token 类 cookie 变化写 COOKIE_LOG（不含值）；检测到已登录（顶栏 Login 消失）就保存 storage_state 到 LOGIN_STATE。"""
     from playwright.sync_api import sync_playwright
-    os.environ.setdefault("DISPLAY", ":1"); os.makedirs(PROFILE, mode=0o700, exist_ok=True)
+    os.environ.setdefault("DISPLAY", ":1"); os.makedirs(PROFILE, mode=0o700, exist_ok=True); os.makedirs(os.path.dirname(COOKIE_LOG), exist_ok=True)
+    U = ui(); closed = []; seen = {}; saved_sig = None
+    def clog(msg):
+        with open(COOKIE_LOG, "a") as f: f.write(f"{time.strftime('%F %T')} {msg}\n")
     with sync_playwright() as p:
-        ctx = launch_ctx(p, headless=False, viewport={"width": 1440, "height": 900})
+        ctx = launch_ctx(p, headless=False, viewport={"width": 1440, "height": 900}, apply_state=False)
         pg = ctx.pages[0] if ctx.pages else ctx.new_page(); pg.goto(url)
-        print(f"已在 DISPLAY={os.environ['DISPLAY']} 打开 {url}；请人工登录 EHunt，完成后关闭浏览器窗口（登录状态保存在 {PROFILE}）", flush=True)
-        try: pg.wait_for_event("close", timeout=0)
-        except Exception: pass
+        ctx.on("close", lambda *_: closed.append(1)); pg.on("close", lambda *_: closed.append(1))
+        print(f"已在 DISPLAY={os.environ['DISPLAY']} 打开 {url}；请人工登录 EHunt，完成后关闭浏览器窗口（登录状态保存在 {PROFILE} + {LOGIN_STATE}）", flush=True)
+        clog(f"login window opened {url}")
+        while not closed:
+            try:
+                cs = [c for c in ctx.cookies() if "ehunt" in (c.get("domain") or "")]
+                cur = {}
+                for c in cs:
+                    m = _cookie_meta(c); key = (m[0], m[1])
+                    cur[key] = (m[2], hash(c.get("value")))
+                    if any(t in (m[0] or "").lower() for t in _TOKENISH) and seen.get(key) != cur[key]:
+                        clog(f"cookie {'new' if key not in seen else 'changed'} name={m[0]} domain={m[1]} expires={m[2]} session={m[3]}")
+                for key in set(seen) - set(cur):
+                    if any(t in (key[0] or "").lower() for t in _TOKENISH): clog(f"cookie removed name={key[0]} domain={key[1]}")
+                seen = cur
+                pages = [x for x in ctx.pages if not x.is_closed()]
+                if not pages: break
+                if any(_logged_in(x, U) for x in pages):
+                    sig = tuple(sorted(cur.items()))
+                    if sig != saved_sig:
+                        d = save_login_state(ctx.storage_state()); saved_sig = sig
+                        clog(f"logged-in detected; saved state cookies={len(d['cookies'])} origins={len(d['origins'])} -> {LOGIN_STATE}")
+                        print(f"检测到已登录，登录状态已保存到 {LOGIN_STATE}", flush=True)
+            except Exception as e:
+                if closed: break
+                clog(f"poll error {type(e).__name__}")
+            time.sleep(poll)
         try: ctx.close()
         except Exception: pass
-    print("登录窗口已关闭，profile 已保存", flush=True)
+    clog("login window closed")
+    print("登录窗口已关闭，profile 已保存" + ("（含 storage_state）" if saved_sig else "（未检测到已登录状态，未保存 storage_state）"), flush=True)
 
 WORDS_TTL = int(os.environ.get("SEL_WORDS_TTL", "300"))
 LOOKUPS_ON = os.environ.get("EHUNT_WEB_LOOKUPS", "1") != "0"   # 预筛选主图查询开关
