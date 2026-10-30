@@ -656,3 +656,13 @@ html,body{overflow-x:hidden}
 .mdlg-d{margin-top:10px;max-width:220px}.mdlg-p{margin-top:10px;min-height:22px;font-size:12px;display:flex;align-items:center;gap:4px;flex-wrap:wrap}
 .modal-card:has(.mdlg){width:min(520px,100%)}
 @media (max-width:520px){.mdlg-g{grid-template-columns:repeat(2,1fr)}}
+
+/* 058 ABA 导入选择器 */
+.aba-tools{display:flex;gap:8px;align-items:center;margin:6px 0 10px}
+.aba-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(150px,1fr));gap:8px}
+.aba-chip{position:relative;display:flex;flex-direction:column;align-items:flex-start;gap:2px;text-align:left;padding:10px 12px 10px 30px;border:1.5px solid var(--border);border-radius:var(--r-sm);background:var(--surface);cursor:pointer;color:var(--text-1);font:inherit}
+.aba-chip:hover{border-color:var(--primary)}
+.aba-chip.on{border-color:var(--primary);background:var(--primary);color:#fff;box-shadow:0 2px 8px rgba(0,0,0,.15)}
+.aba-ck{position:absolute;left:9px;top:10px;width:14px;height:14px;border:1.5px solid currentColor;border-radius:3px;font-size:11px;line-height:12px;text-align:center}
+.aba-en{font-size:14px;word-break:break-word}.aba-zh{font-size:12px;opacity:.85}.aba-zh.none{font-style:italic;opacity:.55}
+.aba-seen{font-size:11px;opacity:.75}
