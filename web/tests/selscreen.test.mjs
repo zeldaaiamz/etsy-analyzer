@@ -55,3 +55,12 @@ test("历史列表认识 paused（037 队列）", async () => {
   const { chipText } = await import("../js/selscreen.js");
   assert.equal(chipText({ status: "paused", passed_count: 12 }), "已暂停 · 已符合 12 条");
 });
+test("防卡：豆包超时重试 x/3 / 熔断 / 已等待提示", async () => {
+  const { visionHint } = await import("../js/selscreen.js");
+  assert.match(visionHint({ stage: "vision", vision_retry: 2, vision_retry_max: 3 }), /豆包超时重试 2\/3/);
+  assert.match(visionHint({ stage: "reading", vision_retry: 1 }), /豆包超时重试 1\/3/);
+  assert.match(visionHint({ stage: "vision", vision_retry: 3, vision_breaker_s: 42 }), /暂停 42 秒/);
+  assert.match(visionHint({ stage: "vision", vision_wait_s: 125 }), /已等待豆包 2 分钟/);
+  assert.equal(visionHint({ stage: "vision", vision_wait_s: 10 }), "");
+  assert.equal(visionHint({ stage: "vision" }), ""); assert.equal(visionHint(null), "");
+});

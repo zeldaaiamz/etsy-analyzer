@@ -714,24 +714,109 @@ VISION_CONC = max(1, int(os.environ.get("SEL_VISION_CONCURRENCY", "6")))      # 
 ARK_INFLIGHT = max(1, int(os.environ.get("SEL_ARK_MAX_INFLIGHT", "12")))     # 同时在途的 Ark 请求上限
 _ARK_SEM = threading.BoundedSemaphore(ARK_INFLIGHT); _TL = threading.local()
 _VOTE_POOL = ThreadPoolExecutor(max_workers=ARK_INFLIGHT, thread_name_prefix="ark")
+# ---- 防卡（2026-10-30 11:28 men gifts 事故：豆包经代理连上后不回包，urlopen(timeout=120) 是“单次读”超时 × 6 次重试 ≈ 13 分钟/票、
+# 且失败不写日志；队首一条卡住 → 后面全部落不定 → run.heartbeat_at 停 13 分钟、页面「剩 16 条等豆包判断」） ----
+# ① 每次请求硬总时限：连接 ARK_CONNECT_TIMEOUT，整个请求（连接+发送+等首包+读完）ARK_TOTAL_TIMEOUT，到点由定时器强制关 socket（阻塞的 recv 立刻返回）
+# ② 最多 ARK_ATTEMPTS 次，指数退避 + 随机抖动；③ 每次失败 WARNING；④ 熔断：连续 ARK_BREAK_AFTER 次失败 → ARK_BREAK_SECONDS 内不再发请求、直接判「待确认（视觉超时）」
+# 正常请求 2–15s，远低于这些上限：正常流程零额外等待（只多一个 threading.Timer）。
+import http.client, ssl
+ARK_CONNECT_TIMEOUT = float(os.environ.get("SEL_ARK_CONNECT_TIMEOUT", "10"))
+ARK_TOTAL_TIMEOUT = float(os.environ.get("SEL_ARK_TOTAL_TIMEOUT", "50"))
+ARK_ATTEMPTS = max(1, int(os.environ.get("SEL_ARK_ATTEMPTS", "3")))
+ARK_BACKOFF = float(os.environ.get("SEL_ARK_BACKOFF", "1.0")); ARK_BACKOFF_CAP = float(os.environ.get("SEL_ARK_BACKOFF_CAP", "8"))
+ARK_BREAK_AFTER = max(1, int(os.environ.get("SEL_ARK_BREAK_AFTER", "8"))); ARK_BREAK_SECONDS = float(os.environ.get("SEL_ARK_BREAK_SECONDS", "60"))
+# 单条（3 票）的总预算：超过 → 这一条直接标「待确认（视觉超时）」，不挡后面的条目落定
+ITEM_VISION_BUDGET = float(os.environ.get("SEL_ITEM_VISION_BUDGET", str(ARK_ATTEMPTS * (ARK_TOTAL_TIMEOUT + ARK_BACKOFF_CAP) + 15)))
+VISION_TIMEOUT_REASON = "视觉超时"
+class ArkTimeout(TimeoutError): pass
+class VisionTimeout(TimeoutError): pass
+_ark_sleep = time.sleep
+class _ArkState:
+    """跨线程：当前重试情况（网页「豆包超时重试 x/3」）+ 熔断。所有方法加锁、O(1)。"""
+    def __init__(self, clock=time.monotonic):
+        self.lock = threading.Lock(); self.clock = clock; self.reset()
+    def reset(self):
+        self.fails = 0; self.open_until = 0.0; self.retrying = {}; self.trips = 0
+    def is_open(self):
+        with self.lock: return self.clock() < self.open_until
+    def ok(self, key):
+        with self.lock: self.fails = 0; self.retrying.pop(key, None)
+    def fail(self, key, attempt):
+        with self.lock:
+            self.fails += 1; self.retrying[key] = attempt
+            if self.fails >= ARK_BREAK_AFTER and self.clock() >= self.open_until:
+                self.open_until = self.clock() + ARK_BREAK_SECONDS; self.trips += 1
+                log.warning("ark circuit OPEN: %d consecutive failures, pausing Ark calls %.0fs", self.fails, ARK_BREAK_SECONDS)
+    def done(self, key):
+        with self.lock: self.retrying.pop(key, None)
+    def snapshot(self):
+        with self.lock:
+            left = max(0.0, self.open_until - self.clock())
+            return {"vision_retry": max(self.retrying.values()) if self.retrying else 0, "vision_retry_max": ARK_ATTEMPTS,
+                    "vision_breaker_s": int(left + 0.999) if left else 0}
+ARK = _ArkState()
+
+def _ark_post(url, body, headers, connect_timeout=None, total_timeout=None):
+    """一次 HTTPS POST，带硬总时限。返回 (status, bytes)。超时抛 ArkTimeout。"""
+    ct = ARK_CONNECT_TIMEOUT if connect_timeout is None else connect_timeout; tt = ARK_TOTAL_TIMEOUT if total_timeout is None else total_timeout
+    u = urllib.parse.urlsplit(url); t_end = time.monotonic() + tt; fired = [False]
+    conn = (http.client.HTTPSConnection if u.scheme == "https" else http.client.HTTPConnection)(u.hostname, u.port, timeout=min(ct, tt))
+    def kill():
+        fired[0] = True
+        try:
+            if conn.sock: conn.sock.shutdown(_socket.SHUT_RDWR)
+        except Exception: pass
+        try: conn.close()
+        except Exception: pass
+    timer = threading.Timer(tt, kill); timer.daemon = True; timer.start()
+    try:
+        conn.connect()
+        conn.sock.settimeout(max(0.1, t_end - time.monotonic()))
+        conn.request("POST", (u.path or "/") + (("?" + u.query) if u.query else ""), body, headers)
+        resp = conn.getresponse(); data = resp.read()
+        if fired[0]: raise ArkTimeout(f"total timeout {tt:.0f}s")
+        return resp.status, data
+    except ArkTimeout: raise
+    except Exception as e:
+        if fired[0] or time.monotonic() >= t_end or isinstance(e, (TimeoutError, _socket.timeout)):
+            raise ArkTimeout(f"{'total' if fired[0] or time.monotonic() >= t_end else 'connect/read'} timeout ({type(e).__name__})") from e
+        raise
+    finally:
+        timer.cancel()
+        try: conn.close()
+        except Exception: pass
+
 def _ark_vision(title, img):
-    """与 classify.vision 相同的请求体；加在途上限 + 429/5xx/网络错误指数退避重试。最终失败 → 待确认（同原逻辑）。"""
+    """与 classify.vision 相同的请求体；在途上限 + 硬总时限 + 最多 ARK_ATTEMPTS 次（退避+抖动）+ 熔断。最终失败 → 待确认（同原逻辑；超时类标「视觉超时」）。"""
     import base64
     b = {'model': C.MODEL, 'messages': [{'role': 'user', 'content': [{'type': 'image_url', 'image_url': {'url': 'data:image/jpeg;base64,' + base64.b64encode(img).decode()}},
          {'type': 'text', 'text': C.PROMPT + title}]}], 'response_format': {'type': 'json_object'}, 'thinking': {'type': 'disabled'}, 'temperature': 0}
-    err = ""
-    for a in range(6):
-        try:
-            with _ARK_SEM:
-                r = json.load(urllib.request.urlopen(urllib.request.Request(C.URL, json.dumps(b).encode(), {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + C.KEY}), timeout=120))
-            t = r['choices'][0]['message']['content']; t = t[t.find('{'):t.rfind('}') + 1]
-            return json.loads(t), r.get('usage', {})
-        except urllib.error.HTTPError as e:
-            err = f"HTTP {e.code}"
-            if e.code != 429 and e.code < 500 and a >= 1: break      # 4xx（非 429）不无限重试
-        except Exception as e: err = str(e)[:200]
-        time.sleep(min(30, 2 ** a) + random.random())
-    return {'分类': '待确认', '原因': '视觉调用失败', '说明': err}, {}
+    body = json.dumps(b).encode(); key = object(); err = ""; timed_out = False
+    try:
+        for a in range(ARK_ATTEMPTS):
+            t0 = time.monotonic()
+            if ARK.is_open():
+                err = "熔断中（豆包连续失败）"; timed_out = True
+                log.warning("ark vision attempt %d/%d skipped: circuit open", a + 1, ARK_ATTEMPTS); ARK.fail(key, a + 1)
+            else:
+                try:
+                    with _ARK_SEM:
+                        st, data = _ark_post(C.URL, body, {'Content-Type': 'application/json', 'Authorization': 'Bearer ' + C.KEY})
+                    if st == 200:
+                        r = json.loads(data); t = r['choices'][0]['message']['content']; t = t[t.find('{'):t.rfind('}') + 1]
+                        out = json.loads(t), r.get('usage', {}); ARK.ok(key); return out
+                    err = f"HTTP {st}"; timed_out = False
+                    log.warning("ark vision attempt %d/%d failed: %s after %.1fs", a + 1, ARK_ATTEMPTS, err, time.monotonic() - t0); ARK.fail(key, a + 1)
+                    if st != 429 and st < 500: break      # 4xx（非 429）不重试
+                except ArkTimeout as e:
+                    err = f"超时：{e}"; timed_out = True
+                    log.warning("ark vision attempt %d/%d timed out after %.1fs: %s", a + 1, ARK_ATTEMPTS, time.monotonic() - t0, e); ARK.fail(key, a + 1)
+                except Exception as e:
+                    err = f"{type(e).__name__}: {str(e)[:160]}"; timed_out = isinstance(e, (TimeoutError, _socket.timeout))
+                    log.warning("ark vision attempt %d/%d failed after %.1fs: %s", a + 1, ARK_ATTEMPTS, time.monotonic() - t0, err); ARK.fail(key, a + 1)
+            if a < ARK_ATTEMPTS - 1: _ark_sleep(min(ARK_BACKOFF_CAP, ARK_BACKOFF * 2 ** a) + random.random() * ARK_BACKOFF)
+    finally: ARK.done(key)
+    return {'分类': '待确认', '原因': VISION_TIMEOUT_REASON if timed_out else '视觉调用失败', '说明': err}, {}
 def _vision_hook(title, img):  # classify_one 内部调用：优先返回预先并发拿到的投票结果（按顺序）
     pre = getattr(_TL, "pre", None)
     return pre.pop(0) if pre else _ark_vision(title, img)
@@ -744,7 +829,11 @@ def classify_parallel(o):
     runs = C.ARGS.runs
     try:
         u, img = _ORIG_UP(o['image_url'])
-        votes = [f.result() for f in [_VOTE_POOL.submit(_ark_vision, o['title'], img) for _ in range(runs)]]
+        fs = [_VOTE_POOL.submit(_ark_vision, o['title'], img) for _ in range(runs)]; end = time.monotonic() + ITEM_VISION_BUDGET
+        try: votes = [f.result(timeout=max(0.0, end - time.monotonic())) for f in fs]
+        except FutureTimeout:
+            for f in fs: f.cancel()
+            raise VisionTimeout(f"单条豆包判断超过 {ITEM_VISION_BUDGET:.0f} 秒")
         _TL.img, _TL.pre = (u, img), votes
         return C.classify_one(o, runs)
     finally: _TL.img = _TL.pre = None
@@ -771,6 +860,10 @@ def is_poisoned(e): return isinstance(e, PlaywrightPoisoned) or ASYNCIO_LOOP_MSG
 
 SEEN = {}  # run_id → 本进程已见过的 listing（含被排除的，只在内存）；跨批去重
 IDLE_LOOKUP_EVERY = float(os.environ.get("SEL_IDLE_LOOKUP_SECONDS", "10"))
+VISION_BEAT_EVERY = float(os.environ.get("SEL_VISION_BEAT_SECONDS", "30"))          # 等豆包期间 run 心跳间隔
+VISION_STAGE_WATCHDOG = float(os.environ.get("SEL_VISION_WATCHDOG_SECONDS", "600"))  # 「等豆包」阶段看门狗 10 分钟
+def _vision_timeout_row(o, why):
+    return {**o, "结果": "待确认", "原因": VISION_TIMEOUT_REASON, "备注": "待确认（视觉超时）", "说明": f"豆包未在时限内返回：{why}"[:200], "votes": ""}
 def process_batch(store, run, batch, scraper, idle=None):
     """抓取顺序进行；规则通过的条目丢进视觉线程池，不阻塞翻页。结果按抓取顺序（rank）在主线程依次落定：计数/进度/入库都只在主线程，天然线程安全。"""
     rid, bno = run["id"], batch["batch_no"]
@@ -809,26 +902,54 @@ def process_batch(store, run, batch, scraper, idle=None):
             o2, usage, n = classify_parallel(o)
             with clock: calls[0] += n
             return o2
-        except Exception as e: return {**o, "结果": "待确认", "备注": f"视觉失败：{str(e)[:80]}", "原因": "视觉调用失败"}   # 拿不准就保留
+        except VisionTimeout as e:
+            log.warning("vision item %s timed out → 待确认（视觉超时）: %s", o.get("listing_id"), e)
+            return _vision_timeout_row(o, str(e))
+        except Exception as e:
+            log.warning("vision item %s failed → 待确认: %s", o.get("listing_id"), str(e)[:120])
+            return {**o, "结果": "待确认", "备注": f"视觉失败：{str(e)[:80]}", "原因": "视觉调用失败"}   # 拿不准就保留
     base = cnt["scraped"]; prog = _PROG[0]; n_seen = 0
     def tick(force=False, **kw):
         if prog: prog.update(force=force, read=base + n_seen, judged=cnt["scraped"], vision_pending=sum(1 for _, k, _v in pend if k == "vision"),
-                             passed=cnt["passed"], excluded=cnt["excluded"], dup=cnt["dup"], **kw)
+                             passed=cnt["passed"], excluded=cnt["excluded"], dup=cnt["dup"], **{**ARK.snapshot(), **kw})
     pend = deque()   # 按抓取顺序：(row, kind, value|future)
+    wd = {"t0": None, "beat": 0.0}   # 「等豆包」阶段看门狗（只在 drain(block=True) 里计时）
+    def beat():
+        """等豆包期间：每 VISION_BEAT_EVERY 秒写一次 run.heartbeat_at + progress（含 vision_wait_s / 重试 x/3），网页不再误报 stale。"""
+        now = time.monotonic()
+        if now - wd["beat"] < VISION_BEAT_EVERY: return
+        wd["beat"] = now
+        try: store.patch_run(rid, heartbeat_at=NOW())
+        except Exception as e: log.warning("run heartbeat during vision wait failed: %s", _brief(e))
+        tick(force=True, vision_wait_s=int(now - wd["t0"]) if wd["t0"] else 0)
     def drain(block=False):
         while pend:
             row, kind, v = pend[0]
             if kind == "vision":
                 if not block and not v.done(): return
-                # 列表已读完、只剩等豆包（长批次可能几分钟）：浏览器已关闭，期间每 IDLE_LOOKUP_EVERY 秒穿插处理预筛选主图查询，不让查询干等到本批结束
-                while block and idle and not v.done():
+                if block and wd["t0"] is None: wd["t0"] = time.monotonic()
+                # 列表已读完、只剩等豆包：每 IDLE_LOOKUP_EVERY 秒醒一次 → 心跳/进度、穿插主图查询、看门狗（总等待超过 VISION_STAGE_WATCHDOG 秒 → 剩余全部判「待确认（视觉超时）」）
+                while not v.done():
+                    if wd["t0"] is not None and time.monotonic() - wd["t0"] > VISION_STAGE_WATCHDOG:
+                        n_left = sum(1 for _, k, f in pend if k == "vision" and not f.done())
+                        log.warning("run %s batch %s: vision watchdog fired after %.0fs, %d item(s) → 待确认（视觉超时）", rid, bno, time.monotonic() - wd["t0"], n_left)
+                        for i, (prow, k, f) in enumerate(pend):
+                            if k == "vision" and not f.done():
+                                f.cancel(); pend[i] = (prow, "timeout", None)
+                        break
                     try: v.result(timeout=IDLE_LOOKUP_EVERY)
                     except FutureTimeout:
-                        try: idle()
-                        except PlaywrightPoisoned: raise
-                        except Exception: log.warning("lookups while waiting for vision failed", exc_info=True)
+                        beat()
+                        if idle:
+                            try: idle()
+                            except PlaywrightPoisoned: raise
+                            except Exception: log.warning("lookups while waiting for vision failed", exc_info=True)
                     except BaseException: break
-                v = v.result()
+                row, kind, v = pend[0]
+                if kind == "vision":
+                    try: v = v.result(timeout=0)
+                    except Exception as e: v = _vision_timeout_row(dict(C.dedupe([row])[0]), f"{type(e).__name__}")
+            if kind == "timeout": kind, v = "vision", _vision_timeout_row(dict(C.dedupe([row])[0]), f"「等豆包」阶段超过 {VISION_STAGE_WATCHDOG:.0f} 秒")
             pend.popleft(); finalize(row, kind, v); tick()
     pool = ThreadPoolExecutor(max_workers=VISION_CONC, thread_name_prefix="vision")
     try:
@@ -858,7 +979,7 @@ def process_batch(store, run, batch, scraper, idle=None):
         except Exception: log.warning("flush after failure failed", exc_info=True)
         raise
     finally:
-        pool.shutdown(wait=True, cancel_futures=True)
+        pool.shutdown(wait=False, cancel_futures=True)   # 防卡：不等挂住的豆包线程（它们有硬总时限，自己会退出；不写库）
         close_scraper(scraper)   # 关键：生成器里的 with sync_playwright() 必须立即退出，否则事件循环残留（见 close_scraper）
     flush()
     # 本批完成：只在这里更新“还剩 N 条未读”
@@ -949,14 +1070,33 @@ def main(argv=None):
 HB_ID = os.environ.get("SEL_HEARTBEAT_ID", "box-selection")
 HB_EVERY = max(5, int(os.environ.get("SEL_HEARTBEAT_SECONDS", "30")))
 PHASE = ["idle"]
+# run 级看门狗（无新迁移，只用 PostgREST PATCH）：running/counting 且 heartbeat_at 超过 RUN_STALE_SECONDS（15 分钟）没更新、不是本进程正在跑的那个 →
+# 自动重新排队（running→queued / counting→count_queued，清 locked_by）；attempts ≥ RUN_STALE_MAX_ATTEMPTS 的不再自动排（避免毒任务死循环）。
+# 正常情况下 sel_claim_run 10 分钟回收的是“进程已死”；这里兜底“同一进程还活着但 run 卡住”或 attempts 用完的 run。
+RUN_STALE_SECONDS = float(os.environ.get("SEL_RUN_STALE_SECONDS", "900"))
+RUN_STALE_CHECK_EVERY = float(os.environ.get("SEL_RUN_STALE_CHECK_SECONDS", "60"))
+RUN_STALE_MAX_ATTEMPTS = int(os.environ.get("SEL_RUN_STALE_MAX_ATTEMPTS", "5"))
+def requeue_stale_runs(store, own_rid=None, now=None):
+    cutoff = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime((now or time.time()) - RUN_STALE_SECONDS)); n = 0
+    for st, to in (("running", "queued"), ("counting", "count_queued")):
+        q = f"/rest/v1/sel_runs?status=eq.{st}&heartbeat_at=lt.{cutoff}&attempts=lt.{RUN_STALE_MAX_ATTEMPTS}" + (f"&id=neq.{own_rid}" if own_rid else "")
+        rows = store._req("PATCH", q, {"status": to, "locked_by": None, "queue_at": NOW(), "error": None,
+                                       "progress": {"stage": "requeued", "why": f"进度超过 {int(RUN_STALE_SECONDS // 60)} 分钟没有更新，已自动重新排队", "at": NOW()}},
+                          "return=representation", retries=1, timeout=HB_TIMEOUT) or []
+        for r in rows: log.warning("run %s (%s) stale > %.0fs → auto requeued as %s", r.get("id"), r.get("keyword"), RUN_STALE_SECONDS, to); n += 1
+    return n
 def start_heartbeat(store, every=None):
     every = every or HB_EVERY; t0 = time.time()
     def loop():
-        warned = False
+        warned = False; last_chk = 0.0
         while True:
             try: store.heartbeat({"pid": os.getpid(), "phase": PHASE[0], "uptime_s": int(time.time() - t0), "lookups": LOOKUPS_ON}); warned = False
             except Exception as e:
                 if not warned: log.warning("heartbeat failed: %s", _brief(e) if is_transient(e) else str(e)[:120]); warned = True
+            if time.time() - last_chk >= RUN_STALE_CHECK_EVERY:
+                last_chk = time.time()
+                try: requeue_stale_runs(store, own_rid=_PROG[0].rid if _PROG[0] else None)
+                except Exception as e: log.warning("stale-run requeue check failed: %s", _brief(e))
             time.sleep(every)
     th = threading.Thread(target=loop, name="heartbeat", daemon=True); th.start(); return th
 
