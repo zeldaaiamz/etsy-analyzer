@@ -52,6 +52,14 @@ export function sendState(b, total = b?.passed_count) {
 // 039/041/042 都按 rank 顺序（rank nulls last, id，与这里读 sel_items 的顺序一致）发送，额度满即停 → 已发送的总是前 sent_count 条；
 // 其中「已在预筛选列表里被去重跳过」的也计入 sent_count（算已发送）；038 旧标记 sent_count 为空 = 整批已发送
 export function linkSentFlags(b, n) { const st = sendState(b, n); return Array.from({ length: n }, (_, i) => i < st.sent); }
+// 防卡（worker vision_retry / vision_retry_max / vision_breaker_s / vision_wait_s）：豆包超时时网页说清楚在干什么
+export function visionHint(P) {
+  if (!P) return "";
+  if (P.vision_breaker_s > 0) return `<span class="warn">豆包连续超时，暂停 ${P.vision_breaker_s} 秒后再试（超时的条目记为「待确认（视觉超时）」）</span>`;
+  if (P.vision_retry > 0) return `<span class="warn">豆包超时重试 ${P.vision_retry}/${P.vision_retry_max || 3}</span>`;
+  if (P.stage === "vision" && P.vision_wait_s >= 60) return `<span class="hint">已等待豆包 ${Math.floor(P.vision_wait_s / 60)} 分钟（最多 10 分钟，超时条目记为待确认）</span>`;
+  return "";
+}
 export function sentInfo(batches, keyword, nos, runId) {
   const S = (batches || []).filter((b) => b.sent_to_screen_at).sort((a, b) => Date.parse(b.sent_to_screen_at) - Date.parse(a.sent_to_screen_at));
   if (!S.length) return { sent: false, text: "未发送", tip: "这次查找的链接还没有送去预筛选", tags: [] };
@@ -410,6 +418,11 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
     } else if (kind === "zero") { // 052：0 条不自动抓
       Object.assign(run, { status: "counted", keyword: "no results", total_count: 0, max_rows: null, current_batch: 0 }); batches = []; run.progress = { stage: "count_done", total: 0, at: iso(1) };
     }
+    else if (kind === "vision_retry" || kind === "vision_breaker") {   // 防卡截图（演示数据）
+      const P = { stage: "vision", read: 277, judged: 261, vision_pending: 16, passed: 13, excluded: 242, dup: 6, page: 14, vision_wait_s: 95, ...(kind === "vision_retry" ? { vision_retry: 2, vision_retry_max: 3 } : { vision_retry: 3, vision_retry_max: 3, vision_breaker_s: 42 }) };
+      Object.assign(run, { keyword: "men gifts（演示数据）", total_count: 277, max_rows: 277, current_batch: 1, remaining_count: 0 }); Object.assign(b2, { batch_no: 1, offset_start: 1, offset_end: 277, scraped_count: P.judged, passed_count: P.passed, excluded_count: P.excluded, dup_count: 6 }); batches = [b2];
+      run.progress = { ...P, batch_no: 1, target: 277, at: iso(4) };
+    }
     else if (kind === "reading" || kind === "vision") {
       const P = kind === "reading" ? { stage: "reading", read: 468, judged: 431, vision_pending: 37, passed: 149, excluded: 279, dup: 3, page: 74 } : { stage: "vision", read: 1000, judged: 962, vision_pending: 38, passed: 333, excluded: 621, dup: 8, page: 100 };
       Object.assign(b2, { scraped_count: P.judged, passed_count: P.passed, excluded_count: P.excluded }); run.progress = { ...P, batch_no: 2, target: 1000, at: iso(2) };
@@ -504,6 +517,7 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
       : ["抓取中", P.page ? `第 ${P.page} 页${vp ? ` · 同时豆包判断 ${n0(vp)} 条` : ""}` : ""];
     if (P.retry > 0 && (P.stage === "page_retry" || P.stage === "read_setup" || P.stage === "reading"))   // worker 单页超时自动重试中
       stg[1] = `<span class="warn">第 ${P.page || "?"} 页${P.retry_why === "翻页卡住" ? "翻页卡住" : P.retry_why === "关键词未生效" ? "关键词未生效" : "读取超时"}，正在重新打开重试（第 ${P.retry}${P.retry_max ? `/${P.retry_max}` : ""} 次）</span>`;
+    const vh = visionHint(P); if (vh && (P.stage === "vision" || P.stage === "reading")) stg[1] = `${stg[1] ? `${stg[1]} · ` : ""}${vh}`;   // 防卡：豆包超时重试 / 熔断 / 已等待
     return wrap("ss-pg-run", `<span class="pill pill-info"><span class="spin"></span> ${stg[0]}</span>`, `${range} · <b>${pct}%</b>${stg[1] ? ` · ${stg[1]}` : ""}`, bar(pctR, pctJ), nums);
   }
   // ---------- 界面 ----------
