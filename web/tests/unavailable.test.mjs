@@ -87,7 +87,7 @@ test("app.js：不可售归入「无法抓取」、手动录入弹窗走 save_ma
 test("056 迁移：unavailable 状态、跳过、红线", () => {
   const migs = readdirSync(new URL("supabase/migrations/", root));
   const f = migs.find((x) => /^056_/.test(x)); assert.ok(f, "056 迁移存在");
-  assert.ok(!migs.some((x) => /^05[7-9]_/.test(x)));
+  assert.equal(migs.filter((x) => /^056_/.test(x)).length, 1, "056 只有一个迁移"); // 原「无 057–059」在 057/058 正常上线后不再成立
   const sql = readFileSync(new URL(`supabase/migrations/${f}`, root), "utf8");
   const body = sql.split("\n").filter((l) => !l.trim().startsWith("--")).join("\n");
   assert.match(body, /'ok', 'failed', 'pending', 'fetching', 'unavailable'/);

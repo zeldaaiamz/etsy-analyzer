@@ -86,5 +86,6 @@ test("红线：无新迁移；不碰 sel_keyword_log / SERVICE_ROLE", async () =
   assert.doesNotMatch(app, /SERVICE_ROLE/);
   assert.doesNotMatch(vel, /sel_keyword_log|SERVICE_ROLE/);
   const migs = readdirSync(new URL("../../supabase/migrations", import.meta.url));
-  assert.ok(!migs.some((f) => /055|reviews.?progress|scrape.?progress/i.test(f)));
+  // 进度条功能本身不带迁移（055 编号已被 055_library_remove_delete 正常占用，只禁“进度”类迁移）
+  assert.ok(!migs.some((f) => /reviews.?progress|scrape.?progress/i.test(f)));
 });
