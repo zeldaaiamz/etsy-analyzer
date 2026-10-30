@@ -1,4 +1,4 @@
-// node --test web/tests/ —— 顶栏左上角「切换」下拉（关键词工作台 / VOC / sif关键词选品）
+// node --test web/tests/ —— 顶栏左上角「切换」下拉（关键词工作台 / VOC / sif选赛道）
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -14,7 +14,7 @@ test("顶栏下拉恰好三项，新标签页打开且 rel=noopener", () => {
   assert.match(links[1], /href="https:\/\/zeldaaiamz\.github\.io\/zeldaaiamz1\/voc\/"/);
   assert.match(links[2], /href="https:\/\/zeldaaiamz\.github\.io\/zeldaaiamz1\/root-finder\/"/);
   for (const a of links) { assert.match(a, /target="_blank"/); assert.match(a, /rel="noopener"/); }
-  assert.match(pop, /关键词工作台/); assert.match(pop, /VOC/); assert.match(pop, /sif关键词选品/);
+  assert.match(pop, /关键词工作台/); assert.match(pop, /VOC/); assert.match(pop, /sif选赛道/);
   assert.ok(html.indexOf('id="siteSw"') < html.indexOf('id="nav"'), "位于顶栏左侧品牌区");
   assert.match(html, /js\/siteswitch\.js\?v=[0-9a-f]{8}/);
 });
