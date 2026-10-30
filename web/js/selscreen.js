@@ -218,6 +218,19 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
     }
     location.hash = `#/selscreen/${data}`;
   }
+  // 057：从 ABA 词根库领取 5 个词根 → 每个按 sel_count 原逻辑建查询数量任务（与手动“查询数量”行为相同）
+  async function abaImport() {
+    if (DEMO) return toast("演示模式不连接 ABA 词根库", "bad");
+    if (!await confirmDialog({ title: "从 ABA 导入 5 个词根？", ok: "导入", body: "<p>将领取 5 个尚未导入的 ABA 词根，并分别创建“查询数量”任务（排队执行，与手动查询数量相同）。领取后不会重复导入。</p>" })) return;
+    const btn = $("ssAba"); if (btn) btn.disabled = true;
+    try {
+      const { data, error } = await getSb().rpc("aba_import_to_selection", { p_limit: 5 });
+      if (error) return toast(`ABA 导入失败：${error.message}`, "bad");
+      if (!data?.length) return toast("ABA 词根已全部导入，没有新的词根", "bad");
+      toast(`已导入 ${data.length} 个：${data.map((x) => x.keyword).join("、")}`);
+      location.hash = `#/selscreen/${data[0].run_id}`;
+    } finally { const b2 = $("ssAba"); if (b2) b2.disabled = false; }
+  }
   function limitError() {
     const r = V.run, max = Math.min(r?.total_count || 0, MAX_ROWS), raw = ($("ssLimit")?.value || "").trim(), v = Number(raw);
     if (!max) return "结果数为 0，无法抓取";
@@ -573,7 +586,7 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
     const ST = { count_queued: "排队查询数量", counting: "读取结果数中", queued: "排队中（等待 box 抓取进程）", running: "读取 EHunt 列表页中", batch_done: "本批完成", succeeded: "全部完成", failed: "失败", canceled: "已停止" };
     const prog = progressPanel(r);
     $("ssStart").innerHTML = `<div id="ssRecent"></div><div class="card ss-start"><div class="ss-form"><input id="ssKw" class="input" maxlength="${KW_MAX}" placeholder="EHunt 关键词，例如 acrylic decoration" value="${esc($("ssKw")?.value || r?.keyword || "")}">
-        <button class="btn btn-primary" id="ssCount"${countDisabled(r, V.counting) ? " disabled" : ""} title="${active(r) ? "当前任务进行中也可以查询新关键词，会排进队列按顺序执行" : ""}">查询数量</button><button class="btn btn-ghost btn-sm" id="ssKwLog" title="导出全部关键词查询记录（永久保留）">导出查询记录 CSV</button></div>${countPanel(r)}${prog}</div>`; DEMO ? loadRecent() : renderRecent();
+        <button class="btn btn-primary" id="ssCount"${countDisabled(r, V.counting) ? " disabled" : ""} title="${active(r) ? "当前任务进行中也可以查询新关键词，会排进队列按顺序执行" : ""}">查询数量</button><button class="btn btn-ghost btn-sm" id="ssAba" title="从 ABA 词根库领取 5 个词根，各建一个“查询数量”任务（每个词根只会导入一次）">从 ABA 导入 5 个</button><button class="btn btn-ghost btn-sm" id="ssKwLog" title="导出全部关键词查询记录（永久保留）">导出查询记录 CSV</button></div>${countPanel(r)}${prog}</div>`; DEMO ? loadRecent() : renderRecent();
     const done = V.batches.filter((b) => FIN.includes(b.status));
     const all = [...new Set(done.flatMap((b) => V.links[b.id] || []))], exAll = done.reduce((a, b) => a + (b.excluded_count || 0), 0);
     const exR = {}; done.forEach((b) => Object.entries(b.excluded_by_reason || {}).forEach(([k, v]) => exR[k] = (exR[k] || 0) + v));
@@ -594,7 +607,7 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
   document.addEventListener("click", (e) => {
     const t = e.target, id = t.id;
     if (id === "ssKwLog") return exportKwLog();
-    if (id === "ssCount") return guard("count", count); if (id === "ssGo") return guard("start", start); if (id === "ssStop") return guard("cancel", cancel);
+    if (id === "ssCount") return guard("count", count); if (id === "ssAba") return guard("aba", abaImport); if (id === "ssGo") return guard("start", start); if (id === "ssStop") return guard("cancel", cancel);
     if (id === "ssResume") return guard("resume", resume);
     const ps = t.closest?.("[data-ssps]"); if (ps) return guard("send", () => prescreen(ps.dataset.ssps));
     if (t.closest?.("#ssSendAll")) return guard("send", () => prescreen(null, true));
