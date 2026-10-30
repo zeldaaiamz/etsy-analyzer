@@ -396,7 +396,8 @@ def ui(): return {**UI_DEFAULTS, **json.loads(os.environ.get("EHUNT_UI", "{}"))}
 def filters(params): return {**FILTER_DEFAULTS, **json.loads(os.environ.get("EHUNT_FILTERS", "{}")), **{k: v for k, v in (params or {}).items() if k in FILTER_DEFAULTS}}
 
 class LoginExpired(RuntimeError): pass
-LOGIN_MSG = "EHunt 登录已失效（页面顶栏显示 Login/Register，搜索弹出登录提示）：需要在 box 上运行 deploy/box-selection-worker.sh login 重新人工登录"
+LOGIN_MSG = "EHunt 登录已失效（页面顶栏显示 Login/Register，搜索弹出登录提示）：worker 会自动重新登录；失败时需要在 box 上运行 deploy/box-selection-worker.sh login 重新人工登录"
+ON_EXPIRED = [lambda: None]   # 058：main() 换成 Relogin.note_expired —— 任何路径遇到登录失效都触发一次自动重新登录
 
 def _visible(loc):
     try: return [loc.nth(i) for i in range(loc.count()) if loc.nth(i).is_visible()]
@@ -462,7 +463,7 @@ def _open_list(p, keyword, params):
     stage("count_open" if counting else "read_setup")
     ctx = launch_ctx(p)
     pg = ctx.pages[0] if ctx.pages else ctx.new_page(); pg.goto(U["url"], wait_until="networkidle", timeout=60000)
-    if "login" in pg.url: ctx.close(); raise RuntimeError("EHunt 登录已失效：需要在 box 上运行 --login 重新人工登录")
+    if "login" in pg.url: ctx.close(); raise LoginExpired(LOGIN_MSG)
     if counting: stage("count_filter")
     try:
         b = pg.query_selector(U["banner_close"])
@@ -632,6 +633,7 @@ def serve_lookups(store, finder_factory, limit=LOOKUP_BATCH, max_rounds=20):
                 store.lookup_patch(lid, status="not_found" if u is None else "done", image_url=u or None, error=None, finished_at=NOW())
                 log.info("lookup %s: %s", lid, "not found" if u is None else "image" if u else "found, no image")
             except LoginExpired as e:
+                ON_EXPIRED[0]()
                 for r2 in reqs[i:]: store.lookup_patch(r2["listing_id"], status="login_expired", error=f"{LOGIN_TAG}：{e}"[:300], finished_at=NOW())
                 log.warning("lookup: %s", e); return n
             except Exception as e:
@@ -1020,6 +1022,24 @@ def login(url):
         except Exception: pass
     print("登录窗口已关闭，profile 已保存", flush=True)
 
+def ctx_logged_in(ctx):
+    """打开产品研究页，用与抓取相同的规则判断是否已登录（顶栏 Login / 登录弹窗 / 跳转登录页 = 未登录）。"""
+    U = ui(); pg = ctx.new_page()
+    try:
+        pg.goto(U["url"], wait_until="networkidle", timeout=60000)
+        if "login" in pg.url: return False
+        try: dismiss_overlays(pg, U); _check_login(pg, U)
+        except LoginExpired: return False
+        return True
+    finally:
+        try: pg.close()
+        except Exception: pass
+
+def make_relogin(store):
+    from selection import relogin as R
+    rl = R.Relogin(store, lambda: R.browser_login(check_logged_in=ctx_logged_in, launch=launch_ctx))
+    ON_EXPIRED[0] = rl.note_expired; return rl
+
 WORDS_TTL = int(os.environ.get("SEL_WORDS_TTL", "300"))
 LOOKUPS_ON = os.environ.get("EHUNT_WEB_LOOKUPS", "1") != "0"   # 预筛选主图查询开关
 def main(argv=None):
@@ -1032,6 +1052,7 @@ def main(argv=None):
     if a.lookup_dry: return lookup_dry([int(x) for x in a.lookup_dry.split(",") if x.strip()])
     store = Store(); last_purge = 0; last_words = 0
     if not a.fake: start_heartbeat(store)
+    RL = None if a.fake else make_relogin(store)
     while True:
         if time.time() - last_purge > 86400:  # 启动时 + 每 24 小时：DB 3 天清理（pg_cron 不可用时的兜底）+ 本地排除日志清理
             try: log.info("purge db=%s local=%s", store.purge(), purge_local())
@@ -1043,6 +1064,12 @@ def main(argv=None):
             try: rows = store.exclude_words(); log.info("exclude words: %s (%d rows)", C.set_words(rows), len(rows))
             except Exception: log.warning("exclude words load failed, using built-in", exc_info=True); C.set_words(None)
             last_words = time.time()
+        if RL:   # 058 自动重新登录：登录失效/网页按钮 → 尝试一次；需要人工 → 暂停队列（不认领、不查主图，任务保持排队不刷屏失败）
+            act = _safe(RL.tick)
+            if RL.paused():
+                PHASE[0] = "login_paused"
+                if a.once: break
+                time.sleep(POLL); continue
         lookups = LOOKUPS_ON and not a.fake
         PHASE[0] = "lookups"
         if lookups:   # 预筛选主图查询优先于选品（很快：每条约 3-5 秒）；表未部署（033 未执行）→ 本进程内关闭
@@ -1115,6 +1142,7 @@ def handle_run(store, run, a, lookups):
             if is_poisoned(e):
                 log.critical("Playwright poisoned during count; requeue run %s and exit for restart", run["id"])
                 _safe(store.patch_run, run["id"], status="count_queued", locked_by=None, error=None); recycle()
+            if isinstance(e, LoginExpired): ON_EXPIRED[0]()
             log.exception("count failed"); _safe(store.patch_run_if, run["id"], "counting", status="failed", error=str(e)[:300], finished_at=NOW())
         return
     b = store.open_batch(run["id"])
@@ -1141,6 +1169,7 @@ def handle_run(store, run, a, lookups):
         if is_poisoned(e):
             log.critical("Playwright poisoned during batch; requeue run %s and exit for restart", run["id"])
             _safe(store.patch_batch, b["id"], status="queued"); _safe(store.patch_run, run["id"], status="queued", locked_by=None); recycle()
+        if isinstance(e, LoginExpired): ON_EXPIRED[0]()
         log.exception("batch failed")
         msg = f"读取中断（{_brief(e) if is_transient(e) else str(e)[:200]}），已读部分已保留，可点「继续本批」接着读"
         _safe(store.patch_batch, b["id"], status="canceled", finished_at=NOW())          # 029 sel_resume 只恢复“已停止”的批次

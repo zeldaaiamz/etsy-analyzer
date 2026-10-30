@@ -4,6 +4,7 @@
 // ③ 标题规则先筛：排除的不调豆包、不显示、不入库（页面只一行汇总；原因写 box 本地日志 3 天）→ ④ 通过的调豆包视觉 → 显示符合要求 N 条 + 纯 Etsy 链接
 // ⑤ >1000 分批，每批 1000，最多 5 批 / 5,000；“还剩 N 条未读”只在每批完成后更新 ⑥ 只有符合要求的入库，保留 3 天 ⑦ 网页无搜索，查询找序猿
 import { createSelQueue } from "./selqueue.js?v=608800a5";
+import { createEhLogin } from "./ehlogin.js?v=058a";
 const BATCH = 1000, MAX_ROWS = 5000; // 每批 1000；自动入队上限 min(total_count, MAX_ROWS)=5000（与 052 / EHunt 前 5,000 条一致）
 const RORDER = ["定制", "IP", "材质", "素材/数字文件", "7天销量≤3", "其他"];
 // ---- 纯函数（web/tests/selscreen.test.mjs）----
@@ -643,5 +644,6 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
     V.autoBusy = false; if (err) { toast(`保存失败：${err.message}`, "bad"); } else { V.auto = on; toast(on ? "已开启：每批读完自动送去预筛选" : "已关闭自动发送（可手动点「送去预筛选」）", "ok"); } renderAuto();
   });
   loadPrefs();
-  return { show: (runId) => { if (V.autoOk == null) loadPrefs(); else renderAuto(); return load(runId); }, _state: V };
+  const EL = createEhLogin({ $, esc, toast, getSb, DEMO });   // 058 EHunt 登录状态 + 重新登录按钮
+  return { show: (runId) => { if (V.autoOk == null) loadPrefs(); else renderAuto(); if (!V.elStarted) { V.elStarted = true; EL.start(); } else EL.load(); return load(runId); }, _state: V };
 }

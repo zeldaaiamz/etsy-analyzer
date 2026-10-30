@@ -3,6 +3,7 @@
 # 用法：deploy/box-selection-worker.sh login | start | ensure | watch | stop | status | once-fake <list.json>（start = 带自动重启的守护循环）
 #       reviews-start | reviews-stop | reviews-status | reviews-dry <listing_id…>  —— 049 产品库评论日期自动抓取（独立进程；评论优先，不因 EHunt 忙让路；选品 worker nice 10）
 # 环境：从 SEL_ENV_FILE（默认 ~/.config/etsy-selection/worker.env，权限 600）读取 SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY / ARK_API_KEY；本脚本不打印任何密钥。
+# EHunt 自动重新登录（058）：账号只放 box 本地 ~/.config/etsy-selection/ehunt.env（EHUNT_EMAIL / EHUNT_PASSWORD，chmod 600，不进 git/Supabase），worker 遇登录失效自动登录一次（30 分钟最多 2 次）。
 # 浏览器：自己的 Playwright 持久化目录 EHUNT_PROFILE_DIR（默认 ~/.local/share/etsy-selection/ehunt-profile），不使用桌面浏览器的 cookie/profile。
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"; SELF="$ROOT/deploy/$(basename "$0")"
