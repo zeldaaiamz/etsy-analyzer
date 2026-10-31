@@ -56,3 +56,14 @@ test("052 counted 标签：有结果=待抓取（未入队），0 条单独标�
   assert.equal(queueItem({ id: "z", status: "counted", total_count: 0 }, null, NOW).label, "0 条");
   assert.equal(queueItem({ id: "q", status: "queued", total_count: 296 }, null, NOW).label, "等待");
 });
+
+test("软限流 → 有问题列表标「限流」，原因经 friendlyErr 一致；真·关键词未生效仍是失败", async () => {
+  const { friendlyErr } = await import("../js/selscreen.js");
+  const rl = "EHunt 限流：请求过多，稍后自动可重试";
+  const x = queueItem({ id: "rl", status: "failed", error: rl }, null, NOW);
+  assert.equal(x.group, "problem"); assert.equal(x.label, "限流"); assert.equal(friendlyErr(x.reason), rl);
+  const wrap = queueItem({ id: "rl2", status: "canceled", error: `读取中断（${rl}），已读部分已保留` }, B({ scraped_count: 40 }), NOW);
+  assert.equal(wrap.label, "限流"); assert.equal(friendlyErr(wrap.reason), rl);
+  const kw = queueItem({ id: "k", status: "failed", error: "关键词未生效：Selected: 中没有 Keyword: book" }, null, NOW);
+  assert.equal(kw.label, "失败"); assert.match(friendlyErr(kw.reason), /关键词未生效/);
+});

@@ -7,7 +7,7 @@
       python -m selection.ehunt_worker --fake list.json --once   # 不开浏览器，用回放 JSON 模拟抓取（测试）
 环境：SUPABASE_URL、SUPABASE_SERVICE_ROLE_KEY、ARK_API_KEY（分类也在 box 上跑）、EHUNT_PROFILE_DIR（默认 ~/.local/share/etsy-selection/ehunt-profile）；可选 EHUNT_UI（界面选择器 JSON）、EHUNT_FILTERS（筛选值 JSON）
 """
-import argparse, json, os, socket, sys, time, logging, urllib.request, urllib.error, urllib.parse
+import argparse, json, os, re, socket, sys, time, logging, urllib.request, urllib.error, urllib.parse
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools" / "etsy_selection"))
 import classify as C  # noqa: E402  审定默认：convertible + optional-custom=keep + temperature 0 + 3 次投票
@@ -118,8 +118,9 @@ PAGE_KILL_GRACE_S = float(os.environ.get("EHUNT_PAGE_KILL_GRACE_S", "20"))  # �
 class PageTimeout(RuntimeError): pass
 class PageStuck(RuntimeError): pass          # 翻页到第 N 页超时（页码/首行没变）→ 与超时同样重开同一页重试（2026-10-21 menu 第 2 页）
 class KeywordNotApplied(RuntimeError): pass  # 关键词未生效（Selected: 中没有 Keyword）→ 同样重开重试（2026-10-21 book 续读）
+class RateLimited(RuntimeError): pass        # EHunt 软限流横幅 / 搜索未进 Selected → 不重试关键词、不进 page_loop 重试（2026-10-31）
 class RunStopped(BaseException): pass        # 重试间隙发现用户已取消/暂停：立即停（BaseException：不被页内 except Exception 吞掉）
-RETRY_KINDS = {PageTimeout: "超时", PageStuck: "翻页卡住", KeywordNotApplied: "关键词未生效"}
+RETRY_KINDS = {PageTimeout: "超时", PageStuck: "翻页卡住", KeywordNotApplied: "关键词未生效"}  # RateLimited / LoginExpired 不在此列：立即抛出
 
 def _profile_from_cmd(cmd, profile):
     """匹配 --user-data-dir=PATH 或 --user-data-dir PATH。"""
@@ -237,7 +238,7 @@ def page_loop(open_session, start_rank, end_rank, ps, between=None, timeout=None
                     rows, has_next = sess.read(page, deadline)
                     if att and _PROG[0]: _PROG[0].update(retry=0, retry_why=None)   # 重试成功：清掉网页上的“超时重试中”
                     break
-                except LoginExpired: raise
+                except (LoginExpired, RateLimited): raise
                 except Exception as e:
                     kind = next((v for k, v in RETRY_KINDS.items() if isinstance(e, k)), None)
                     err_n = type(e).__name__; err_s = str(e)
@@ -397,6 +398,23 @@ def filters(params): return {**FILTER_DEFAULTS, **json.loads(os.environ.get("EHU
 
 class LoginExpired(RuntimeError): pass
 LOGIN_MSG = "EHunt 登录已失效（页面顶栏显示 Login/Register，搜索弹出登录提示）：需要在 box 上运行 deploy/box-selection-worker.sh login 重新人工登录"
+RATE_LIMIT_MSG = "EHunt 限流：请求过多，稍后自动可重试"
+# 软限流横幅（2026-10-31 实测）："Unusually high request volume detected. Access is temporarily limited. Try again later."
+RATE_LIMIT_BANNER_RE = re.compile(
+    r"Unusually high request volume|Access is temporarily limited|请求量异常|暂时限制(?:访问|请求)",
+    re.I,
+)
+UNFILTERED_FIND_MIN = 1_000_000  # 未筛选目录约 85M；关键词生效时通常远小于此
+
+def page_shows_rate_limit(text):
+    """纯函数：页面正文是否含 EHunt 软限流横幅（单测直接喂字符串）。"""
+    return bool(text and RATE_LIMIT_BANNER_RE.search(text))
+
+def unfiltered_after_search(find_count, keyword_applied):
+    """纯函数：Search 后 Selected 无 Keyword 且 Find 仍是未筛选巨量 → 搜索被限流吞掉。"""
+    try: n = int(find_count)
+    except (TypeError, ValueError): return False
+    return (not keyword_applied) and n >= UNFILTERED_FIND_MIN
 
 def _visible(loc):
     try: return [loc.nth(i) for i in range(loc.count()) if loc.nth(i).is_visible()]
@@ -404,6 +422,20 @@ def _visible(loc):
 
 def _check_login(pg, U):
     if _visible(pg.locator(U["login_dialog"])) or _visible(pg.locator(U["header_login"])): raise LoginExpired(LOGIN_MSG)
+
+def _check_rate_limit(pg, U, keyword=None, after_search=False):
+    """横幅可见 → 立即 RateLimited；Search 后无 Keyword chip 且 Find 未筛选巨量 → 同样。不吞其他异常。"""
+    try: body = pg.locator("body").inner_text(timeout=5000)
+    except Exception: body = ""
+    if page_shows_rate_limit(body): raise RateLimited(RATE_LIMIT_MSG)
+    if not after_search or not keyword: return
+    m = re.search(U["count_regex"], body or "")
+    n = int(m.group(1).replace(",", "")) if m else 0
+    try: sel = pg.locator(U["selected_row"]).first.inner_text()
+    except Exception: sel = ""
+    chip = U["chip_keyword"].format(keyword=keyword).replace(" ", "").lower()
+    applied = chip in (sel or "").replace(" ", "").lower()
+    if unfiltered_after_search(n, applied): raise RateLimited(RATE_LIMIT_MSG)
 
 def dismiss_overlays(pg, U, rounds=4):
     """关掉所有可见的 el-overlay 弹窗：先点右上角关闭 → 再按 Escape → 最后把遮罩隐藏。登录提示弹窗直接报登录失效。返回关掉的弹窗名。"""
@@ -528,10 +560,13 @@ def _open_list(p, keyword, params):
         b = pg.query_selector(U["banner_close"])
         if b and b.is_visible(): b.click(); time.sleep(0.5)
         dismiss_overlays(pg, U); _check_login(pg, U)
+        _check_rate_limit(pg, U)  # 横幅已在 → 立刻失败，不烧 3 次关键词重试
         for attempt in range(3):   # 页面水合前填写的关键词会被清空 → 以 Selected: 的 Keyword 标签为准，最多重试 3 次
             dismiss_overlays(pg, U); pg.fill(U["search_input"], keyword); _click(pg, U, U["search_btn"]); pg.wait_for_load_state("networkidle", timeout=30000); time.sleep(2 + attempt * 2)
             dismiss_overlays(pg, U)
             if U["chip_keyword"].format(keyword=keyword).replace(" ", "").lower() in pg.locator(U["selected_row"]).first.inner_text().replace(" ", "").lower(): break
+            # 一次确认：Search 后仍无 Keyword chip → 查横幅 / 未筛选 Find；是限流则立即停，不是才继续重试
+            _check_rate_limit(pg, U, keyword=keyword, after_search=True)
         else: raise KeywordNotApplied(f"关键词未生效：Selected: 中没有 Keyword: {keyword}")
         # Basic: Price(USD) → 自定义 Min/Max → OK（都在展开的 popover 里）
         _click(pg, U, U["price_dd"]); time.sleep(1); pop = pg.locator(U["popover"])

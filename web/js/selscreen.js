@@ -3,7 +3,7 @@
 // ② 查到数量（counted 且 >0）后自动入队抓取（052，lim=min(total,5000)=EHunt/MAX_ROWS；0 条不抓）；也可手动改条数兜底
 // ③ 标题规则先筛：排除的不调豆包、不显示、不入库（页面只一行汇总；原因写 box 本地日志 3 天）→ ④ 通过的调豆包视觉 → 显示符合要求 N 条 + 纯 Etsy 链接
 // ⑤ >1000 分批，每批 1000，最多 5 批 / 5,000；“还剩 N 条未读”只在每批完成后更新 ⑥ 只有符合要求的入库，保留 3 天 ⑦ 网页无搜索，查询找序猿
-import { createSelQueue } from "./selqueue.js?v=608800a5";
+import { createSelQueue } from "./selqueue.js?v=72c23c15";
 const BATCH = 1000, MAX_ROWS = 5000; // 每批 1000；自动入队上限 min(total_count, MAX_ROWS)=5000（与 052 / EHunt 前 5,000 条一致）
 const RORDER = ["定制", "IP", "材质", "素材/数字文件", "7天销量≤3", "其他"];
 // ---- 纯函数（web/tests/selscreen.test.mjs）----
@@ -18,6 +18,8 @@ export function friendlyErr(e) {
   if (/Playwright Sync API inside the asyncio loop/i.test(t)) return "box 抓取进程异常（上一次失败后浏览器没有释放），需要重启 box 上的抓取进程后再试";
   if (/Remote end closed|RemoteDisconnected|Connection reset|URLError|timed out|Temporary failure in name resolution/i.test(t)) return "box 与数据库的连接中断（网络抖动），可点“重试本批”或重新查询";
   if (/EHunt 登录已失效|EHunt 未登录/.test(t)) return "EHunt 登录已失效：需要在 box 上重新人工登录 EHunt";
+  // 软限流：worker 写 RATE_LIMIT_MSG；抓取路径可能包一层「读取中断（…）」——统一成同一句，不与 KeywordNotApplied 混淆
+  if (/EHunt 限流|请求过多/.test(t)) return "EHunt 限流：请求过多，稍后自动可重试";
   if (/Timeout \d+ms exceeded|翻页到第 \d+ 页超时/i.test(t)) return "EHunt 页面响应超时（网页卡住或改版），请稍后重试";
   if (/关键词未生效|筛选未生效|排序不是/.test(t)) return t;
   return /[\u4e00-\u9fff]/.test(t) ? t : `抓取出错：${t.slice(0, 120)}`;
@@ -28,7 +30,7 @@ export function chipText(r) {
   if (["count_queued", "counting"].includes(r.status)) return "查询中";
   if (r.status === "counted") return r.total_count == null ? "待抓取" : (r.total_count > 0 ? `待抓取 · 共 ${n(r.total_count)} 条` : "0 条 · 不抓取");
   if (["queued", "running"].includes(r.status)) return `读取中 · 已符合 ${n(r.passed_count)} 条`;
-  if (r.status === "failed") return r.total_count == null ? "查询失败" : `失败 · 符合 ${n(r.passed_count)} 条`;
+  if (r.status === "failed") return /EHunt 限流|请求过多/.test(r.error || "") ? "限流 · 稍后再试" : (r.total_count == null ? "查询失败" : `失败 · 符合 ${n(r.passed_count)} 条`);
   if (r.status === "canceled") return `已停止 · 符合 ${n(r.passed_count)} 条`;
   if (r.status === "paused") return `已暂停 · 已符合 ${n(r.passed_count)} 条`;
   return `符合 ${n(r.passed_count)} 条`;

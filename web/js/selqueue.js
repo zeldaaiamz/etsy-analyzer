@@ -22,7 +22,8 @@ export function queueItem(r, batch, now = Date.now()) {
   if (r.status === "paused") return { ...base, group: "wait", label: "暂停", resumeAt: b?.scraped_count ? b.offset_start + b.scraped_count : null, acts: ["resume", "cancel", "up", "down"] };
   if (r.status === "failed" || (r.status === "canceled" && r.error)) {
     const can = !!b; // 查询数量失败（没有批次）只能重新查询
-    return { ...base, group: "problem", label: r.status === "failed" ? "失败" : "中断", reason: r.error || "", acts: can ? ["retry", "delete"] : ["delete"], done: b?.scraped_count || 0 };
+    const rl = /EHunt 限流|请求过多/.test(r.error || "");
+    return { ...base, group: "problem", label: rl ? "限流" : (r.status === "failed" ? "失败" : "中断"), reason: r.error || "", acts: can ? ["retry", "delete"] : ["delete"], done: b?.scraped_count || 0 };
   }
   return { ...base, group: "end", label: { succeeded: "完成", batch_done: "本批完成", canceled: "已停止", counted: (r.total_count > 0 ? "待抓取" : "0 条") }[r.status] || r.status, passed: r.passed_count || 0, acts: r.status === "canceled" && b ? ["retry", "delete"] : ["delete"] };
 }
@@ -62,6 +63,8 @@ export function createSelQueue({ $, esc, toast, getSb, DEMO, confirmDialog, frie
       add({ id: "dq-w3", keyword: "christmas ornament", status: "queued", max_rows: 2000, read_all: true, current_batch: 1, queue_at: iso(900) }, B("dq-w3", 1, 1, 1000, "queued"));
       if (kind === "failed") add({ id: "dq-f1", keyword: "name plate", status: "failed", error: "Remote end closed connection without response", current_batch: 1, created_at: iso(2400), queue_at: iso(2400) }, B("dq-f1", 1, 1, 1000, "failed", 286, 97));
       if (kind === "failed") add({ id: "dq-f2", keyword: "door hanger", status: "running", current_batch: 1, created_at: iso(5000), queue_at: iso(5000), heartbeat_at: iso(1500), progress: { stage: "reading", at: iso(1500) } }, B("dq-f2", 1, 1, 600, "running", 120, 40));
+      if (kind === "failed") add({ id: "dq-rl", keyword: "squishy", status: "failed", error: "EHunt 限流：请求过多，稍后自动可重试", created_at: iso(1800), queue_at: iso(1800) }); // 查询数量阶段限流（无批次）
+      if (kind === "failed") add({ id: "dq-rl2", keyword: "paper", status: "canceled", error: "读取中断（EHunt 限流：请求过多，稍后自动可重试），已读部分已保留，可点「继续本批」接着读", current_batch: 1, created_at: iso(2000), queue_at: iso(2000) }, B("dq-rl2", 1, 1, 1000, "canceled", 40, 12));
       add({ id: "dq-e1", keyword: "gift", status: "succeeded", passed_count: 6, created_at: iso(6 * 3600) }, B("dq-e1", 1, 1, 200, "done", 200, 6));
       add({ id: "dq-e2", keyword: "keychain", status: "canceled", passed_count: 41, created_at: iso(9 * 3600) }, B("dq-e2", 1, 1, 1000, "canceled", 130, 41));
     }

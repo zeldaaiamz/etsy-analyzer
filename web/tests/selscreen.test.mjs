@@ -64,3 +64,12 @@ test("防卡：豆包超时重试 x/3 / 熔断 / 已等待提示", async () => {
   assert.equal(visionHint({ stage: "vision", vision_wait_s: 10 }), "");
   assert.equal(visionHint({ stage: "vision" }), ""); assert.equal(visionHint(null), "");
 });
+
+test("软限流报错 → 统一中文；与关键词未生效区分", () => {
+  const msg = "EHunt 限流：请求过多，稍后自动可重试";
+  assert.equal(friendlyErr(msg), msg);
+  assert.equal(friendlyErr("读取中断（EHunt 限流：请求过多，稍后自动可重试），已读部分已保留，可点「继续本批」接着读"), msg);
+  assert.match(friendlyErr("关键词未生效：Selected: 中没有 Keyword: book"), /关键词未生效/);
+  assert.equal(chipText({ status: "failed", error: msg, total_count: null }), "限流 · 稍后再试");
+  assert.equal(chipText({ status: "failed", total_count: null }), "查询失败");
+});
