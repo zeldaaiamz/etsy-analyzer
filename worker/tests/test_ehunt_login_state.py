@@ -25,10 +25,11 @@ class Ctx:
 
 def test_apply_overrides_stale(tmp_path):
     p = tmp_path / "s.json"
-    W.save_login_state({"cookies": [{"name": "token", "domain": "ehunt.ai", "value": "v", "path": "/", "expires": -1}],
+    W.save_login_state({"cookies": [{"name": "token", "domain": "ehunt.ai", "value": "v", "path": "/", "expires": -1},
+                                    {"name": "local_username", "domain": ".ehunt.ai", "value": "u", "path": "/", "expires": -1}],
                         "origins": [{"origin": "https://ehunt.ai", "localStorage": [{"name": "a", "value": "b"}]}]}, str(p))
     c = Ctx(); assert W.apply_login_state(c, str(p))
-    assert c.cl == [{"name": "token", "domain": ".ehunt.ai"}] and c.added[0]["name"] == "token" and len(c.scripts) == 1
+    assert c.cl == [{"name": "token", "domain": ".ehunt.ai"}] and {x["name"] for x in c.added} == {"token", "local_username"} and len(c.scripts) == 1
 
 def test_apply_noop_without_file(tmp_path):
     c = Ctx(); assert not W.apply_login_state(c, str(tmp_path / "no.json")) and not c.added

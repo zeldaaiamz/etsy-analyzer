@@ -19,6 +19,8 @@ export function queueItem(r, batch, now = Date.now()) {
   }
   if (r.status === "counting" || r.status === "count_queued") return { ...base, group: "running", label: r.status === "counting" ? "查询数量中" : "排队查询数量", counting: true, acts: ["cancel"] };
   if (r.status === "queued") return { ...base, group: "wait", label: "等待", resumeAt: b?.scraped_count ? b.offset_start + b.scraped_count : null, acts: ["pause", "cancel", "up", "down"] };
+  // 2026-11-04：EHunt 掉线 → worker 暂停任务等待重新登录（progress.stage=login_wait），登录后自动继续，不需要手动点
+  if (r.status === "paused" && P.stage === "login_wait") return { ...base, group: "wait", label: "等待重新登录", loginWait: true, reason: r.error || "EHunt 登录失效，重新登录后自动继续", resumeAt: b?.scraped_count ? b.offset_start + b.scraped_count : null, acts: ["cancel"] };
   if (r.status === "paused") return { ...base, group: "wait", label: "暂停", resumeAt: b?.scraped_count ? b.offset_start + b.scraped_count : null, acts: ["resume", "cancel", "up", "down"] };
   if (r.status === "failed" || (r.status === "canceled" && r.error)) {
     const can = !!b; // 查询数量失败（没有批次）只能重新查询
@@ -34,8 +36,9 @@ export function buildQueue(runs, batchOf = () => null, now = Date.now()) {
   const wait = g("wait").sort((a, b) => a._k - b._k); wait.forEach((x, i) => { x.pos = i + 1; if (i === 0) x.acts = x.acts.filter((a) => a !== "up"); if (i === wait.length - 1) x.acts = x.acts.filter((a) => a !== "down"); });
   const running = g("running").sort((a, b) => (a.counting ? 1 : 0) - (b.counting ? 1 : 0));
   // box 离线：有等待的任务、却没有在抓的（且最早的等待超过 3 分钟）
-  const offline = !running.some((x) => !x.counting) && wait.some((x) => x.status === "queued") && runs.some((r) => r.status === "queued" && sec(r.queue_at || r.created_at, now) > WARN_S);
-  return { running, wait, problem: g("problem").sort((a, b) => b._c - a._c), end: g("end").sort((a, b) => b._c - a._c), offline };
+  const loginWait = wait.some((x) => x.loginWait);   // EHunt 掉线：worker 故意不认领，不是 box 离线
+  const offline = !loginWait && !running.some((x) => !x.counting) && wait.some((x) => x.status === "queued") && runs.some((r) => r.status === "queued" && sec(r.queue_at || r.created_at, now) > WARN_S);
+  return { loginWait, running, wait, problem: g("problem").sort((a, b) => b._c - a._c), end: g("end").sort((a, b) => b._c - a._c), offline };
 }
 // 本地乐观更新（演示 / 点了按钮等 3 秒轮询前）：和 037 RPC 的状态转换一致
 export function applyAction(r, act, now = Date.now()) {
@@ -53,7 +56,7 @@ export function createSelQueue({ $, esc, toast, getSb, DEMO, confirmDialog, frie
   const QSP = new URLSearchParams(location.search);
   const RPC = { pause: "sel_pause", resume: "sel_resume", retry: "sel_resume", cancel: "sel_cancel" };
   const n0 = (v) => Number(v || 0).toLocaleString();
-  function demoFixtures(kind) { // ?demo=1&squeue=running|paused|failed|empty —— 全部是演示数字
+  function demoFixtures(kind) { // ?demo=1&squeue=running|paused|failed|loginwait|empty —— 全部是演示数字
     const now = Date.now(), iso = (s) => new Date(now - s * 1000).toISOString(), B = (rid, no, s, e, st, sc = 0, pc = 0) => ({ id: `${rid}-b${no}`, run_id: rid, batch_no: no, offset_start: s, offset_end: e, status: st, scraped_count: sc, passed_count: pc });
     const runs = [], bat = {}; const add = (r, b) => { runs.push({ created_at: iso(3600), ...r }); if (b) bat[r.id] = b; };
     if (kind !== "empty") {
@@ -65,6 +68,12 @@ export function createSelQueue({ $, esc, toast, getSb, DEMO, confirmDialog, frie
       if (kind === "failed") add({ id: "dq-f2", keyword: "door hanger", status: "running", current_batch: 1, created_at: iso(5000), queue_at: iso(5000), heartbeat_at: iso(1500), progress: { stage: "reading", at: iso(1500) } }, B("dq-f2", 1, 1, 600, "running", 120, 40));
       if (kind === "failed") add({ id: "dq-rl", keyword: "squishy", status: "failed", error: "EHunt 限流：请求过多，稍后自动可重试", created_at: iso(1800), queue_at: iso(1800) }); // 查询数量阶段限流（无批次）
       if (kind === "failed") add({ id: "dq-rl2", keyword: "paper", status: "canceled", error: "读取中断（EHunt 限流：请求过多，稍后自动可重试），已读部分已保留，可点「继续本批」接着读", current_batch: 1, created_at: iso(2000), queue_at: iso(2000) }, B("dq-rl2", 1, 1, 1000, "canceled", 40, 12));
+      if (kind === "loginwait") { // ?squeue=loginwait：EHunt 掉线 → 暂停等待重新登录（演示数字）
+        runs.splice(0, runs.length); Object.keys(bat).forEach((k) => delete bat[k]);
+        add({ id: "dq-lw1", keyword: "candy", status: "paused", error: "EHunt 登录失效，已暂停等待重新登录；在 box 运行 deploy/box-selection-worker.sh login 登录后会自动继续", queue_at: iso(600), progress: { stage: "login_wait", resume_as: "count_queued", kind: "server_kick", at: iso(60) } });
+        add({ id: "dq-lw2", keyword: "wedding sign", status: "paused", error: "EHunt 登录失效，已暂停等待重新登录", current_batch: 1, queue_at: iso(500), progress: { stage: "login_wait", resume_as: "queued", at: iso(60) } }, B("dq-lw2", 1, 1, 1000, "queued", 320, 88));
+        add({ id: "dq-w2", keyword: "cake topper", status: "queued", max_rows: 500, current_batch: 1, queue_at: iso(1200) }, B("dq-w2", 1, 1, 500, "queued"));
+      }
       add({ id: "dq-e1", keyword: "gift", status: "succeeded", passed_count: 6, created_at: iso(6 * 3600) }, B("dq-e1", 1, 1, 200, "done", 200, 6));
       add({ id: "dq-e2", keyword: "keychain", status: "canceled", passed_count: 41, created_at: iso(9 * 3600) }, B("dq-e2", 1, 1, 1000, "canceled", 130, 41));
     }
@@ -93,6 +102,7 @@ export function createSelQueue({ $, esc, toast, getSb, DEMO, confirmDialog, frie
     let sub = "";
     if (x.group === "running" && !x.counting) sub = `<div class="ss-pg-bar" role="progressbar" aria-valuenow="${Math.round(x.pctJ)}"><i class="rd" style="width:${x.pctR}%"></i><i class="jd" style="width:${x.pctJ}%"></i></div>
       <div class="hint">已读 <b>${n0(x.read)}</b> / ${n0(x.target)} 条 · <b>${Math.floor(x.pctJ)}%</b>${x.page ? ` · 第 ${x.page} 页` : ""} · 通过 <b class="ss-n-ok">${n0(x.passed)}</b>${x.warn ? ' · <span class="warn">⚠ 3 分钟以上没有更新进度</span>' : ""}</div>`;
+    else if (x.group === "wait" && x.loginWait) sub = `<div class="warn">EHunt 登录失效，已暂停（不算失败）：在 box 上重新登录后自动继续${x.resumeAt ? ` · 从第 ${n0(x.resumeAt)} 条接着读` : ""}</div>`;
     else if (x.group === "wait") sub = `<div class="hint">${x.status === "paused" ? "已暂停，不会被抓取；点「继续」回到第 " + x.pos + " 位" : `排第 ${x.pos} 位，等前面的抓完自动开始`}${x.resumeAt ? ` · 从第 ${n0(x.resumeAt)} 条接着读` : ""}</div>`;
     else if (x.group === "problem") sub = `<div class="warn" title="${esc(x.reason)}">原因：${esc(friendlyErr(x.reason) || x.reason || "未知")}${x.done ? `<span class="hint"> · 已读 ${n0(x.done)} 条已保留，重新抓取从断点接着读</span>` : ""}</div>`;
     else sub = x.status === "counted" ? `<div class="hint">${x.label === "0 条" ? "查到 0 条，不抓取" : "已查数量，待抓取（有结果将自动入队）"}</div>` : `<div class="hint">符合 ${n0(x.passed)} 条</div>`;
@@ -105,6 +115,7 @@ export function createSelQueue({ $, esc, toast, getSb, DEMO, confirmDialog, frie
     const q = buildQueue(Q.runs, (id) => Q.batches[id], Date.now()), act = q.running.length + q.wait.length;
     const sec = (t, L, empty = "") => (L.length ? `<div class="ss-q-sec">${t}</div><ol class="ss-q-list">${L.map(row).join("")}</ol>` : empty);
     el.innerHTML = `<div class="card ss-queue"><div class="ss-q-head"><b>抓取队列</b><span class="hint">box 一次抓 1 个，其余按顺序等待 · 进行中 ${act} 个${q.problem.length ? ` · <span class="warn">有问题 ${q.problem.length} 个</span>` : ""}</span>${DEMO ? '<span class="pill pill-bad">演示数字</span>' : ""}</div>
+      ${q.loginWait ? '<p class="warn ss-q-off">⚠ EHunt 登录已失效，抓取已暂停（任务不算失败）。在 box 上运行 deploy/box-selection-worker.sh login，在「【EHunt 登录专用窗口】」里登录后，所有等待的任务会自动继续。</p>' : ""}
       ${q.offline ? '<p class="warn ss-q-off">⚠ 有任务在等待，但 box 抓取进程没有在抓（box 可能离线或暂停）。恢复后会按顺序自动开始，不需要重新点。</p>' : ""}
       ${act ? "" : '<p class="hint ss-q-empty">队列为空：查询数量成功后会自动加入（也可手动改条数）；多个关键词按顺序排队。</p>'}
       ${sec("正在抓取", q.running)}${sec(`等待中（${q.wait.length}）`, q.wait)}${sec("有问题", q.problem)}${q.end.length ? `<details class="ss-q-endd"${QSP.has("qend") ? " open" : ""}><summary class="ss-q-sec">已结束（${q.end.length}，最近 3 天）</summary><ol class="ss-q-list">${q.end.map(row).join("")}</ol></details>` : ""}</div>`;

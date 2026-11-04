@@ -10,6 +10,7 @@
 import argparse, json, os, re, socket, sys, time, logging, urllib.request, urllib.error, urllib.parse
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools" / "etsy_selection"))
+from selection import ehunt_session as ES  # noqa: E402  2026-11-04：严格登录判定/掉线诊断/保活
 import classify as C  # noqa: E402  审定默认：convertible + optional-custom=keep + temperature 0 + 3 次投票
 
 log = logging.getLogger("selection")
@@ -420,8 +421,21 @@ def _visible(loc):
     try: return [loc.nth(i) for i in range(loc.count()) if loc.nth(i).is_visible()]
     except Exception: return []
 
+def login_expired_error(page_cookies, saved_cookies=None):
+    """LoginExpired 带诊断：区分服务器踢下线（多半是别的设备登录）/ 自然过期 / 从未登录；只含 cookie 名和到期时间，不含值。"""
+    if saved_cookies is None: saved_cookies = (load_login_state(include_expired=True) or {}).get("cookies", [])
+    kind, facts = ES.diagnose_logout(page_cookies, saved_cookies)
+    e = LoginExpired(LOGIN_MSG + "；" + ES.diagnosis_message(kind, facts)); e.kind = kind; e.facts = facts
+    log.warning("ehunt logout diagnosed kind=%s facts=%s", kind, facts); return e
+
 def _check_login(pg, U):
-    if _visible(pg.locator(U["login_dialog"])) or _visible(pg.locator(U["header_login"])): raise LoginExpired(LOGIN_MSG)
+    if _visible(pg.locator(U["login_dialog"])) or _visible(pg.locator(U["header_login"])):
+        try: cs = pg.context.cookies()
+        except Exception: cs = []
+        raise login_expired_error(cs)
+    LOGIN_STATUS.update(ok=True, kind=None, last_ok=time.time())   # 任何一次登录检查通过都算会话活跃（保活计时归零）
+    try: writeback_login_state(pg.context)   # 登录检查通过：把服务器刷新过的 cookie 回写状态文件（只在更新时写）
+    except Exception: log.warning("login state writeback failed", exc_info=True)
 
 def _check_rate_limit(pg, U, keyword=None, after_search=False):
     """横幅可见 → 立即 RateLimited；Search 后无 Keyword chip 且 Find 未筛选巨量 → 同样。不吞其他异常。"""
@@ -521,18 +535,30 @@ def save_login_state(state, path=None):
     with os.fdopen(fd, "w") as f: json.dump(data, f)
     os.chmod(tmp, 0o600); os.replace(tmp, path); return data
 
-def load_login_state(path=None):
+def load_login_state(path=None, include_expired=False):
     path = path or LOGIN_STATE
     try:
         with open(path) as f: st = json.load(f)
     except (OSError, ValueError): return None
+    if include_expired: return st
     now = time.time(); st["cookies"] = [c for c in st.get("cookies", []) if c.get("expires", -1) < 0 or c["expires"] > now]
     return st if st["cookies"] else None
+
+def writeback_login_state(ctx, path=None):
+    """浏览器里是真登录（有 local_username）且比状态文件新 → 回写 storage_state。返回是否写了。"""
+    cur = [c for c in ctx.cookies() if "ehunt" in (c.get("domain") or "")]
+    if not ES.has_login_cookie(cur): return False
+    old = (load_login_state(path) or {}).get("cookies", [])
+    if old and not ES.state_is_fresher(cur, old): return False
+    save_login_state(ctx.storage_state(), path); log.info("login state refreshed from live session (cookies only names logged)"); return True
 
 def apply_login_state(ctx, path=None):
     st = load_login_state(path)
     if not st: return False
     try:
+        live = [c for c in ctx.cookies() if "ehunt" in (c.get("domain") or "")]
+        if not ES.state_is_fresher(st["cookies"], live):   # 2026-11-04：不再用旧状态文件盖掉 profile 里更新的 cookie
+            log.info("login state file not fresher than profile (or not a login state); skip applying"); return False
         names = {(c["name"], c["domain"]) for c in st["cookies"]}
         stale = [c for c in ctx.cookies() if (c["name"], c["domain"]) not in names and c["name"] in {n for n, _ in names}]
         if stale:   # 同名但不同 domain 的旧 cookie（如 .ehunt.ai 的旧 token）会遮住新的 → 删掉
@@ -1110,14 +1136,21 @@ def login(url, poll=3.0):
     窗口打开期间每 ~3s 轮询 cookie：token 类 cookie 变化写 COOKIE_LOG（不含值）；检测到已登录（顶栏 Login 消失）就保存 storage_state 到 LOGIN_STATE。"""
     from playwright.sync_api import sync_playwright
     os.environ.setdefault("DISPLAY", ":1"); os.makedirs(PROFILE, mode=0o700, exist_ok=True); os.makedirs(os.path.dirname(COOKIE_LOG), exist_ok=True)
-    U = ui(); closed = []; seen = {}; saved_sig = None
+    U = ui(); closed = []; seen = {}; saved_sig = None; warned_soft = False
     def clog(msg):
         with open(COOKIE_LOG, "a") as f: f.write(f"{time.strftime('%F %T')} {msg}\n")
     with sync_playwright() as p:
         ctx = launch_ctx(p, headless=False, viewport={"width": 1440, "height": 900}, apply_state=False)
+        ctx.add_init_script(ES.title_script())   # 2026-11-04：窗口标题统一加「【EHunt 登录专用窗口】」，和桌面浏览器区分
         pg = ctx.pages[0] if ctx.pages else ctx.new_page(); pg.goto(url)
+        tok0 = next((c for c in ctx.cookies() if c.get("name") == ES.TOKEN_COOKIE and "ehunt" in (c.get("domain") or "")), None)
+        base_sig = ES.value_sig(tok0)   # 开窗时的 token（hash）：token 变化 + user_permission 才算登录
+        desk = ES.desktop_browser_ehunt_login()
+        if desk:
+            clog(f"WARNING desktop browser has EHunt login cookie: {desk} (that login is NOT used by the worker)")
+            print(f"⚠️ 桌面浏览器 {desk} 里也登录着 EHunt —— 那里的登录对 worker 无效。请只在标题以「{ES.LOGIN_WINDOW_TITLE}」开头的窗口里登录。", flush=True)
         ctx.on("close", lambda *_: closed.append(1)); pg.on("close", lambda *_: closed.append(1))
-        print(f"已在 DISPLAY={os.environ['DISPLAY']} 打开 {url}；请人工登录 EHunt，完成后关闭浏览器窗口（登录状态保存在 {PROFILE} + {LOGIN_STATE}）", flush=True)
+        print(f"已在 DISPLAY={os.environ['DISPLAY']} 打开 {url}（窗口标题以「{ES.LOGIN_WINDOW_TITLE}」开头）；请在这个窗口里人工登录 EHunt，看到“登录已确认”后再关闭浏览器窗口（登录状态保存在 {PROFILE} + {LOGIN_STATE}）", flush=True)
         clog(f"login window opened {url}")
         while not closed:
             try:
@@ -1133,12 +1166,15 @@ def login(url, poll=3.0):
                 seen = cur
                 pages = [x for x in ctx.pages if not x.is_closed()]
                 if not pages: break
-                if any(_logged_in(x, U) for x in pages):
+                if any(_logged_in(x, U) for x in pages) and ES.login_confirmed(cs, base_sig):   # 严格：页面 + cookie 双确认
                     sig = tuple(sorted(cur.items()))
                     if sig != saved_sig:
                         d = save_login_state(ctx.storage_state()); saved_sig = sig
-                        clog(f"logged-in detected; saved state cookies={len(d['cookies'])} origins={len(d['origins'])} -> {LOGIN_STATE}")
-                        print(f"检测到已登录，登录状态已保存到 {LOGIN_STATE}", flush=True)
+                        clog(f"login confirmed (local_username/token) ; logged-in detected; saved state cookies={len(d['cookies'])} origins={len(d['origins'])} -> {LOGIN_STATE}")
+                        print(f"✅ 登录已确认（有 local_username），登录状态已保存到 {LOGIN_STATE}；现在可以关闭窗口", flush=True)
+                elif any(_logged_in(x, U) for x in pages) and not warned_soft:
+                    warned_soft = True; clog("page looks logged-in but no login cookie yet (NOT saved)")
+                    print("页面看起来已登录，但这个窗口的 profile 里还没有登录 cookie（未保存）：确认你是在本窗口登录的", flush=True)
             except Exception as e:
                 if closed: break
                 clog(f"poll error {type(e).__name__}")
@@ -1146,7 +1182,92 @@ def login(url, poll=3.0):
         try: ctx.close()
         except Exception: pass
     clog("login window closed")
-    print("登录窗口已关闭，profile 已保存" + ("（含 storage_state）" if saved_sig else "（未检测到已登录状态，未保存 storage_state）"), flush=True)
+    if saved_sig:
+        print("登录窗口已关闭，登录状态已保存（含 storage_state）", flush=True); clear_login_alert()
+    else:
+        clog("login NOT confirmed before window closed")
+        desk = ES.desktop_browser_ehunt_login()
+        print("❌ 登录窗口已关闭，但没有确认到登录（profile 里没有 local_username），worker 仍是未登录状态" +
+              (f"；桌面浏览器 {desk} 里有 EHunt 登录 —— 你可能登录在了桌面浏览器，请重新运行 login 并在「{ES.LOGIN_WINDOW_TITLE}」窗口里登录" if desk else ""), flush=True)
+        return 2
+
+# ---- 2026-11-04：掉线告警 / 等待重新登录自动恢复 / 空闲保活 ----
+LOGIN_ALERT = os.path.join(DATA_DIR, "ehunt-login-alert.json")
+LOGIN_STATUS = {"ok": None, "kind": None, "at": None, "last_ok": 0.0}   # 进心跳 info.ehunt_login，网页可读
+LOGIN_WAIT = {"since": None}   # 有任务因掉线暂停时的时间戳；状态文件更新（重新登录）后自动恢复
+WAIT_STAGE = "login_wait"
+WAIT_MSG = "EHunt 登录失效，已暂停等待重新登录；在 box 运行 deploy/box-selection-worker.sh login 登录后会自动继续"
+
+def raise_login_alert(kind, msg):
+    LOGIN_STATUS.update(ok=False, kind=kind, at=NOW())
+    log.critical("EHUNT LOGIN ALERT kind=%s: %s", kind, msg[:300])
+    try:
+        fd = os.open(LOGIN_ALERT + ".tmp", os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f: json.dump({"kind": kind, "message": msg[:500], "at": NOW()}, f, ensure_ascii=False)
+        os.replace(LOGIN_ALERT + ".tmp", LOGIN_ALERT)
+    except OSError: log.warning("write login alert failed", exc_info=True)
+
+def clear_login_alert():
+    LOGIN_STATUS.update(ok=True, kind=None, at=NOW(), last_ok=time.time())
+    try: os.unlink(LOGIN_ALERT)
+    except OSError: pass
+
+def pause_for_login(store, run, err, batch=None):
+    """掉线：任务不标失败 → paused + progress.stage=login_wait；批次保持 queued（断点保留），重新登录后自动恢复。"""
+    LOGIN_WAIT["since"] = LOGIN_WAIT["since"] or time.time()
+    raise_login_alert(getattr(err, "kind", "unknown"), str(err))
+    was = "counting" if run["status"] == "counting" else "running"
+    if batch: _safe(store.patch_batch, batch["id"], status="queued")
+    _safe(store.patch_run, run["id"], status="paused", locked_by=None, error=WAIT_MSG,
+          progress={"stage": WAIT_STAGE, "resume_as": "count_queued" if was == "counting" else "queued", "kind": getattr(err, "kind", None), "at": NOW()})
+
+def login_refreshed_since(ts, path=None):
+    """状态文件是真登录且在 ts 之后写入（= 重新登录过）。"""
+    path = path or LOGIN_STATE
+    try: m = os.path.getmtime(path)
+    except OSError: return False
+    st = load_login_state(path)
+    return bool(st and ES.has_login_cookie(st["cookies"]) and m > (ts or 0))
+
+def resume_login_waits(store):
+    """把 login_wait 暂停的任务放回队列（按暂停前状态）。返回恢复条数。"""
+    rows = store._req("GET", f"/rest/v1/sel_runs?status=eq.paused&progress->>stage=eq.{WAIT_STAGE}&select=id,keyword,progress") or []
+    n = 0
+    for r in rows:
+        to = (r.get("progress") or {}).get("resume_as") or "queued"
+        store._req("PATCH", f"/rest/v1/sel_runs?id=eq.{r['id']}&status=eq.paused", {"status": to, "error": None, "queue_at": NOW(),
+                   "progress": {"stage": "requeued", "why": "EHunt 已重新登录，自动继续", "at": NOW()}}, "return=minimal")
+        log.info("run %s (%s) resumed after relogin as %s", r["id"], r.get("keyword"), to); n += 1
+    return n
+
+def maybe_resume_after_relogin(store):
+    """worker 循环每轮调用：有等待且状态文件已更新 → 恢复；启动时（since=None）只要状态文件是登录态也恢复一次。"""
+    since = LOGIN_WAIT["since"]
+    if since is not None and not login_refreshed_since(since): return 0
+    if since is None and not login_refreshed_since(0): return 0
+    try: n = resume_login_waits(store)
+    except Exception: log.warning("resume login waits failed", exc_info=True); return 0
+    if since is not None: LOGIN_WAIT["since"] = None; clear_login_alert()
+    return n
+
+def keepalive_check():
+    """空闲保活：打开 EHunt 页，登录正常 → 刷新/回写会话；掉线 → 诊断 + 告警（不等抓取失败）。返回 True/False。"""
+    from playwright.sync_api import sync_playwright
+    U = ui()
+    with sync_playwright() as p:
+        ctx = launch_ctx(p)
+        try:
+            pg = ctx.pages[0] if ctx.pages else ctx.new_page(); pg.goto(U["url"], wait_until="networkidle", timeout=60000)
+            dismiss_overlays(pg, U); _check_login(pg, U)
+            clear_login_alert(); log.info("ehunt keepalive ok"); return True
+        except LoginExpired as e:
+            LOGIN_WAIT["since"] = LOGIN_WAIT["since"] or time.time(); raise_login_alert(getattr(e, "kind", "unknown"), str(e)); return False
+        finally:
+            try: ctx.close()
+            except Exception: pass
+
+KEEPALIVE_ON = os.environ.get("EHUNT_KEEPALIVE", "1") != "0"
+KEEPALIVE_EVERY = float(os.environ.get("EHUNT_KEEPALIVE_SECONDS", str(ES.KEEPALIVE_SECONDS)))
 
 WORDS_TTL = int(os.environ.get("SEL_WORDS_TTL", "300"))
 LOOKUPS_ON = os.environ.get("EHUNT_WEB_LOOKUPS", "1") != "0"   # 预筛选主图查询开关
@@ -1158,7 +1279,7 @@ def main(argv=None):
     a = ap.parse_args(argv); logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
     if a.login: return login(a.login_url)
     if a.lookup_dry: return lookup_dry([int(x) for x in a.lookup_dry.split(",") if x.strip()])
-    store = Store(); last_purge = 0; last_words = 0
+    store = Store(); last_purge = 0; last_words = 0; START_TS[0] = time.time()
     if not a.fake: start_heartbeat(store)
     while True:
         if time.time() - last_purge > 86400:  # 启动时 + 每 24 小时：DB 3 天清理（pg_cron 不可用时的兜底）+ 本地排除日志清理
@@ -1181,6 +1302,14 @@ def main(argv=None):
             except Exception as e:
                 if is_poisoned(e): log.critical("Playwright poisoned during lookups; exiting %s for restart", EXIT_RECYCLE); recycle()
                 log.warning("lookups failed", exc_info=True)
+        if not a.fake: maybe_resume_after_relogin(store)
+        if LOGIN_WAIT["since"] is not None and not a.fake:   # 掉线等待中：不认领新任务（否则每个都会失败），只等重新登录
+            PHASE[0] = "login_wait"
+            if a.once: break
+            time.sleep(POLL); continue
+        if KEEPALIVE_ON and not a.fake and ES.keepalive_due(LOGIN_STATUS["last_ok"] or START_TS[0], every=KEEPALIVE_EVERY):
+            try: keepalive_check()
+            except Exception: log.warning("keepalive failed", exc_info=True); LOGIN_STATUS["last_ok"] = time.time() - KEEPALIVE_EVERY + 1800   # 浏览器异常：30 分钟后再试
         run = store.claim()
         if run:
             log.info("claimed run %s kw=%s status=%s", run["id"], run["keyword"], run["status"])
@@ -1196,6 +1325,7 @@ def main(argv=None):
 # box 心跳（007 worker_heartbeat，worker_id = box-selection；无需迁移）：独立线程每 HB_EVERY 秒写一次，
 # 长时间抓取 / 豆包视觉批次期间也照常写 → ECS 端据此区分“box 离线（休眠/worker 没在跑）”与“box 在线但正忙”。
 HB_ID = os.environ.get("SEL_HEARTBEAT_ID", "box-selection")
+START_TS = [time.time()]
 HB_EVERY = max(5, int(os.environ.get("SEL_HEARTBEAT_SECONDS", "30")))
 PHASE = ["idle"]
 # run 级看门狗（无新迁移，只用 PostgREST PATCH）：running/counting 且 heartbeat_at 超过 RUN_STALE_SECONDS（15 分钟）没更新、不是本进程正在跑的那个 →
@@ -1218,7 +1348,8 @@ def start_heartbeat(store, every=None):
     def loop():
         warned = False; last_chk = 0.0
         while True:
-            try: store.heartbeat({"pid": os.getpid(), "phase": PHASE[0], "uptime_s": int(time.time() - t0), "lookups": LOOKUPS_ON}); warned = False
+            try: store.heartbeat({"pid": os.getpid(), "phase": PHASE[0], "uptime_s": int(time.time() - t0), "lookups": LOOKUPS_ON,
+                                 "ehunt_login": {k: LOGIN_STATUS[k] for k in ("ok", "kind", "at")}}); warned = False
             except Exception as e:
                 if not warned: log.warning("heartbeat failed: %s", _brief(e) if is_transient(e) else str(e)[:120]); warned = True
             if time.time() - last_chk >= RUN_STALE_CHECK_EVERY:
@@ -1243,6 +1374,8 @@ def handle_run(store, run, a, lookups):
             if is_poisoned(e):
                 log.critical("Playwright poisoned during count; requeue run %s and exit for restart", run["id"])
                 _safe(store.patch_run, run["id"], status="count_queued", locked_by=None, error=None); recycle()
+            if isinstance(e, LoginExpired):
+                log.warning("count paused: EHunt logged out (%s)", getattr(e, "kind", "?")); return pause_for_login(store, run, e)
             log.exception("count failed"); _safe(store.patch_run_if, run["id"], "counting", status="failed", error=str(e)[:300], finished_at=NOW())
         return
     b = store.open_batch(run["id"])
@@ -1269,6 +1402,8 @@ def handle_run(store, run, a, lookups):
         if is_poisoned(e):
             log.critical("Playwright poisoned during batch; requeue run %s and exit for restart", run["id"])
             _safe(store.patch_batch, b["id"], status="queued"); _safe(store.patch_run, run["id"], status="queued", locked_by=None); recycle()
+        if isinstance(e, LoginExpired):
+            log.warning("batch paused: EHunt logged out (%s)", getattr(e, "kind", "?")); return pause_for_login(store, run, e, batch=b)
         log.exception("batch failed")
         msg = f"读取中断（{_brief(e) if is_transient(e) else str(e)[:200]}），已读部分已保留，可点「继续本批」接着读"
         _safe(store.patch_batch, b["id"], status="canceled", finished_at=NOW())          # 029 sel_resume 只恢复“已停止”的批次
