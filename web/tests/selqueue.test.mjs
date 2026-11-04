@@ -67,3 +67,12 @@ test("软限流 → 有问题列表标「限流」，原因经 friendlyErr 一�
   const kw = queueItem({ id: "k", status: "failed", error: "关键词未生效：Selected: 中没有 Keyword: book" }, null, NOW);
   assert.equal(kw.label, "失败"); assert.match(friendlyErr(kw.reason), /关键词未生效/);
 });
+test("EHunt 掉线 → 等待重新登录（不算失败、不用手动继续，登录后自动恢复）", () => {
+  const x = queueItem({ id: "c", status: "paused", error: "EHunt 登录失效，已暂停等待重新登录", progress: { stage: "login_wait", resume_as: "count_queued" } }, null, NOW);
+  assert.equal(x.group, "wait"); assert.equal(x.label, "等待重新登录"); assert.ok(x.loginWait); assert.deepEqual(x.acts, ["cancel"]); assert.match(x.reason, /重新登录/);
+  const y = queueItem({ id: "p", status: "paused", progress: {} }, B({}), NOW); assert.equal(y.label, "暂停");
+});
+test("掉线等待时不误报 box 离线，改提示重新登录", () => {
+  const q = buildQueue([{ id: "c", status: "paused", progress: { stage: "login_wait" } }, { id: "x", status: "queued", queue_at: ago(400) }], () => null, NOW);
+  assert.equal(q.loginWait, true); assert.equal(q.offline, false);
+});
