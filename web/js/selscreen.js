@@ -107,7 +107,7 @@ export function sendOutcome(res, left = 0) {
   return { kind: "ok", go, text: `✓ 已发送 ${sent} 条到预筛选${res.screen_batches > 1 ? `（分成 ${res.screen_batches} 个批次，每个 ≤500 条）` : ""}${extra}` };
 }
 // 「查询数量」只在本次提交请求进行中禁用（防连点）；当前任务进行中也能查询新词，进入队列按顺序执行（037/048）
-// 058：「从 ABA 导入 10 个」选择器（纯函数，web/tests/abapick.test.mjs）
+// 058/059：「从 ABA 导入 10 个」选择器——059 起依次出词，打开即消耗（纯函数，web/tests/abapick.test.mjs）
 export const ABA_PICK_N = 10;
 export function togglePick(sel, id) { const s = new Set(sel); s.has(id) ? s.delete(id) : s.add(id); return s; }
 // 按 ABA 列表原顺序（与 aba_claim_batch 排序一致）返回选中的词，进入查询数量→抓取队列
@@ -115,11 +115,13 @@ export const pickedInOrder = (list, sel) => (list || []).filter((x) => sel.has(x
 export const abaOkText = (n) => n ? `确认（已选 ${n} 个）` : "确认（未选择）";
 export function abaPickHtml(list, sel, esc, demo = false) {
   const chips = (list || []).map((x) => { const on = sel.has(x.root_id);
-    return `<button type="button" class="aba-chip${on ? " on" : ""}" data-abapick="${esc(String(x.root_id))}" aria-pressed="${on}"><span class="aba-ck">${on ? "✓" : ""}</span><b class="aba-en">${esc(x.keyword)}</b><span class="aba-zh${x.root_zh ? "" : " none"}">${esc(x.root_zh || "暂无中文")}</span>${x.seen_count ? `<span class="aba-seen">查过 ${x.seen_count} 次</span>` : ""}</button>`; }).join("");
-  return `${demo ? '<p><span class="pill pill-bad">演示数据</span></p>' : ""}<p class="hint">点一下选中，再点取消；确认后按顺序进入「查询数量 → 抓取」队列（任务进行中也能排队）。未选的词不入队，下次仍会出现；已导入过的词不会再出现。</p>
+    return `<button type="button" class="aba-chip${on ? " on" : ""}" data-abapick="${esc(String(x.root_id))}" aria-pressed="${on}"><span class="aba-ck">${on ? "✓" : ""}</span><b class="aba-en">${esc(x.keyword)}</b><span class="aba-zh${x.root_zh ? "" : " none"}">${esc(x.root_zh || "暂无中文")}</span></button>`; }).join("");
+  return `${demo ? '<p><span class="pill pill-bad">演示数据</span></p>' : ""}<p class="hint">点一下选中，再点取消；确认后按顺序进入「查询数量 → 抓取」队列（任务进行中也能排队）。本次出现的 10 个词，不管选没选、点没点确认，下次都不会再出现；下次点击会按 ABA 词语表顺序接着出后面 10 个（已导入、已查过的词自动跳过）。</p>
     <div class="aba-tools"><button type="button" class="btn btn-ghost btn-sm" data-abaall="1">全选</button><button type="button" class="btn btn-ghost btn-sm" data-abanone="1">清空</button><span class="hint" id="abaN">已选 ${sel.size} / ${(list || []).length}</span></div>
     <div class="aba-grid">${chips}</div>`;
 }
+// 059 演示用：按顺序取下一批（跳过已出现/已导入），返回 [批次, 新游标集合]
+export function nextAbaBatch(all, shown, n = ABA_PICK_N) { const b = (all || []).filter((x) => !shown.has(x.root_id)).slice(0, n); const s = new Set(shown); for (const x of b) s.add(x.root_id); return [b, s]; }
 export const countDisabled = (run, submitting) => !!submitting;
 export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
   const QSP = new URLSearchParams(location.search);
@@ -234,22 +236,22 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
     location.hash = `#/selscreen/${data}`;
   }
   // 058：从 ABA 词根库预览 10 个（不领取）→ 小方块中英文多选 → 确认后只把选中的按顺序建“查询数量”任务（与手动查询数量同一条路 sel_count）
-  const DEMO_ABA = [["costume","服装/戏服"],["carrie","Carrie（人名/IP）"],["paper","纸"],["candy","糖果"],["towel","毛巾"],["squishy","捏捏乐"],["case","保护壳/盒"],["battery","电池"],["decoration","装饰"],["magnesium glycinate","甘氨酸镁"]]
-    .map(([k, z], i) => ({ root_id: 9000 + i, keyword: k, root_zh: z, seen_count: k === "decoration" ? 1 : 0 })); // 演示数据（中文为演示用）
+  const DEMO_ABA = [["costume","服装/戏服"],["carrie","Carrie（人名/IP）"],["paper","纸"],["candy","糖果"],["towel","毛巾"],["squishy","捏捏乐"],["case","保护壳/盒"],["battery","电池"],["decoration","装饰"],["magnesium glycinate","甘氨酸镁"],["sticker","贴纸"],["mug","马克杯"],["necklace","项链"],["planner","手账本"],["keychain","钥匙扣"],["candle","蜡烛"],["tote bag","托特包"],["earrings","耳环"],["poster","海报"],["bookmark","书签"],["coaster","杯垫"],["blanket","毯子"],["ornament","挂饰"],["pillow","抱枕"],["wall art","墙面装饰画"]]
+    .map(([k, z], i) => ({ root_id: 9000 + i, keyword: k, root_zh: z })); // 演示数据（中文为演示用）
   async function abaImport() {
     let list;
-    if (DEMO) list = DEMO_ABA.filter((x) => !V.abaDone?.has(x.root_id));
-    else {
-      const { data, error } = await getSb().rpc("aba_preview_for_selection", { p_limit: ABA_PICK_N });
+    if (DEMO) [list, V.abaShown] = nextAbaBatch(DEMO_ABA, V.abaShown || new Set());
+    else { // 059：服务端游标，取到即记为“出现过”（取消/关闭也算），没选的词下次不再出现
+      const { data, error } = await getSb().rpc("aba_next_for_selection", { p_limit: ABA_PICK_N });
       if (error) return toast(`读取 ABA 词根失败：${error.message}`, "bad");
       list = data || [];
     }
-    if (!list.length) return toast("ABA 词根已全部导入，没有新的词根", "bad");
+    if (!list.length) return toast("ABA 词语表已经全部出过一遍，没有新的词了", "bad");
     let sel = new Set();
     const body = $("modalBody"), paint = () => { body.innerHTML = abaPickHtml(list, sel, esc, DEMO); const ok = $("modalOk"); ok.textContent = abaOkText(sel.size); ok.disabled = !sel.size; };
     const onClick = (e) => { const t = e.target.closest?.("button"); if (!t) return;
       if (t.dataset.abapick) sel = togglePick(sel, Number(t.dataset.abapick)); else if (t.dataset.abaall) sel = new Set(list.map((x) => x.root_id)); else if (t.dataset.abanone) sel = new Set(); else return; paint(); };
-    const p = confirmDialog({ title: `从 ABA 导入（${list.length} 个候选）`, ok: abaOkText(0), body: "", validate: () => (sel.size ? pickedInOrder(list, sel) : false) });
+    const p = confirmDialog({ title: `从 ABA 导入（本批 ${list.length} 个，下次换下一批）`, ok: abaOkText(0), body: "", validate: () => (sel.size ? pickedInOrder(list, sel) : false) });
     body.addEventListener("click", onClick); paint();
     let picked; try { picked = await p; } finally { body.removeEventListener("click", onClick); $("modalOk").disabled = false; }
     if (!picked?.length) return;
@@ -621,7 +623,7 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
     const ST = { count_queued: "排队查询数量", counting: "读取结果数中", queued: "排队中（等待 box 抓取进程）", running: "读取 EHunt 列表页中", batch_done: "本批完成", succeeded: "全部完成", failed: "失败", canceled: "已停止" };
     const prog = progressPanel(r);
     $("ssStart").innerHTML = `<div id="ssRecent"></div><div class="card ss-start"><div class="ss-form"><input id="ssKw" class="input" maxlength="${KW_MAX}" placeholder="EHunt 关键词，例如 acrylic decoration" value="${esc($("ssKw")?.value || r?.keyword || "")}">
-        <button class="btn btn-primary" id="ssCount"${countDisabled(r, V.counting) ? " disabled" : ""} title="${active(r) ? "当前任务进行中也可以查询新关键词，会排进队列按顺序执行" : ""}">查询数量</button><button class="btn btn-ghost btn-sm" id="ssAba" title="从 ABA 词根库取 10 个候选，选中后各建一个“查询数量”任务排队（每个词根只会导入一次）">从 ABA 导入 10 个</button><button class="btn btn-ghost btn-sm" id="ssKwLog" title="导出全部关键词查询记录（永久保留）">导出查询记录 CSV</button></div>${countPanel(r)}${prog}</div>`; DEMO ? loadRecent() : renderRecent();
+        <button class="btn btn-primary" id="ssCount"${countDisabled(r, V.counting) ? " disabled" : ""} title="${active(r) ? "当前任务进行中也可以查询新关键词，会排进队列按顺序执行" : ""}">查询数量</button><button class="btn btn-ghost btn-sm" id="ssAba" title="每点一次按 ABA 词语表顺序出 10 个新词（出过的不再出现），选中后各建一个“查询数量”任务排队">从 ABA 导入 10 个</button><button class="btn btn-ghost btn-sm" id="ssKwLog" title="导出全部关键词查询记录（永久保留）">导出查询记录 CSV</button></div>${countPanel(r)}${prog}</div>`; DEMO ? loadRecent() : renderRecent();
     const done = V.batches.filter((b) => FIN.includes(b.status));
     const all = [...new Set(done.flatMap((b) => V.links[b.id] || []))], exAll = done.reduce((a, b) => a + (b.excluded_count || 0), 0);
     const exR = {}; done.forEach((b) => Object.entries(b.excluded_by_reason || {}).forEach(([k, v]) => exR[k] = (exR[k] || 0) + v));
