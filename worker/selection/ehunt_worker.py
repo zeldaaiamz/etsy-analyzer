@@ -121,7 +121,8 @@ class PageStuck(RuntimeError): pass          # 翻页到第 N 页超时（页码
 class KeywordNotApplied(RuntimeError): pass  # 关键词未生效（Selected: 中没有 Keyword）→ 同样重开重试（2026-10-21 book 续读）
 class RateLimited(RuntimeError): pass        # EHunt 软限流横幅 / 搜索未进 Selected → 不重试关键词、不进 page_loop 重试（2026-10-31）
 class RunStopped(BaseException): pass        # 重试间隙发现用户已取消/暂停：立即停（BaseException：不被页内 except Exception 吞掉）
-RETRY_KINDS = {PageTimeout: "超时", PageStuck: "翻页卡住", KeywordNotApplied: "关键词未生效"}  # RateLimited / LoginExpired 不在此列：立即抛出
+class FilterNotApplied(RuntimeError): pass  # 价格/销量筛选 chip 没出现（下拉面板竞态，2026-11-17 volufiline）→ 只重做该筛选；仍失败 → 翻页重开 / 查询数量有上限地重新排队
+RETRY_KINDS = {PageTimeout: "超时", PageStuck: "翻页卡住", KeywordNotApplied: "关键词未生效", FilterNotApplied: "筛选未生效"}  # RateLimited / LoginExpired 不在此列：立即抛出
 
 def _profile_from_cmd(cmd, profile):
     """匹配 --user-data-dir=PATH 或 --user-data-dir PATH。"""
@@ -249,7 +250,7 @@ def page_loop(open_session, start_rank, end_rank, ps, between=None, timeout=None
                     if kind is None: raise
                     last = (kind, e)
                     log.warning("ehunt page %s: %s after %.0fs (attempt %d/%d, limit %.0fs): %s — reopening same page (rank %s→)",
-                                page, "timed out" if kind == "超时" else "stuck paging" if kind == "翻页卡住" else "keyword not applied",
+                                page, "timed out" if kind == "超时" else "stuck paging" if kind == "翻页卡住" else "filter not applied" if kind == "筛选未生效" else "keyword not applied",
                                 clock() - t0, att + 1, retries + 1, timeout, str(e)[:120], done + 1)
                     if att < retries: stage("page_retry", page=page, retry=att + 1, retry_max=retries, retry_why=kind)
                     if sess is not None:
@@ -487,6 +488,99 @@ def _click(pg, U, target, timeout=10000):
             if attempt == 2: dismiss_overlays(pg, U); raise
     time.sleep(0.5); dismiss_overlays(pg, U)
 
+# ---- 筛选施加（2026-11-17 修复「筛选未生效」：volufiline/cheese/heater…）----
+# 旧做法：点开下拉 → 固定 sleep(1) → fill Min/Max → 点 OK → 最后一次性校验 chip。页面慢时面板没就绪 / 输入被吞 / OK 没生效 → 随机丢一个筛选。
+# 新做法：等「恰好一个」对应面板可见 → 逐键输入并回读 → 点 OK 等面板关闭 → 等该筛选的 chip 出现；缺了只重做这个筛选，最多 FILTER_TRIES 次。
+_fsleep = time.sleep; _fnow = time.monotonic          # 测试里替换成假时钟
+FILTER_TRIES = int(os.environ.get("EHUNT_FILTER_TRIES", "3"))
+TYPE_TRIES = 3
+POPOVER_WAIT_S, POPOVER_CLOSE_S, CHIP_WAIT_S = 10.0, 5.0, 6.0
+
+def _chip_norm(x): return re.sub(r"\s+", "", x or "").lower()
+
+def missing_chips(sel, need):
+    """Selected: 行文字按 × / 换行切成一个个 chip，逐个精确比对（忽略空白与大小写）。"Price: <40" 不算 "Price: 8~40"。"""
+    have = {_chip_norm(t) for t in re.split(r"[×\n]", sel or "") if t.strip()}
+    return [x for x in need if _chip_norm(x) not in have]
+
+def _selected_text(pg, U):
+    try: return pg.locator(U["selected_row"]).first.inner_text()
+    except Exception: return ""
+
+def wait_popover(pg, U, need, avoid=None, timeout=POPOVER_WAIT_S):
+    """等到恰好一个展开的下拉面板含可见的 need（且不含 avoid）→ 返回指向它的 Locator；超时 → FilterNotApplied。"""
+    end = _fnow() + timeout; n = 0
+    while True:
+        cand = [p for p in _visible(pg.locator(U["popover"])) if _visible(p.locator(need)) and not (avoid and _visible(p.locator(avoid)))]
+        n = len(cand)
+        if n == 1:
+            loc = pg.locator(U["popover"]).filter(visible=True).filter(has=pg.locator(need))   # 只认可见面板（收起中的不算）
+            if avoid: loc = loc.filter(has_not=pg.locator(avoid))
+            return loc.first
+        if _fnow() >= end: raise FilterNotApplied(f"筛选下拉面板未就绪（可见候选 {n} 个）")
+        _fsleep(0.25)
+
+def type_verified(loc, value, tries=TYPE_TRIES):
+    """逐键输入（真实 keydown/input 事件，Vue v-model 能收到）→ 回读输入框；不一致就清空重输，最多 tries 次。"""
+    want = str(value); got = None
+    for att in range(tries):
+        loc.click(timeout=5000); loc.press("Control+A"); loc.press("Backspace")
+        loc.press_sequentially(want, delay=40)
+        got = (loc.input_value(timeout=3000) or "").strip()
+        if got == want: return
+        log.warning("ehunt filter input: typed %r but box shows %r (attempt %d/%d)", want, got, att + 1, tries)
+        _fsleep(0.4 * (att + 1))
+    raise FilterNotApplied(f"筛选输入框写不进 {want}（实际：{got!r}）")
+
+def _wait_gone(loc, timeout):
+    end = _fnow() + timeout
+    while _visible(loc) and _fnow() < end: _fsleep(0.2)
+
+def _wait_chips(pg, U, chips, timeout):
+    end = _fnow() + timeout
+    while True:
+        miss = missing_chips(_selected_text(pg, U), chips)
+        if not miss or _fnow() >= end: return miss
+        _fsleep(0.3)
+
+def apply_filter(pg, U, name, dd, need, avoid, fields, chips, tries=None):
+    """施加一个筛选（一个下拉面板）并确认 chips 出现；缺了只重做这一个，最多 tries 次，仍缺 → FilterNotApplied（含 筛选未生效）。
+    fields: [(行选择器或 None, 输入框选择器, 值)]。"""
+    tries = FILTER_TRIES if tries is None else tries; why = ""
+    for att in range(tries):
+        try:
+            _click(pg, U, dd)
+            pop = wait_popover(pg, U, need, avoid)
+            for line, sel, val in fields:
+                type_verified((pop.locator(line).locator(sel) if line else pop.locator(sel)).first, val)
+            _click(pg, U, pop.locator(U["ok_btn"]).first)
+            _wait_gone(pop, POPOVER_CLOSE_S)
+            pg.wait_for_load_state("networkidle", timeout=30000)
+            dismiss_overlays(pg, U)
+            miss = _wait_chips(pg, U, chips, CHIP_WAIT_S)
+            if not miss:
+                if att: log.info("ehunt filter %s applied on attempt %d/%d", name, att + 1, tries)
+                return
+            why = f"缺少 {miss}"
+        except FilterNotApplied as e: why = str(e)
+        log.warning("ehunt filter %s not applied (attempt %d/%d): %s", name, att + 1, tries, why[:160])
+        try: pg.keyboard.press("Escape")      # 收起可能半开的面板，下次点击是“打开”而不是“关上”
+        except Exception: pass
+        _fsleep(1.0 + att)
+    sel = _selected_text(pg, U)
+    raise FilterNotApplied(f"筛选未生效，Selected: 缺少 {missing_chips(sel, chips) or chips}（实际：{sel[:120]}；{name} 已重做 {tries} 次）")
+
+def set_price(pg, U, F):
+    """Basic: Price(USD) → 自定义 Min/Max → OK（面板里有 Max、没有 Total sales 行）。"""
+    apply_filter(pg, U, "Price", U["price_dd"], U["max_input"], U["total_sales_line"],
+                 [(None, U["min_input"], F["price_min"]), (None, U["max_input"], F["price_max"])], [U["chip_price"].format(**F)])
+
+def set_sales(pg, U, F):
+    """Sales → Total sales: Min + 7-day sales: Min → OK。"""
+    apply_filter(pg, U, "Sales", U["sales_dd"], U["total_sales_line"], None,
+                 [(U["total_sales_line"], U["min_input"], F["min_sales"]), (U["sales7_line"], U["min_input"], F["min_sales_7d"])],
+                 [U["chip_total"].format(**F), U["chip_7d"].format(**F)])
+
 BROWSER_CHANNEL = os.environ.get("EHUNT_BROWSER_CHANNEL", "")   # 空 = Playwright 自带 chromium；"chrome" = 系统 Chrome
 SYSTEM_CHROME = "/opt/google/chrome/chrome"
 def launch_ctx(p, headless=True, viewport=None, apply_state=True):
@@ -594,23 +688,15 @@ def _open_list(p, keyword, params):
             # 一次确认：Search 后仍无 Keyword chip → 查横幅 / 未筛选 Find；是限流则立即停，不是才继续重试
             _check_rate_limit(pg, U, keyword=keyword, after_search=True)
         else: raise KeywordNotApplied(f"关键词未生效：Selected: 中没有 Keyword: {keyword}")
-        # Basic: Price(USD) → 自定义 Min/Max → OK（都在展开的 popover 里）
-        _click(pg, U, U["price_dd"]); time.sleep(1); pop = pg.locator(U["popover"])
-        pop.locator(U["min_input"]).first.fill(str(F["price_min"])); pop.locator(U["max_input"]).first.fill(str(F["price_max"]))
-        _click(pg, U, pop.locator(U["ok_btn"]).first); pg.wait_for_load_state("networkidle", timeout=30000); time.sleep(2)
-        # Sales → Total sales: Min 100 + 7-day sales: Min 4（>3）→ OK
-        _click(pg, U, U["sales_dd"]); time.sleep(1); pop = pg.locator(U["popover"])
-        pop.locator(U["total_sales_line"]).locator(U["min_input"]).first.fill(str(F["min_sales"]))
-        pop.locator(U["sales7_line"]).locator(U["min_input"]).first.fill(str(F["min_sales_7d"]))
-        _click(pg, U, pop.locator(U["ok_btn"]).first); pg.wait_for_load_state("networkidle", timeout=30000); time.sleep(2)
-        dismiss_overlays(pg, U)
+        set_price(pg, U, F)   # 每个筛选单独等面板就绪 / 回读输入 / 等 chip，缺了只重做它（2026-11-17）
+        set_sales(pg, U, F)
         # 排序默认 ↓7-day sales，校验
         st = pg.locator(U["sort_dd"]).first.inner_text().strip()
         if "7-day" not in st: raise RuntimeError(f"排序不是 7 天销量降序：{st}")
         sel = pg.locator(U["selected_row"]).first.inner_text()
         need = [U["chip_keyword"].format(keyword=keyword), U["chip_price"].format(**F), U["chip_total"].format(**F), U["chip_7d"].format(**F)]
-        miss = [x for x in need if x.replace(" ", "").lower() not in sel.replace(" ", "").lower()]
-        if miss: raise RuntimeError(f"筛选未生效，Selected: 缺少 {miss}（实际：{sel[:120]}）")
+        miss = missing_chips(sel, need)
+        if miss: raise FilterNotApplied(f"筛选未生效，Selected: 缺少 {miss}（实际：{sel[:120]}）")
     except Exception:
         try: os.makedirs(LOGDIR, exist_ok=True); pg.screenshot(path=f"{LOGDIR}/ehunt-fail-{int(time.time())}.png")
         except Exception: pass
@@ -1361,6 +1447,7 @@ def start_heartbeat(store, every=None):
 
 def recycle(): logging.shutdown(); os._exit(EXIT_RECYCLE)
 
+COUNT_FILTER_REQUEUES = 2   # 查询数量阶段「筛选未生效」最多自动重新排队 2 次，第 3 次仍失败才标失败（防死循环）
 def handle_run(store, run, a, lookups):
     """处理一条认领到的 run。Playwright 被污染（asyncio loop 报错）→ 把 run 放回队列后退出进程，由守护脚本重启；
     其他失败：查询数量 → failed（用户重新查询）；抓取批次 → 本批标记“已停止”+原因，网页「继续本批」从断点接着读。"""
@@ -1376,7 +1463,16 @@ def handle_run(store, run, a, lookups):
                 _safe(store.patch_run, run["id"], status="count_queued", locked_by=None, error=None); recycle()
             if isinstance(e, LoginExpired):
                 log.warning("count paused: EHunt logged out (%s)", getattr(e, "kind", "?")); return pause_for_login(store, run, e)
-            log.exception("count failed"); _safe(store.patch_run_if, run["id"], "counting", status="failed", error=str(e)[:300], finished_at=NOW())
+            err = str(e)[:300]
+            if isinstance(e, FilterNotApplied):   # 页面竞态，属暂时性：有上限地重新排队（attempts 由 sel_claim_run 每次认领 +1）
+                n = int(run.get("attempts") or 1)
+                if n <= COUNT_FILTER_REQUEUES:
+                    log.warning("count: %s — requeue run %s (%d/%d)", str(e)[:120], run["id"], n, COUNT_FILTER_REQUEUES)
+                    _safe(store.patch_run_if, run["id"], "counting", status="count_queued", locked_by=None, queue_at=NOW(), error=None,
+                          progress={"stage": "requeued", "why": f"筛选未生效，已自动重新排队（第 {n}/{COUNT_FILTER_REQUEUES} 次）", "at": NOW()})
+                    return
+                err = f"{str(e)[:240]}（已自动重试 {COUNT_FILTER_REQUEUES} 次）"
+            log.exception("count failed"); _safe(store.patch_run_if, run["id"], "counting", status="failed", error=err, finished_at=NOW())
         return
     b = store.open_batch(run["id"])
     if not b: return store.patch_run(run["id"], status="failed", error="没有待读批次", finished_at=NOW())
