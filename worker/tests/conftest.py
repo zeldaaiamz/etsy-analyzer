@@ -15,3 +15,11 @@ def _fresh_net_breaker(monkeypatch):
     import sys
     W = sys.modules.get("selection.ehunt_worker")
     if W is not None and hasattr(W, "NetBreaker"): monkeypatch.setattr(W, "NET", W.NetBreaker())
+
+
+@pytest.fixture(autouse=True)
+def _no_net_retry_sleep(monkeypatch):
+    """2026-11-17 ②：网络类失败重试前会等 1→2 分钟；测试里不真等。"""
+    import sys
+    W = sys.modules.get("selection.ehunt_worker")
+    if W is not None and hasattr(W, "_net_sleep"): monkeypatch.setattr(W, "_net_sleep", lambda s: None)

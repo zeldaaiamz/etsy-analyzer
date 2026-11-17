@@ -3,7 +3,7 @@
 // ② 查到数量（counted 且 >0）后自动入队抓取（052，lim=min(total,5000)=EHunt/MAX_ROWS；0 条不抓）；也可手动改条数兜底
 // ③ 标题规则先筛：排除的不调豆包、不显示、不入库（页面只一行汇总；原因写 box 本地日志 3 天）→ ④ 通过的调豆包视觉 → 显示符合要求 N 条 + 纯 Etsy 链接
 // ⑤ >1000 分批，每批 1000，最多 5 批 / 5,000；“还剩 N 条未读”只在每批完成后更新 ⑥ 只有符合要求的入库，保留 3 天 ⑦ 网页无搜索，查询找序猿
-import { createSelQueue } from "./selqueue.js?v=0c2ba1b1";
+import { createSelQueue } from "./selqueue.js?v=ecbe5ab8";
 const BATCH = 1000, MAX_ROWS = 5000; // 每批 1000；自动入队上限 min(total_count, MAX_ROWS)=5000（与 052 / EHunt 前 5,000 条一致）
 const RORDER = ["定制", "IP", "材质", "素材/数字文件", "7天销量≤3", "其他"];
 // ---- 纯函数（web/tests/selscreen.test.mjs）----
@@ -15,14 +15,19 @@ export const safeName = (s) => (String(s ?? "").replace(/[^\p{L}\p{N}_-]+/gu, "_
 export function friendlyErr(e) {
   const t = String(e || "");
   if (!t) return "";
-  if (/网络\/EHunt 连接超时/.test(t)) return t;   // worker 2026-11-17 起自己写的中文（已含是否自动重试）
+  if (/box 网络异常|网络\/EHunt 连接超时/.test(t)) return t;   // worker 自己写的中文（已含是否自动重试）；「网络/EHunt 连接超时」= 2026-11-17 预览前的旧记录
   if (/Playwright Sync API inside the asyncio loop/i.test(t)) return "box 抓取进程异常（上一次失败后浏览器没有释放），需要重启 box 上的抓取进程后再试";
   if (/Remote end closed|RemoteDisconnected|Connection reset|URLError|timed out|Temporary failure in name resolution/i.test(t)) return "box 与数据库的连接中断（网络抖动），可点“重试本批”或重新查询";
   if (/EHunt 登录已失效|EHunt 未登录/.test(t)) return "EHunt 登录已失效：需要在 box 上重新人工登录 EHunt";
   // 软限流：worker 写 RATE_LIMIT_MSG；抓取路径可能包一层「读取中断（…）」——统一成同一句，不与 KeywordNotApplied 混淆
   if (/EHunt 限流|请求过多/.test(t)) return "EHunt 限流：请求过多，稍后自动可重试";
   // 纯超时 / 断网多为网络或 EHunt 响应慢（2026-11-17 15:01 断网事故），不再说「网页卡住或改版」
-  if (/Timeout \d+ms exceeded|net::ERR_|ProcessSingleton|profile is already in use/i.test(t)) return /已自动重试/.test(t) ? "网络/EHunt 连接超时，已自动重试，请稍后再试" : "网络/EHunt 连接超时，请稍后再试";
+  // 2026-11-17 ②：打不开页面 / 断网 → box 网络异常；其它单步超时（点按钮等）→ EHunt 页面响应超时；浏览器 profile 占用单独说
+  const again = /已自动重试/.test(t) ? "已自动重试，" : "";
+  if (/Page\.goto: Timeout|net::ERR_|没有出现搜索框|WRONG_VERSION_NUMBER/i.test(t)) return `box 网络异常，${again}请稍后再试`;
+  if (/ProcessSingleton|profile is already in use/i.test(t)) return `box 抓取浏览器被占用（上一个任务还没关完），${again}请稍后再试`;
+  if (/EHunt 页面响应超时/.test(t)) return t;
+  if (/Timeout \d+ms exceeded/i.test(t)) return `EHunt 页面响应超时，${again}请稍后再试`;
   if (/翻页到第 \d+ 页超时/.test(t)) return "EHunt 翻页超时，请稍后重试";
   if (/关键词未生效|筛选未生效|排序不是/.test(t)) return t;
   return /[\u4e00-\u9fff]/.test(t) ? t : `抓取出错：${t.slice(0, 120)}`;
@@ -537,6 +542,8 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
       const steps = CSTEPS.map(([, t], k) => `<span class="ss-pg-dot${k < i ? " ok" : k === i ? " on" : ""}">${k < i ? "✓" : k + 1}</span><span class="${k === i ? "" : "hint"}">${t}</span>`).join('<span class="ss-pg-sep">›</span>');
       const pct = i < 0 ? 3 : [15, 50, 85][i];
       const w = waitedMin(r.created_at), wt = w >= 2 ? `<span class="warn">已等待 ${w} 分钟（box 可能暂停，恢复后自动继续；也可以取消后重试）</span>` : "";
+      if (r.status === "counting" && P.stage === "net_wait")   // 2026-11-17 ②：box 网络异常，worker 等 1→2 分钟后自动重试
+        return wrap("ss-pg-run", '<span class="pill pill-warn">⚠ box 网络异常</span>', `<span class="warn">${esc(P.why || "等待自动重试")}</span>`, bar(pct, pct, "ss-pg-ind"), `<span class="ss-pg-steps">${steps}</span>`);
       return wrap("ss-pg-run", `<span class="pill pill-info"><span class="spin"></span> ${i < 0 ? "排队查询数量（等待 box 抓取进程）" : "查询数量中"}</span>`, i < 0 ? wt : `第 ${i + 1}/3 步`, bar(pct, pct, "ss-pg-ind"), `<span class="ss-pg-steps">${steps}</span>`);
     }
     if (r.status === "paused") return wrap("ss-pg-paused", '<span class="pill pill-warn">⏸ 已暂停</span>', "不会被抓取；在上方「抓取队列」点「继续」从断点接着读", "", "");
@@ -570,6 +577,7 @@ export function createSelScreen({ $, esc, toast, getSb, DEMO, confirmDialog }) {
       : ["抓取中", P.page ? `第 ${P.page} 页${vp ? ` · 同时豆包判断 ${n0(vp)} 条` : ""}` : ""];
     if (P.retry > 0 && (P.stage === "page_retry" || P.stage === "read_setup" || P.stage === "reading"))   // worker 单页超时自动重试中
       stg[1] = `<span class="warn">第 ${P.page || "?"} 页${P.retry_why === "翻页卡住" ? "翻页卡住" : P.retry_why === "关键词未生效" ? "关键词未生效" : "读取超时"}，正在重新打开重试（第 ${P.retry}${P.retry_max ? `/${P.retry_max}` : ""} 次）</span>`;
+    if (P.stage === "net_wait") stg[1] = `<span class="warn">${esc(P.why || "box 网络异常，等待自动重试")}</span>`;   // 2026-11-17 ②
     const vh = visionHint(P); if (vh && (P.stage === "vision" || P.stage === "reading")) stg[1] = `${stg[1] ? `${stg[1]} · ` : ""}${vh}`;   // 防卡：豆包超时重试 / 熔断 / 已等待
     return wrap("ss-pg-run", `<span class="pill pill-info"><span class="spin"></span> ${stg[0]}</span>`, `${range} · <b>${pct}%</b>${stg[1] ? ` · ${stg[1]}` : ""}`, bar(pctR, pctJ), nums);
   }

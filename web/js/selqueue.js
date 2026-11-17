@@ -11,6 +11,9 @@ const qkey = (r) => Date.parse(r.queue_at || r.created_at || 0);
 export function queueItem(r, batch, now = Date.now()) {
   const b = batch || null, P = r.progress || {}, beat = sec(P.at || r.heartbeat_at, now);
   const base = { id: r.id, keyword: r.keyword, status: r.status, batch_no: b?.batch_no ?? r.current_batch ?? null, range: b ? [b.offset_start, b.offset_end] : null, acts: [], reason: "" };
+  // 2026-11-17 ②：worker 遇到网络类失败，等 1→2 分钟后自动重试（progress.stage=net_wait，why 已是中文）
+  if ((r.status === "running" || r.status === "counting") && P.stage === "net_wait" && beat <= STALL_S)
+    return { ...base, group: "running", label: "box 网络异常 · 等待自动重试", reason: P.why || "", netWait: true, counting: r.status === "counting", acts: r.status === "counting" ? ["cancel"] : ["pause", "cancel"] };
   if (r.status === "running") {
     if (beat > STALL_S) return { ...base, group: "problem", label: "卡住", reason: `box 抓取进程 ${Math.round(beat / 60)} 分钟没有更新进度（可能离线或浏览器卡死）`, acts: ["retry", "cancel"] };
     const target = P.target || (b ? b.offset_end - b.offset_start + 1 : 0), judged = Math.max(P.judged || 0, b?.scraped_count || 0), read = Math.max(judged, P.read || 0);
@@ -56,7 +59,7 @@ export function createSelQueue({ $, esc, toast, getSb, DEMO, confirmDialog, frie
   const QSP = new URLSearchParams(location.search);
   const RPC = { pause: "sel_pause", resume: "sel_resume", retry: "sel_resume", cancel: "sel_cancel" };
   const n0 = (v) => Number(v || 0).toLocaleString();
-  function demoFixtures(kind) { // ?demo=1&squeue=running|paused|failed|loginwait|empty —— 全部是演示数字
+  function demoFixtures(kind) { // ?demo=1&squeue=running|paused|failed|loginwait|netwait|empty —— 全部是演示数字
     const now = Date.now(), iso = (s) => new Date(now - s * 1000).toISOString(), B = (rid, no, s, e, st, sc = 0, pc = 0) => ({ id: `${rid}-b${no}`, run_id: rid, batch_no: no, offset_start: s, offset_end: e, status: st, scraped_count: sc, passed_count: pc });
     const runs = [], bat = {}; const add = (r, b) => { runs.push({ created_at: iso(3600), ...r }); if (b) bat[r.id] = b; };
     if (kind !== "empty") {
@@ -66,6 +69,11 @@ export function createSelQueue({ $, esc, toast, getSb, DEMO, confirmDialog, frie
       add({ id: "dq-w3", keyword: "christmas ornament", status: "queued", max_rows: 2000, read_all: true, current_batch: 1, queue_at: iso(900) }, B("dq-w3", 1, 1, 1000, "queued"));
       if (kind === "failed") add({ id: "dq-f1", keyword: "name plate", status: "failed", error: "Remote end closed connection without response", current_batch: 1, created_at: iso(2400), queue_at: iso(2400) }, B("dq-f1", 1, 1, 1000, "failed", 286, 97));
       if (kind === "failed") add({ id: "dq-f2", keyword: "door hanger", status: "running", current_batch: 1, created_at: iso(5000), queue_at: iso(5000), heartbeat_at: iso(1500), progress: { stage: "reading", at: iso(1500) } }, B("dq-f2", 1, 1, 600, "running", 120, 40));
+      if (kind === "netwait") { // 2026-11-17 ②：box 网络异常 → worker 等 1→2 分钟后自动重试；最终失败文案（演示数字）
+        add({ id: "dq-nw1", keyword: "table", status: "counting", created_at: iso(200), queue_at: iso(200), progress: { stage: "net_wait", why: "box 网络异常，60 秒后自动重试（第 1/2 次）", retry_in_s: 60, at: iso(3) } });
+        add({ id: "dq-nw2", keyword: "mat", status: "failed", error: "box 网络异常：已自动重试 2 次仍失败，请稍后再试（Page.goto: Timeout 45000ms exceeded.）", created_at: iso(900), queue_at: iso(900) });
+        add({ id: "dq-nw3", keyword: "candy", status: "failed", error: "EHunt 登录已失效（页面顶栏显示 Login/Register，搜索弹出登录提示）：需要在 box 上运行 deploy/box-selection-worker.sh login 重新人工登录", created_at: iso(1000), queue_at: iso(1000) });
+      }
       if (kind === "failed") add({ id: "dq-rl", keyword: "squishy", status: "failed", error: "EHunt 限流：请求过多，稍后自动可重试", created_at: iso(1800), queue_at: iso(1800) }); // 查询数量阶段限流（无批次）
       if (kind === "failed") add({ id: "dq-rl2", keyword: "paper", status: "canceled", error: "读取中断（EHunt 限流：请求过多，稍后自动可重试），已读部分已保留，可点「继续本批」接着读", current_batch: 1, created_at: iso(2000), queue_at: iso(2000) }, B("dq-rl2", 1, 1, 1000, "canceled", 40, 12));
       if (kind === "loginwait") { // ?squeue=loginwait：EHunt 掉线 → 暂停等待重新登录（演示数字）
@@ -98,9 +106,11 @@ export function createSelQueue({ $, esc, toast, getSb, DEMO, confirmDialog, frie
   function row(x) {
     const btns = x.acts.map((a) => `<button class="btn ${BTN[a][1]} btn-sm" data-sq="${a}" data-sqid="${esc(x.id)}" title="${esc(TIP[a])}">${BTN[a][0]}</button>`).join("");
     const rng = x.range ? `第 ${x.batch_no} 批（${n0(x.range[0])}–${n0(x.range[1])}）` : "";
-    const pill = { running: "pill-info", wait: x.status === "paused" ? "pill-warn" : "pill-mute", problem: "pill-bad", end: ["succeeded", "batch_done"].includes(x.status) ? "pill-ok" : "pill-mute" }[x.group];
+    const pill = x.netWait ? "pill-warn" : { running: "pill-info", wait: x.status === "paused" ? "pill-warn" : "pill-mute", problem: "pill-bad", end: ["succeeded", "batch_done"].includes(x.status) ? "pill-ok" : "pill-mute" }[x.group];
     let sub = "";
-    if (x.group === "running" && !x.counting) sub = `<div class="ss-pg-bar" role="progressbar" aria-valuenow="${Math.round(x.pctJ)}"><i class="rd" style="width:${x.pctR}%"></i><i class="jd" style="width:${x.pctJ}%"></i></div>
+    if (x.netWait) sub = `<div class="warn">${esc(x.reason || "box 网络异常，等待自动重试")}（worker 会自动重试，现在不用重新提交）</div>`;
+    else if (x.group === "running" && x.counting) sub = `<div class="hint">正在查 EHunt 结果数，查到后自动入队抓取</div>`;
+    else if (x.group === "running" && !x.counting) sub = `<div class="ss-pg-bar" role="progressbar" aria-valuenow="${Math.round(x.pctJ)}"><i class="rd" style="width:${x.pctR}%"></i><i class="jd" style="width:${x.pctJ}%"></i></div>
       <div class="hint">已读 <b>${n0(x.read)}</b> / ${n0(x.target)} 条 · <b>${Math.floor(x.pctJ)}%</b>${x.page ? ` · 第 ${x.page} 页` : ""} · 通过 <b class="ss-n-ok">${n0(x.passed)}</b>${x.warn ? ' · <span class="warn">⚠ 3 分钟以上没有更新进度</span>' : ""}</div>`;
     else if (x.group === "wait" && x.loginWait) sub = `<div class="warn">EHunt 登录失效，已暂停（不算失败）：在 box 上重新登录后自动继续${x.resumeAt ? ` · 从第 ${n0(x.resumeAt)} 条接着读` : ""}</div>`;
     else if (x.group === "wait") sub = `<div class="hint">${x.status === "paused" ? "已暂停，不会被抓取；点「继续」回到第 " + x.pos + " 位" : `排第 ${x.pos} 位，等前面的抓完自动开始`}${x.resumeAt ? ` · 从第 ${n0(x.resumeAt)} 条接着读` : ""}</div>`;

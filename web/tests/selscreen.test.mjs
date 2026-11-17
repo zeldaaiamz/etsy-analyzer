@@ -19,8 +19,18 @@ test("worker 原始报错 → 中文提示", () => {
   assert.match(friendlyErr("Page.click: Timeout 30000ms exceeded.\nCall log:"), /超时/);
   // 2026-11-17：纯超时 / 断网不再说「网页卡住或改版」
   const goto = friendlyErr('Page.goto: Timeout 60000ms exceeded.\nCall log:\n  - navigating to "https://ehunt.ai/etsy-product-research"');
-  assert.equal(goto, "网络/EHunt 连接超时，请稍后再试"); assert.doesNotMatch(goto, /卡住或改版/);
-  assert.equal(friendlyErr("Page.goto: net::ERR_CONNECTION_RESET at https://ehunt.ai/"), "网络/EHunt 连接超时，请稍后再试");
+  assert.equal(goto, "box 网络异常，请稍后再试"); assert.doesNotMatch(goto, /卡住或改版/);   // 2026-11-17 ②：改说 box 网络异常
+  assert.equal(friendlyErr("Page.goto: net::ERR_CONNECTION_RESET at https://ehunt.ai/"), "box 网络异常，请稍后再试");
+  assert.equal(friendlyErr("Page.goto: Timeout 45000ms exceeded.（已自动重试 2 次）"), "box 网络异常，已自动重试，请稍后再试");
+  const nw = "box 网络异常：已自动重试 2 次仍失败，请稍后再试（Page.goto: Timeout 45000ms exceeded.）"; assert.equal(friendlyErr(nw), nw);
+  const nb = "读取中断（box 网络异常，已自动重试 2 次：Page.goto: Timeout 45000ms exceeded.），已读部分已保留，可点「继续本批」接着读"; assert.equal(friendlyErr(nb), nb);
+  const nr = "EHunt 页面 45 秒内没有出现搜索框/结果列表（Timeout 45000ms exceeded）"; assert.equal(friendlyErr(nr), "box 网络异常，请稍后再试");
+  assert.equal(friendlyErr("Page.click: Timeout 30000ms exceeded."), "EHunt 页面响应超时，请稍后再试");   // 不是打不开页面 → 不说网络
+  assert.match(friendlyErr("Failed to create a ProcessSingleton for your profile directory"), /浏览器被占用/);
+  const pt = "EHunt 页面响应超时：已自动重试 2 次仍失败，请稍后再试（Page.click: Timeout 30000ms exceeded.）"; assert.equal(friendlyErr(pt), pt);
+  // 登录失效与网络异常分开说
+  const lg = friendlyErr("EHunt 登录已失效（页面顶栏显示 Login/Register，搜索弹出登录提示）：需要在 box 上运行 deploy/box-selection-worker.sh login 重新人工登录");
+  assert.match(lg, /登录已失效/); assert.doesNotMatch(lg, /网络异常/);
   const w = "网络/EHunt 连接超时，已自动重试 2 次仍失败，请稍后再试（Page.goto: Timeout 60000ms exceeded.）"; assert.equal(friendlyErr(w), w);
   const rb = "读取中断（网络/EHunt 连接超时，已自动重试 2 次：Page.goto: Timeout 60000ms exceeded.），已读部分已保留，可点「继续本批」接着读"; assert.equal(friendlyErr(rb), rb);
   const zh = "读取中断（HTTP 503），已读部分已保留，可点「继续本批」接着读"; assert.equal(friendlyErr(zh), zh);

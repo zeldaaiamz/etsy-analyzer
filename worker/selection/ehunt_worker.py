@@ -117,6 +117,7 @@ PAGE_TIMEOUT_S = float(os.environ.get("EHUNT_PAGE_TIMEOUT_S", "90"))     # 正�
 PAGE_RETRIES = max(0, int(os.environ.get("EHUNT_PAGE_RETRIES", "2")))   # 超时后重试次数（共 1 + 2 = 3 次）
 PAGE_KILL_GRACE_S = float(os.environ.get("EHUNT_PAGE_KILL_GRACE_S", "20"))  # 超过硬超时这么久仍卡在单个浏览器调用里 → 看门狗杀掉本 profile 的 chromium
 class PageTimeout(RuntimeError): pass
+class PageNotReady(RuntimeError): pass    # 2026-11-17 ①：打开 EHunt 后 READY_TIMEOUT_S 内既没出现搜索框/结果列表、也没出现登录页 → 网络类（box 网络异常）
 class PageStuck(RuntimeError): pass          # 翻页到第 N 页超时（页码/首行没变）→ 与超时同样重开同一页重试（2026-10-21 menu 第 2 页）
 class KeywordNotApplied(RuntimeError): pass  # 关键词未生效（Selected: 中没有 Keyword）→ 同样重开重试（2026-10-21 book 续读）
 class RateLimited(RuntimeError): pass        # EHunt 软限流横幅 / 搜索未进 Selected → 不重试关键词、不进 page_loop 重试（2026-10-31）
@@ -126,8 +127,10 @@ RETRY_KINDS = {PageTimeout: "超时", PageStuck: "翻页卡住", KeywordNotAppli
 
 # ---- 网络/页面加载暂时性错误 + 熔断（2026-11-17 15:01–15:15 box 断网：Page.goto Timeout 60000ms → 多个关键词直接「失败」，
 #      doll 批次重开撞 Chrome「profile is already in use」→ 已停止；同时 Supabase 经出口代理报 SSL WRONG_VERSION_NUMBER） ----
-NET_MSG = "网络/EHunt 连接超时"
+NET_MSG = "box 网络异常"          # 2026-11-17 ②：原「网络/EHunt 连接超时」→ 和登录失效（LOGIN_MSG「EHunt 登录已失效…」）明确区分
 NET_REQUEUES = 2                 # 网络/页面加载失败最多自动重新排队 2 次，第 3 次仍失败才标失败 / 已停止（与筛选未生效同一上限）
+NET_RETRY_DELAYS_S = tuple(float(x) for x in os.environ.get("SEL_NET_RETRY_DELAYS", "60,120").split(",") if x.strip())   # 第 1 次等 1 分钟、第 2 次等 2 分钟再重试
+_net_sleep = time.sleep
 _NET_RE = re.compile(r"net::ERR_|Timeout \d+ms exceeded|ECONNRESET|ECONNREFUSED|ETIMEDOUT|connection (reset|refused|aborted)|"
                      r"\bproxy error\b|\bSSL\b|WRONG_VERSION_NUMBER|Name or service not known|Temporary failure in name resolution|"
                      r"Network is unreachable|ProcessSingleton|profile is already in use|SingletonLock", re.I)
@@ -136,11 +139,21 @@ def is_net_error(e):
     """页面加载超时 / net::ERR_* / 连接重置 / 代理 / SSL / 数据库瞬时网络错误 / Chrome profile 占用 → 暂时性（可自动重新排队、计入熔断）。
     筛选未生效 / 关键词未生效 / 限流 / 掉线 / 其它页面逻辑错误不算。"""
     if isinstance(e, (FilterNotApplied, KeywordNotApplied, RateLimited, LoginExpired)): return False
-    if isinstance(e, (PageTimeout, ssl.SSLError)) or is_transient(e): return True
+    if isinstance(e, (PageTimeout, PageNotReady, ssl.SSLError)) or is_transient(e): return True
     if "Timeout" in type(e).__name__: return True     # Playwright TimeoutError（goto / networkidle）
     return bool(_NET_RE.search(str(e)))
+_BOX_NET_RE = re.compile(r"Page\.goto: Timeout|net::ERR_|ECONNRESET|ECONNREFUSED|ETIMEDOUT|connection (reset|refused|aborted)|\bproxy error\b|\bSSL\b|"
+                         r"WRONG_VERSION_NUMBER|Name or service not known|Temporary failure in name resolution|Network is unreachable|没有出现搜索框", re.I)
+def net_label(e):
+    """网络类失败给人看的说法（2026-11-17 ②）：打不开页面 / 断网 / SSL / 数据库连不上 → 「box 网络异常」；
+    Chrome profile 占用 → 「box 抓取浏览器被占用」；其它单步超时（点按钮、单页读取）→ 「EHunt 页面响应超时」（不一定是网络，不误导）。"""
+    if is_profile_busy(e): return "box 抓取浏览器被占用"
+    if isinstance(e, urllib.error.HTTPError): return f"数据库暂时不可用（HTTP {e.code}）"
+    if isinstance(e, (PageNotReady, ssl.SSLError)) or (is_transient(e) and not isinstance(e, urllib.error.HTTPError)) or _BOX_NET_RE.search(str(e)): return NET_MSG
+    return "EHunt 页面响应超时"
 def _net_brief(e): return str(e).strip().splitlines()[0][:100] if str(e).strip() else type(e).__name__
 
+HB_FAIL_THRESHOLD = int(os.environ.get("SEL_HB_FAIL_THRESHOLD", "3"))             # ③ 心跳（每 30 秒）连续 3 次网络失败 ≈ 1.5 分钟断网 → 暂停认领
 NET_BREAKER_THRESHOLD = int(os.environ.get("SEL_NET_BREAKER_THRESHOLD", "3"))      # 连续 3 次网络失败 → 暂停认领新任务
 NET_BREAKER_COOLDOWN_S = float(os.environ.get("SEL_NET_BREAKER_COOLDOWN_S", "120")) # 首次暂停 2 分钟
 NET_BREAKER_MAX_S = float(os.environ.get("SEL_NET_BREAKER_MAX_S", "300"))          # 冷却后仍失败 → 翻倍，最多 5 分钟
@@ -148,7 +161,24 @@ class NetBreaker:
     """主线程用：连续网络失败 ≥ 阈值 → 在 cooldown 内不认领新任务（不动正在处理的那条，它已按重新排队规则处理）；任何成功 → 清零。"""
     def __init__(self, clock=time.monotonic):
         self.clock = clock; self.streak = 0; self.cooldown = NET_BREAKER_COOLDOWN_S; self.until = None; self.tripped = False
+        self.hb_streak = 0; self.held = False; self.held_since = None   # ③ 心跳自检：网络断了就一直暂停，心跳恢复才继续（不按时间）
+    def heartbeat_result(self, err=None):
+        """心跳线程每次写心跳后调用：err=None 成功；网络类失败连续 HB_FAIL_THRESHOLD 次 → 暂停认领；任一次成功 → 恢复并写日志。
+        非网络错误（如 HTTP 401 配置问题）不触发暂停（那不是网络问题，暂停也不会自己好）。"""
+        if err is None:
+            self.hb_streak = 0
+            if self.held:
+                log.warning("network self-check: heartbeat recovered after %.0fs → resuming new claims", self.clock() - (self.held_since or self.clock()))
+                self.held = False; self.held_since = None
+            return
+        if not is_net_error(err): return
+        self.hb_streak += 1
+        if self.hb_streak >= HB_FAIL_THRESHOLD and not self.held:
+            self.held = True; self.held_since = self.clock()
+            log.warning("network self-check: %d consecutive heartbeat network failures (last: %s) → pausing new claims until the network recovers",
+                        self.hb_streak, _net_brief(err))
     def is_open(self):
+        if self.held: return True
         if self.until is None: return False
         if self.clock() < self.until: return True
         log.warning("net breaker: cooldown over, resuming claims"); self.until = None; return False
@@ -468,6 +498,43 @@ def login_expired_error(page_cookies, saved_cookies=None):
     e = LoginExpired(LOGIN_MSG + "；" + ES.diagnosis_message(kind, facts)); e.kind = kind; e.facts = facts
     log.warning("ehunt logout diagnosed kind=%s facts=%s", kind, facts); return e
 
+# ---- ① 就绪判定（2026-11-17，Hongyan 批准预览）：打开页面不再等“网络安静”(networkidle)。EHunt 页面有统计/客服等长连接，
+#      box 出口稍卡就永远等不到“网络安静”→ 60 秒超时（15:01–15:16 九个关键词全挂）。改为：DOM 加载 → 搜索框出现 → 结果列表出现（最多再等 ROWS_GRACE_S）就开始；
+#      跳到登录页 / 弹出登录提示 → 返回 "login"，交给 _check_login 严格判定（不当网络问题）；顶栏 Login 水合前可能闪一下，只在超时仍未就绪时才算。
+READY_TIMEOUT_S = float(os.environ.get("SEL_READY_TIMEOUT_S", "45"))   # 整体上限（原 networkidle 60s）
+ROWS_GRACE_S = float(os.environ.get("SEL_ROWS_GRACE_S", "8"))          # 搜索框出现后再等结果列表的时间（列表可能为空）
+SETTLE_MS = int(os.environ.get("SEL_SETTLE_MS", "8000"))               # 搜索/筛选后“尽力”等网络安静的上限，超时不报错
+_ready_clock = time.monotonic
+_ready_sleep = time.sleep
+def wait_ready(pg, U, deadline, poll=0.5):
+    t_input = None
+    while True:
+        now = _ready_clock()
+        try: url = pg.url or ""
+        except Exception: url = ""
+        if "login" in url.split("?")[0].rsplit("/", 1)[-1] or "/login" in url: return "login"
+        if _visible(pg.locator(U["login_dialog"])): return "login"
+        if _visible(pg.locator(U["search_input"])):
+            if t_input is None: t_input = now
+            try: rows = pg.locator(U["row"]).count()
+            except Exception: rows = 0
+            if rows > 0 or now - t_input >= ROWS_GRACE_S: return "ready"
+        if now >= deadline:
+            if _visible(pg.locator(U["header_login"])): return "login"
+            raise PageNotReady(f"EHunt 页面 {READY_TIMEOUT_S:.0f} 秒内没有出现搜索框/结果列表（Timeout {int(READY_TIMEOUT_S * 1000)}ms exceeded）")
+        _ready_sleep(poll)
+
+def goto_ready(pg, U, url=None, timeout_s=None):
+    """打开页面并等到可读（见上）。返回 "ready" / "login"；网络问题抛 Playwright TimeoutError / PageNotReady（都算网络类）。"""
+    timeout_s = timeout_s or READY_TIMEOUT_S; deadline = _ready_clock() + timeout_s
+    pg.goto(url or U["url"], wait_until="domcontentloaded", timeout=int(timeout_s * 1000))
+    return wait_ready(pg, U, deadline)
+
+def _settle(pg, timeout_ms=None):
+    """搜索/筛选后尽力等网络安静；等不到不报错（后面有 chip / 结果数校验兜底）。"""
+    try: pg.wait_for_load_state("networkidle", timeout=timeout_ms or SETTLE_MS)
+    except Exception: pass
+
 def _check_login(pg, U):
     if _visible(pg.locator(U["login_dialog"])) or _visible(pg.locator(U["header_login"])):
         try: cs = pg.context.cookies()
@@ -594,7 +661,7 @@ def apply_filter(pg, U, name, dd, need, avoid, fields, chips, tries=None):
                 type_verified((pop.locator(line).locator(sel) if line else pop.locator(sel)).first, val)
             _click(pg, U, pop.locator(U["ok_btn"]).first)
             _wait_gone(pop, POPOVER_CLOSE_S)
-            pg.wait_for_load_state("networkidle", timeout=30000)
+            _settle(pg)
             dismiss_overlays(pg, U)
             miss = _wait_chips(pg, U, chips, CHIP_WAIT_S)
             if not miss:
@@ -732,7 +799,7 @@ def _open_list(p, keyword, params):
     stage("count_open" if counting else "read_setup")
     ctx = launch_ctx(p); pg = None
     try:
-        pg = ctx.pages[0] if ctx.pages else ctx.new_page(); pg.goto(U["url"], wait_until="networkidle", timeout=60000)
+        pg = ctx.pages[0] if ctx.pages else ctx.new_page(); goto_ready(pg, U)
     except Exception as e:   # 首页打不开（断网 / 代理 / EHunt 无响应）：尽力截图留证，关上下文后原样抛出（交给重新排队规则）
         log.warning("ehunt first page load failed: %s", _net_brief(e))
         if pg is not None:
@@ -749,7 +816,7 @@ def _open_list(p, keyword, params):
         dismiss_overlays(pg, U); _check_login(pg, U)
         _check_rate_limit(pg, U)  # 横幅已在 → 立刻失败，不烧 3 次关键词重试
         for attempt in range(3):   # 页面水合前填写的关键词会被清空 → 以 Selected: 的 Keyword 标签为准，最多重试 3 次
-            dismiss_overlays(pg, U); pg.fill(U["search_input"], keyword); _click(pg, U, U["search_btn"]); pg.wait_for_load_state("networkidle", timeout=30000); time.sleep(2 + attempt * 2)
+            dismiss_overlays(pg, U); pg.fill(U["search_input"], keyword); _click(pg, U, U["search_btn"]); _settle(pg); time.sleep(2 + attempt * 2)
             dismiss_overlays(pg, U)
             if U["chip_keyword"].format(keyword=keyword).replace(" ", "").lower() in pg.locator(U["selected_row"]).first.inner_text().replace(" ", "").lower(): break
             # 一次确认：Search 后仍无 Keyword chip → 查横幅 / 未筛选 Find；是限流则立即停，不是才继续重试
@@ -852,8 +919,7 @@ def page_finder(pg):
     def finder(lid):
         _throttle(); dismiss_overlays(pg, U); _check_login(pg, U)
         pg.fill(U["search_input"], str(int(lid))); _click(pg, U, U["search_btn"])
-        try: pg.wait_for_load_state("networkidle", timeout=20000)
-        except Exception: pass
+        _settle(pg, 20000)
         seen = None
         for i in range(LOOKUP_READS):
             time.sleep(1.5); dismiss_overlays(pg, U); _check_login(pg, U)
@@ -877,7 +943,7 @@ def page_finder(pg):
     return finder
 
 def open_lookup_page(ctx):
-    U = ui(); pg = ctx.new_page(); pg.goto(U["url"], wait_until="networkidle", timeout=60000)
+    U = ui(); pg = ctx.new_page(); goto_ready(pg, U)
     if "login" in pg.url: raise LoginExpired(LOGIN_MSG)
     b = pg.query_selector(U["banner_close"])
     if b and b.is_visible(): b.click(); time.sleep(0.5)
@@ -1410,7 +1476,7 @@ def keepalive_check():
     with sync_playwright() as p:
         ctx = launch_ctx(p)
         try:
-            pg = ctx.pages[0] if ctx.pages else ctx.new_page(); pg.goto(U["url"], wait_until="networkidle", timeout=60000)
+            pg = ctx.pages[0] if ctx.pages else ctx.new_page(); goto_ready(pg, U)
             dismiss_overlays(pg, U); _check_login(pg, U)
             clear_login_alert(); log.info("ehunt keepalive ok"); return True
         except LoginExpired as e:
@@ -1506,23 +1572,42 @@ def requeue_stale_runs(store, own_rid=None, now=None):
                           "return=representation", retries=1, timeout=HB_TIMEOUT) or []
         for r in rows: log.warning("run %s (%s) stale > %.0fs → auto requeued as %s", r.get("id"), r.get("keyword"), RUN_STALE_SECONDS, to); n += 1
     return n
+def _heartbeat_loop(store, every, sleep=time.sleep, t0=None):
+    t0 = t0 or time.time(); warned = False; last_chk = 0.0
+    while True:
+        try:
+            store.heartbeat({"pid": os.getpid(), "phase": PHASE[0], "uptime_s": int(time.time() - t0), "lookups": LOOKUPS_ON,
+                             "ehunt_login": {k: LOGIN_STATUS[k] for k in ("ok", "kind", "at")}}); warned = False
+            NET.heartbeat_result(None)     # ③ 网络自检：心跳成功 = 网络恢复
+        except Exception as e:
+            if not warned: log.warning("heartbeat failed: %s", _brief(e) if is_transient(e) else str(e)[:120]); warned = True
+            NET.heartbeat_result(e)
+        if time.time() - last_chk >= RUN_STALE_CHECK_EVERY:
+            last_chk = time.time()
+            try: requeue_stale_runs(store, own_rid=_PROG[0].rid if _PROG[0] else None)
+            except Exception as e: log.warning("stale-run requeue check failed: %s", _brief(e))
+        sleep(every)
 def start_heartbeat(store, every=None):
     every = every or HB_EVERY; t0 = time.time()
-    def loop():
-        warned = False; last_chk = 0.0
-        while True:
-            try: store.heartbeat({"pid": os.getpid(), "phase": PHASE[0], "uptime_s": int(time.time() - t0), "lookups": LOOKUPS_ON,
-                                 "ehunt_login": {k: LOGIN_STATUS[k] for k in ("ok", "kind", "at")}}); warned = False
-            except Exception as e:
-                if not warned: log.warning("heartbeat failed: %s", _brief(e) if is_transient(e) else str(e)[:120]); warned = True
-            if time.time() - last_chk >= RUN_STALE_CHECK_EVERY:
-                last_chk = time.time()
-                try: requeue_stale_runs(store, own_rid=_PROG[0].rid if _PROG[0] else None)
-                except Exception as e: log.warning("stale-run requeue check failed: %s", _brief(e))
-            time.sleep(every)
-    th = threading.Thread(target=loop, name="heartbeat", daemon=True); th.start(); return th
+    th = threading.Thread(target=lambda: _heartbeat_loop(store, every, t0=t0), name="heartbeat", daemon=True); th.start(); return th
 
 def recycle(): logging.shutdown(); os._exit(EXIT_RECYCLE)
+
+def net_retry_wait(store, run, k, expect, slice_s=5, label=NET_MSG):
+    """② 第 k 次网络类失败：先等 NET_RETRY_DELAYS_S[k-1] 秒（1 → 2 分钟）再重新排队，不立刻重撞同一个断网。
+    等待期间写 progress（网页显示「box 网络异常，N 秒后自动重试」），每 slice_s 秒看一次用户是否取消/暂停。
+    返回 True = 继续重新排队；False = 用户已改状态，不再排队。"""
+    d = NET_RETRY_DELAYS_S[min(k, len(NET_RETRY_DELAYS_S)) - 1] if NET_RETRY_DELAYS_S else 0
+    why = f"{label}，{int(d)} 秒后自动重试（第 {k}/{NET_REQUEUES} 次）"
+    log.warning("net retry: run %s waits %.0fs before requeue (%d/%d)", run["id"], d, k, NET_REQUEUES)
+    _safe(store.patch_run, run["id"], progress={"stage": "net_wait", "why": why, "retry_in_s": int(d), "at": NOW()}, heartbeat_at=NOW())
+    left = d
+    while left > 0:
+        st = (_safe(store.run, run["id"]) or {}).get("status") if hasattr(store, "run") else None
+        if st is not None and st != expect:
+            log.info("run %s changed to %s during net retry wait; not requeued", run["id"], st); return False
+        s_ = min(slice_s, left); _net_sleep(s_); left -= s_
+    return True
 
 COUNT_FILTER_REQUEUES = 2   # 查询数量阶段「筛选未生效」最多自动重新排队 2 次，第 3 次仍失败才标失败（防死循环）
 def handle_run(store, run, a, lookups):
@@ -1544,13 +1629,14 @@ def handle_run(store, run, a, lookups):
             if net: NET.fail(_net_brief(e))
             else: NET.ok()
             if isinstance(e, FilterNotApplied) or net:   # 页面竞态 / 网络或页面加载超时，属暂时性：有上限地重新排队（attempts 由 sel_claim_run 每次认领 +1）
-                n = int(run.get("attempts") or 1); why = NET_MSG if net else "筛选未生效"
+                n = int(run.get("attempts") or 1); why = net_label(e) if net else "筛选未生效"
                 if n <= COUNT_FILTER_REQUEUES:
+                    if net and not net_retry_wait(store, run, n, "counting", label=why): return
                     log.warning("count: %s — requeue run %s (%d/%d)", str(e)[:120], run["id"], n, COUNT_FILTER_REQUEUES)
                     _safe(store.patch_run_if, run["id"], "counting", status="count_queued", locked_by=None, queue_at=NOW(), error=None,
                           progress={"stage": "requeued", "why": f"{why}，已自动重新排队（第 {n}/{COUNT_FILTER_REQUEUES} 次）", "at": NOW()})
                     return
-                err = (f"{NET_MSG}，已自动重试 {COUNT_FILTER_REQUEUES} 次仍失败，请稍后再试（{_net_brief(e)}）"[:300] if net
+                err = (f"{net_label(e)}：已自动重试 {COUNT_FILTER_REQUEUES} 次仍失败，请稍后再试（{_net_brief(e)}）"[:300] if net
                        else f"{str(e)[:240]}（已自动重试 {COUNT_FILTER_REQUEUES} 次）")
             log.exception("count failed"); _safe(store.patch_run_if, run["id"], "counting", status="failed", error=err, finished_at=NOW())
         return
@@ -1590,13 +1676,15 @@ def handle_run(store, run, a, lookups):
             st_now = (_safe(store.run, run["id"]) or {}).get("status")
             if k < NET_REQUEUES and st_now == "running":
                 k += 1
+                if not net_retry_wait(store, run, k, "running", label=net_label(e)):
+                    _safe(store.patch_batch, b["id"], status="canceled", finished_at=NOW()); return
                 log.warning("batch %s: %s — requeue run %s (%d/%d)", b["batch_no"], _net_brief(e), run["id"], k, NET_REQUEUES)
                 _safe(store.patch_batch, b["id"], status="queued")
                 _safe(store.patch_run_if, run["id"], "running", status="queued", locked_by=None, queue_at=NOW(), error=None,
-                      progress={"stage": "requeued", "why": f"{NET_MSG}，已自动重新排队（第 {k}/{NET_REQUEUES} 次）", "net_requeues": k, "batch_id": b["id"], "at": NOW()})
+                      progress={"stage": "requeued", "why": f"{net_label(e)}，已自动重新排队（第 {k}/{NET_REQUEUES} 次）", "net_requeues": k, "batch_id": b["id"], "at": NOW()})
                 return
         log.exception("batch failed")
-        why = (f"{NET_MSG}，已自动重试 {NET_REQUEUES} 次：{str(e)[:120]}" if net
+        why = (f"{net_label(e)}，已自动重试 {NET_REQUEUES} 次：{str(e)[:120]}" if net
                else _brief(e) if is_transient(e) else str(e)[:200])
         msg = f"读取中断（{why}），已读部分已保留，可点「继续本批」接着读"
         _safe(store.patch_batch, b["id"], status="canceled", finished_at=NOW())          # 029 sel_resume 只恢复“已停止”的批次

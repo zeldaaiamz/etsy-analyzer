@@ -84,7 +84,7 @@ def test_exception_mid_batch_then_count_succeeds(worker, monkeypatch):
     # 2026-11-17 网络保护：数据库断连属暂时性 → 本批放回队列（不再直接“已停止”），已读部分保留，自动从断点续读
     assert st.batch["status"] == "queued"
     rq = next(p for p in st.run_patches if p.get("status") == "queued")
-    assert rq["locked_by"] is None and "网络/EHunt 连接超时" in rq["progress"]["why"] and rq["progress"]["net_requeues"] == 1
+    assert rq["locked_by"] is None and "box 网络异常" in rq["progress"]["why"] and rq["progress"]["net_requeues"] == 1
     last = [p for p in st.run_patches if "status" in p][-1]   # 忽略进度写入（sel-progress 分支的 progress=）
     assert last["status"] == "counted" and last["total_count"] == 296   # 修复前：asyncio loop 报错 → failed
 

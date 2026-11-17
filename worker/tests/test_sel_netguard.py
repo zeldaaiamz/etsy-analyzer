@@ -58,15 +58,16 @@ GOTO = PwTimeout("Page.goto: Timeout 60000ms exceeded.\nCall log:\n  - navigatin
 
 @pytest.mark.parametrize("attempts", [1, 2])
 def test_count_goto_timeout_requeues(monkeypatch, attempts):
-    (kind, expect, kw), = _count_run(monkeypatch, attempts, GOTO)
+    calls = _count_run(monkeypatch, attempts, GOTO)
+    (kind, expect, kw), = [c for c in calls if c[0] == "if"]   # 2026-11-17 ②：重排前先写一次 net_wait 进度（patch_run）
     assert kind == "if" and expect == "counting"
     assert kw["status"] == "count_queued" and kw["locked_by"] is None and kw["error"] is None
-    assert "网络/EHunt 连接超时" in kw["progress"]["why"] and f"第 {attempts}/2 次" in kw["progress"]["why"]
+    assert "box 网络异常" in kw["progress"]["why"] and f"第 {attempts}/2 次" in kw["progress"]["why"]
 
 
 def test_count_goto_timeout_fails_after_two_requeues(monkeypatch):
     (kind, expect, kw), = _count_run(monkeypatch, 3, GOTO)
-    assert kw["status"] == "failed" and "网络/EHunt 连接超时" in kw["error"] and "已自动重试 2 次" in kw["error"]
+    assert kw["status"] == "failed" and "box 网络异常" in kw["error"] and "已自动重试 2 次" in kw["error"]
     assert "网页卡住或改版" not in kw["error"]
 
 
@@ -132,7 +133,7 @@ def test_batch_third_net_failure_stops_with_note(monkeypatch, tmp_path):
     rp, rpi, bp = _batch_run(monkeypatch, tmp_path, GOTO, progress={"stage": "requeued", "net_requeues": 2, "batch_id": "b1"})
     assert not rpi
     fin = [k for k in rp if k.get("status") == "canceled"][-1]
-    assert "网络/EHunt 连接超时" in fin["error"] and "已自动重试 2 次" in fin["error"] and "继续本批" in fin["error"]
+    assert "box 网络异常" in fin["error"] and "已自动重试 2 次" in fin["error"] and "继续本批" in fin["error"]
     assert bp[-1]["status"] == "canceled"
 
 

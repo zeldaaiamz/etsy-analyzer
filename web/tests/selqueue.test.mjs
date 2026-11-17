@@ -76,3 +76,11 @@ test("掉线等待时不误报 box 离线，改提示重新登录", () => {
   const q = buildQueue([{ id: "c", status: "paused", progress: { stage: "login_wait" } }, { id: "x", status: "queued", queue_at: ago(400) }], () => null, NOW);
   assert.equal(q.loginWait, true); assert.equal(q.offline, false);
 });
+
+test("2026-11-17 ②：网络异常等待自动重试 → 队列里说清楚（查询数量 / 抓取都一样）", () => {
+  const why = "box 网络异常，60 秒后自动重试（第 1/2 次）";
+  const c = queueItem({ id: "c", status: "counting", progress: { stage: "net_wait", why, at: new Date(NOW - 2000).toISOString() } }, null, NOW);
+  assert.equal(c.label, "box 网络异常 · 等待自动重试"); assert.equal(c.reason, why); assert.equal(c.group, "running");
+  const r = queueItem({ id: "r", status: "running", progress: { stage: "net_wait", why, at: new Date(NOW - 2000).toISOString() } }, { batch_no: 1, offset_start: 1, offset_end: 100, status: "running" }, NOW);
+  assert.equal(r.label, "box 网络异常 · 等待自动重试"); assert.equal(r.reason, why);
+});
