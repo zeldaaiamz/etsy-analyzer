@@ -21,7 +21,7 @@ LOGDIR = os.environ.get("SEL_LOG_DIR", os.path.expanduser("~/.local/share/etsy-s
 NOW = lambda: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
 # ---- 瞬时网络错误重试（2026-10-19 23:01：Supabase PATCH RemoteDisconnected 直接让整批失败） ----
-import random, http.client, socket as _socket
+import random, ssl, http.client, socket as _socket
 RETRIES = max(1, int(os.environ.get("SEL_HTTP_RETRIES", "5")))
 BACKOFF_BASE = float(os.environ.get("SEL_HTTP_BACKOFF", "1.0"))
 BACKOFF_CAP = float(os.environ.get("SEL_HTTP_BACKOFF_CAP", "5"))   # 2026-10-23：原 30s 上限 + timeout=60 → 主循环可堵数分钟
@@ -123,6 +123,45 @@ class RateLimited(RuntimeError): pass        # EHunt 软限流横幅 / 搜索未
 class RunStopped(BaseException): pass        # 重试间隙发现用户已取消/暂停：立即停（BaseException：不被页内 except Exception 吞掉）
 class FilterNotApplied(RuntimeError): pass  # 价格/销量筛选 chip 没出现（下拉面板竞态，2026-11-17 volufiline）→ 只重做该筛选；仍失败 → 翻页重开 / 查询数量有上限地重新排队
 RETRY_KINDS = {PageTimeout: "超时", PageStuck: "翻页卡住", KeywordNotApplied: "关键词未生效", FilterNotApplied: "筛选未生效"}  # RateLimited / LoginExpired 不在此列：立即抛出
+
+# ---- 网络/页面加载暂时性错误 + 熔断（2026-11-17 15:01–15:15 box 断网：Page.goto Timeout 60000ms → 多个关键词直接「失败」，
+#      doll 批次重开撞 Chrome「profile is already in use」→ 已停止；同时 Supabase 经出口代理报 SSL WRONG_VERSION_NUMBER） ----
+NET_MSG = "网络/EHunt 连接超时"
+NET_REQUEUES = 2                 # 网络/页面加载失败最多自动重新排队 2 次，第 3 次仍失败才标失败 / 已停止（与筛选未生效同一上限）
+_NET_RE = re.compile(r"net::ERR_|Timeout \d+ms exceeded|ECONNRESET|ECONNREFUSED|ETIMEDOUT|connection (reset|refused|aborted)|"
+                     r"\bproxy error\b|\bSSL\b|WRONG_VERSION_NUMBER|Name or service not known|Temporary failure in name resolution|"
+                     r"Network is unreachable|ProcessSingleton|profile is already in use|SingletonLock", re.I)
+def is_profile_busy(e): return bool(re.search(r"ProcessSingleton|profile is already in use|SingletonLock", str(e), re.I))
+def is_net_error(e):
+    """页面加载超时 / net::ERR_* / 连接重置 / 代理 / SSL / 数据库瞬时网络错误 / Chrome profile 占用 → 暂时性（可自动重新排队、计入熔断）。
+    筛选未生效 / 关键词未生效 / 限流 / 掉线 / 其它页面逻辑错误不算。"""
+    if isinstance(e, (FilterNotApplied, KeywordNotApplied, RateLimited, LoginExpired)): return False
+    if isinstance(e, (PageTimeout, ssl.SSLError)) or is_transient(e): return True
+    if "Timeout" in type(e).__name__: return True     # Playwright TimeoutError（goto / networkidle）
+    return bool(_NET_RE.search(str(e)))
+def _net_brief(e): return str(e).strip().splitlines()[0][:100] if str(e).strip() else type(e).__name__
+
+NET_BREAKER_THRESHOLD = int(os.environ.get("SEL_NET_BREAKER_THRESHOLD", "3"))      # 连续 3 次网络失败 → 暂停认领新任务
+NET_BREAKER_COOLDOWN_S = float(os.environ.get("SEL_NET_BREAKER_COOLDOWN_S", "120")) # 首次暂停 2 分钟
+NET_BREAKER_MAX_S = float(os.environ.get("SEL_NET_BREAKER_MAX_S", "300"))          # 冷却后仍失败 → 翻倍，最多 5 分钟
+class NetBreaker:
+    """主线程用：连续网络失败 ≥ 阈值 → 在 cooldown 内不认领新任务（不动正在处理的那条，它已按重新排队规则处理）；任何成功 → 清零。"""
+    def __init__(self, clock=time.monotonic):
+        self.clock = clock; self.streak = 0; self.cooldown = NET_BREAKER_COOLDOWN_S; self.until = None; self.tripped = False
+    def is_open(self):
+        if self.until is None: return False
+        if self.clock() < self.until: return True
+        log.warning("net breaker: cooldown over, resuming claims"); self.until = None; return False
+    def remaining(self): return max(0.0, self.until - self.clock()) if self.until is not None else 0.0
+    def fail(self, why=""):
+        self.streak += 1
+        if self.streak >= NET_BREAKER_THRESHOLD and not self.is_open():
+            if self.tripped: self.cooldown = min(NET_BREAKER_MAX_S, self.cooldown * 2)
+            self.tripped = True; self.until = self.clock() + self.cooldown
+            log.warning("net breaker: %d consecutive network failures (last: %s) → pausing new claims for %.0fs", self.streak, str(why)[:120], self.cooldown)
+    def ok(self):
+        self.streak = 0; self.tripped = False; self.cooldown = NET_BREAKER_COOLDOWN_S
+NET = NetBreaker()
 
 def _profile_from_cmd(cmd, profile):
     """匹配 --user-data-dir=PATH 或 --user-data-dir PATH。"""
@@ -583,18 +622,37 @@ def set_sales(pg, U, F):
 
 BROWSER_CHANNEL = os.environ.get("EHUNT_BROWSER_CHANNEL", "")   # 空 = Playwright 自带 chromium；"chrome" = 系统 Chrome
 SYSTEM_CHROME = "/opt/google/chrome/chrome"
+# 2026-11-17 doll：首页超时关掉上下文后 6 秒重开，上一个 Chrome 还没退干净 →「profile is already in use」(ProcessSingleton)。
+# 视为暂时：每 8 秒重试一次启动，最多等 60 秒；绝不杀 chrome、绝不删 profile 里的 Singleton 锁文件。
+LAUNCH_BUSY_WAIT_S = 8
+LAUNCH_BUSY_MAX_S = 60
+_launch_sleep = time.sleep
+_launch_clock = time.monotonic
+def _launch_wait_busy(fn):
+    t0 = _launch_clock(); n = 0
+    while True:
+        try: return fn()
+        except Exception as e:
+            if not is_profile_busy(e): raise
+            n += 1; waited = _launch_clock() - t0
+            if waited + LAUNCH_BUSY_WAIT_S > LAUNCH_BUSY_MAX_S:
+                log.warning("browser profile still in use after %.0fs (%d tries); giving up this attempt", waited, n); raise
+            log.warning("browser profile in use (previous Chrome still closing?); retry launch in %ss (try %d, waited %.0fs)", LAUNCH_BUSY_WAIT_S, n, waited)
+            _launch_sleep(LAUNCH_BUSY_WAIT_S)
+
 def launch_ctx(p, headless=True, viewport=None, apply_state=True):
     """打开 EHunt 持久化上下文。2026-10-22 11:07 事故：box 上 playwright 被升级到 1.64.0 而 ~/.cache/ms-playwright 里没有对应浏览器
     （“Executable doesn't exist … chrome-headless-shell”）→ 所有查询/抓取打不开浏览器。自带浏览器缺失时自动改用系统 Chrome（同一 profile），
     不需要人工 playwright install；其它启动错误原样抛出。"""
     kw = dict(headless=headless, viewport=viewport or {"width": 1440, "height": 1000}, locale="en-US")
-    if BROWSER_CHANNEL: ctx = p.chromium.launch_persistent_context(PROFILE, channel=BROWSER_CHANNEL, **kw)
+    launch = lambda **k: _launch_wait_busy(lambda: p.chromium.launch_persistent_context(PROFILE, **k, **kw))
+    if BROWSER_CHANNEL: ctx = launch(channel=BROWSER_CHANNEL)
     else:
-        try: ctx = p.chromium.launch_persistent_context(PROFILE, **kw)
+        try: ctx = launch()
         except Exception as e:
             if "Executable doesn't exist" not in str(e) or not os.path.exists(SYSTEM_CHROME): raise
             log.warning("bundled Playwright browser missing; falling back to system Chrome (channel=chrome)")
-            ctx = p.chromium.launch_persistent_context(PROFILE, channel="chrome", **kw)
+            ctx = launch(channel="chrome")
     if apply_state: apply_login_state(ctx)
     return ctx
 
@@ -672,8 +730,17 @@ def _open_list(p, keyword, params):
     U, F = ui(), filters(params)
     counting = (_PROG[0].state.get("stage") or "").startswith("count") if _PROG[0] else False
     stage("count_open" if counting else "read_setup")
-    ctx = launch_ctx(p)
-    pg = ctx.pages[0] if ctx.pages else ctx.new_page(); pg.goto(U["url"], wait_until="networkidle", timeout=60000)
+    ctx = launch_ctx(p); pg = None
+    try:
+        pg = ctx.pages[0] if ctx.pages else ctx.new_page(); pg.goto(U["url"], wait_until="networkidle", timeout=60000)
+    except Exception as e:   # 首页打不开（断网 / 代理 / EHunt 无响应）：尽力截图留证，关上下文后原样抛出（交给重新排队规则）
+        log.warning("ehunt first page load failed: %s", _net_brief(e))
+        if pg is not None:
+            try: os.makedirs(LOGDIR, exist_ok=True); pg.screenshot(path=f"{LOGDIR}/ehunt-goto-fail-{int(time.time())}.png", timeout=10000)
+            except Exception: pass
+        try: ctx.close()
+        except Exception: pass
+        raise
     if "login" in pg.url: ctx.close(); raise RuntimeError("EHunt 登录已失效：需要在 box 上运行 --login 重新人工登录")
     if counting: stage("count_filter")
     try:
@@ -1368,6 +1435,10 @@ def main(argv=None):
     store = Store(); last_purge = 0; last_words = 0; START_TS[0] = time.time()
     if not a.fake: start_heartbeat(store)
     while True:
+        if NET.is_open():   # 熔断中（连续网络失败）：不认领新任务、不做查询/保活，冷却结束自动恢复；正在处理的那条已按重新排队规则处理
+            PHASE[0] = "net_pause"
+            if a.once: break
+            time.sleep(POLL); continue
         if time.time() - last_purge > 86400:  # 启动时 + 每 24 小时：DB 3 天清理（pg_cron 不可用时的兜底）+ 本地排除日志清理
             try: log.info("purge db=%s local=%s", store.purge(), purge_local())
             except Exception: log.warning("purge failed", exc_info=True)
@@ -1396,11 +1467,17 @@ def main(argv=None):
         if KEEPALIVE_ON and not a.fake and ES.keepalive_due(LOGIN_STATUS["last_ok"] or START_TS[0], every=KEEPALIVE_EVERY):
             try: keepalive_check()
             except Exception: log.warning("keepalive failed", exc_info=True); LOGIN_STATUS["last_ok"] = time.time() - KEEPALIVE_EVERY + 1800   # 浏览器异常：30 分钟后再试
-        run = store.claim()
+        try: run = store.claim()
+        except Exception as e:   # 数据库连不上（断网 / 出口代理 SSL WRONG_VERSION_NUMBER）：记入熔断，稍后再试，不让进程崩溃重启
+            if not is_net_error(e): raise
+            log.warning("claim failed: %s", _brief(e) if is_transient(e) else _net_brief(e)); NET.fail(_net_brief(e)); run = None
         if run:
             log.info("claimed run %s kw=%s status=%s", run["id"], run["keyword"], run["status"])
             _PROG[0] = Progress(store, run["id"]); PHASE[0] = "counting" if run["status"] == "counting" else "batch"
             try: handle_run(store, run, a, lookups)
+            except Exception as e:   # 认领后数据库断连（如 open_batch）：不崩溃重启；该 run 由 10/15 分钟过期回收重新排队
+                if not is_net_error(e): raise
+                log.warning("run %s aborted by network error: %s", run["id"], _net_brief(e)); NET.fail(_net_brief(e))
             finally: _PROG[0] = None
         PHASE[0] = "idle"
         if playwright_leaked():   # 兜底自检：任何路径漏关了 sync_playwright → 立即换新进程（守护脚本重启），绝不带病继续
@@ -1455,7 +1532,7 @@ def handle_run(store, run, a, lookups):
         stage("count_open")
         try:
             n = len(json.load(open(a.fake))) if a.fake else count_ehunt(run["keyword"], run.get("params") or {})
-            store.patch_run_if(run["id"], "counting", status="counted", total_count=n, counted_at=NOW(), heartbeat_at=NOW())
+            store.patch_run_if(run["id"], "counting", status="counted", total_count=n, counted_at=NOW(), heartbeat_at=NOW()); NET.ok()
             if _PROG[0]: _PROG[0].update(force=True, stage="count_done", total=n)
         except Exception as e:
             if is_poisoned(e):
@@ -1463,15 +1540,18 @@ def handle_run(store, run, a, lookups):
                 _safe(store.patch_run, run["id"], status="count_queued", locked_by=None, error=None); recycle()
             if isinstance(e, LoginExpired):
                 log.warning("count paused: EHunt logged out (%s)", getattr(e, "kind", "?")); return pause_for_login(store, run, e)
-            err = str(e)[:300]
-            if isinstance(e, FilterNotApplied):   # 页面竞态，属暂时性：有上限地重新排队（attempts 由 sel_claim_run 每次认领 +1）
-                n = int(run.get("attempts") or 1)
+            err = str(e)[:300]; net = is_net_error(e)
+            if net: NET.fail(_net_brief(e))
+            else: NET.ok()
+            if isinstance(e, FilterNotApplied) or net:   # 页面竞态 / 网络或页面加载超时，属暂时性：有上限地重新排队（attempts 由 sel_claim_run 每次认领 +1）
+                n = int(run.get("attempts") or 1); why = NET_MSG if net else "筛选未生效"
                 if n <= COUNT_FILTER_REQUEUES:
                     log.warning("count: %s — requeue run %s (%d/%d)", str(e)[:120], run["id"], n, COUNT_FILTER_REQUEUES)
                     _safe(store.patch_run_if, run["id"], "counting", status="count_queued", locked_by=None, queue_at=NOW(), error=None,
-                          progress={"stage": "requeued", "why": f"筛选未生效，已自动重新排队（第 {n}/{COUNT_FILTER_REQUEUES} 次）", "at": NOW()})
+                          progress={"stage": "requeued", "why": f"{why}，已自动重新排队（第 {n}/{COUNT_FILTER_REQUEUES} 次）", "at": NOW()})
                     return
-                err = f"{str(e)[:240]}（已自动重试 {COUNT_FILTER_REQUEUES} 次）"
+                err = (f"{NET_MSG}，已自动重试 {COUNT_FILTER_REQUEUES} 次仍失败，请稍后再试（{_net_brief(e)}）"[:300] if net
+                       else f"{str(e)[:240]}（已自动重试 {COUNT_FILTER_REQUEUES} 次）")
             log.exception("count failed"); _safe(store.patch_run_if, run["id"], "counting", status="failed", error=err, finished_at=NOW())
         return
     b = store.open_batch(run["id"])
@@ -1488,6 +1568,7 @@ def handle_run(store, run, a, lookups):
                                                                                between=(lambda c: serve_lookups_browser(store, c)) if lookups and LOOKUPS_ON else None,
                                                                                should_stop=lambda: store.run(run["id"]).get("status") in ("canceled", "paused"))
         process_batch(store, run, b, sc, idle=(lambda: serve_lookups_browser(store)) if lookups and LOOKUPS_ON and not a.fake else None)
+        NET.ok()
     except RunStopped:   # 重试间隙用户取消/暂停：同 process_batch 的暂停路径 —— 批次“已停止”，run 状态保持用户设的（不写错误）
         log.info("run %s stopped by user during page retry", run["id"])
         _safe(store.patch_batch, b["id"], status="canceled", finished_at=NOW())
@@ -1500,8 +1581,24 @@ def handle_run(store, run, a, lookups):
             _safe(store.patch_batch, b["id"], status="queued"); _safe(store.patch_run, run["id"], status="queued", locked_by=None); recycle()
         if isinstance(e, LoginExpired):
             log.warning("batch paused: EHunt logged out (%s)", getattr(e, "kind", "?")); return pause_for_login(store, run, e, batch=b)
+        net = is_net_error(e)
+        if net: NET.fail(_net_brief(e))
+        else: NET.ok()
+        if net:   # 网络 / 页面加载超时 / profile 占用：暂时性 → 本批放回队列（已读部分保留，从断点续读），本批最多 NET_REQUEUES 次
+            pr = run.get("progress") or {}
+            k = int(pr.get("net_requeues") or 0) if pr.get("batch_id") == b["id"] else 0
+            st_now = (_safe(store.run, run["id"]) or {}).get("status")
+            if k < NET_REQUEUES and st_now == "running":
+                k += 1
+                log.warning("batch %s: %s — requeue run %s (%d/%d)", b["batch_no"], _net_brief(e), run["id"], k, NET_REQUEUES)
+                _safe(store.patch_batch, b["id"], status="queued")
+                _safe(store.patch_run_if, run["id"], "running", status="queued", locked_by=None, queue_at=NOW(), error=None,
+                      progress={"stage": "requeued", "why": f"{NET_MSG}，已自动重新排队（第 {k}/{NET_REQUEUES} 次）", "net_requeues": k, "batch_id": b["id"], "at": NOW()})
+                return
         log.exception("batch failed")
-        msg = f"读取中断（{_brief(e) if is_transient(e) else str(e)[:200]}），已读部分已保留，可点「继续本批」接着读"
+        why = (f"{NET_MSG}，已自动重试 {NET_REQUEUES} 次：{str(e)[:120]}" if net
+               else _brief(e) if is_transient(e) else str(e)[:200])
+        msg = f"读取中断（{why}），已读部分已保留，可点「继续本批」接着读"
         _safe(store.patch_batch, b["id"], status="canceled", finished_at=NOW())          # 029 sel_resume 只恢复“已停止”的批次
         _safe(store.patch_run, run["id"], status="canceled", error=msg[:300], finished_at=NOW())
     finally:

@@ -17,6 +17,12 @@ test("worker 原始报错 → 中文提示", () => {
   assert.match(friendlyErr("It looks like you are using Playwright Sync API inside the asyncio loop.\nPlease use the Async API instead."), /重启 box/);
   assert.match(friendlyErr("Remote end closed connection without response"), /连接中断/);
   assert.match(friendlyErr("Page.click: Timeout 30000ms exceeded.\nCall log:"), /超时/);
+  // 2026-11-17：纯超时 / 断网不再说「网页卡住或改版」
+  const goto = friendlyErr('Page.goto: Timeout 60000ms exceeded.\nCall log:\n  - navigating to "https://ehunt.ai/etsy-product-research"');
+  assert.equal(goto, "网络/EHunt 连接超时，请稍后再试"); assert.doesNotMatch(goto, /卡住或改版/);
+  assert.equal(friendlyErr("Page.goto: net::ERR_CONNECTION_RESET at https://ehunt.ai/"), "网络/EHunt 连接超时，请稍后再试");
+  const w = "网络/EHunt 连接超时，已自动重试 2 次仍失败，请稍后再试（Page.goto: Timeout 60000ms exceeded.）"; assert.equal(friendlyErr(w), w);
+  const rb = "读取中断（网络/EHunt 连接超时，已自动重试 2 次：Page.goto: Timeout 60000ms exceeded.），已读部分已保留，可点「继续本批」接着读"; assert.equal(friendlyErr(rb), rb);
   const zh = "读取中断（HTTP 503），已读部分已保留，可点「继续本批」接着读"; assert.equal(friendlyErr(zh), zh);
   assert.equal(friendlyErr(null), "");
 });

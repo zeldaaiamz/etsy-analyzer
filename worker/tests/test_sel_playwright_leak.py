@@ -81,9 +81,10 @@ def test_exception_mid_batch_then_count_succeeds(worker, monkeypatch):
     monkeypatch.setattr(W, "Store", lambda: st); monkeypatch.setattr(W, "POLL", 0)
     with pytest.raises(QueueEmpty): W.main([])
     assert not W.playwright_leaked()
-    assert st.batch["status"] == "canceled"
-    fail = next(p for p in st.run_patches if p.get("status") == "canceled")
-    assert "继续本批" in fail["error"] and "RemoteDisconnected" in fail["error"]
+    # 2026-11-17 网络保护：数据库断连属暂时性 → 本批放回队列（不再直接“已停止”），已读部分保留，自动从断点续读
+    assert st.batch["status"] == "queued"
+    rq = next(p for p in st.run_patches if p.get("status") == "queued")
+    assert rq["locked_by"] is None and "网络/EHunt 连接超时" in rq["progress"]["why"] and rq["progress"]["net_requeues"] == 1
     last = [p for p in st.run_patches if "status" in p][-1]   # 忽略进度写入（sel-progress 分支的 progress=）
     assert last["status"] == "counted" and last["total_count"] == 296   # 修复前：asyncio loop 报错 → failed
 
@@ -96,8 +97,8 @@ def test_batch_failure_flushes_and_resumes_from_breakpoint(worker, monkeypatch):
     monkeypatch.setattr(W, "scrape_ehunt", flaky)
     st = FakeSelStore([RUN_B], dict(BATCH)); monkeypatch.setattr(W, "Store", lambda: st)
     W.main(["--once"])
-    assert st.batch["status"] == "canceled" and st.batch["scraped_count"] == 12   # 已落定的 12 条写回（不是只到 10）
-    # 网页「继续本批」(sel_resume) → 批次重新 queued；worker 从 offset_start + scraped_count 接着读
+    assert st.batch["status"] == "queued" and st.batch["scraped_count"] == 12   # 已落定的 12 条写回（不是只到 10）；超时属暂时性 → 自动放回队列
+    # 再次认领（自动重新排队 / 或网页「继续本批」）→ worker 从 offset_start + scraped_count 接着读
     starts = []
     def resume(kw, params, s0, e0, between=None, should_stop=None):
         starts.append(s0); yield from (r for r in real_pw_scrape() if r["rank"] >= s0)

@@ -105,7 +105,7 @@ def test_real_slow_page_with_real_clock():
     assert [r["rank"] for r in W.page_loop(open_, 1, 1, PS, timeout=0.1, retries=2, watchdog=lambda x: NoDog())] == [1] and calls == [1, 1]
 
 def test_page_timeout_fails_batch_cleanly_with_chinese_reason(monkeypatch, tmp_path):
-    """全部重试失败 → handle_run 现有路径：批次“已停止”、run canceled + 中文原因（可「继续本批」），不卡、不 recycle。"""
+    """全部重试失败 + 本批已自动重新排队 2 次（2026-11-17 网络保护）→ handle_run 现有路径：批次“已停止”、run canceled + 中文原因（可「继续本批」），不卡、不 recycle。"""
     monkeypatch.setattr(W, "EXCL_DIR", str(tmp_path)); monkeypatch.setattr(W, "SEEN", {})
     monkeypatch.setattr(W.C, "guard", lambda o: ("排除", "7天销量≤3", "")); monkeypatch.setattr(W.C, "dedupe", lambda rows: rows)
     def scrape(kw, params, s0, e0, between=None, should_stop=None):
@@ -121,9 +121,10 @@ def test_page_timeout_fails_batch_cleanly_with_chinese_reason(monkeypatch, tmp_p
         def patch_batch(s, bid, **kw): bp.append(kw)
         def insert_item(s, b): pass
     class A: fake = None
-    W.handle_run(St(), {"id": "r1", "keyword": "tag", "status": "running", "user_id": "u", "params": {}}, A(), False)
+    W.handle_run(St(), {"id": "r1", "keyword": "tag", "status": "running", "user_id": "u", "params": {},
+                        "progress": {"stage": "requeued", "net_requeues": 2, "batch_id": "b1"}}, A(), False)
     fin = [k for k in rp if k.get("status") == "canceled"][-1]
-    assert "第 2 页读取超时" in fin["error"] and "继续本批" in fin["error"]
+    assert "第 2 页读取超时" in fin["error"] and "继续本批" in fin["error"] and "已自动重试 2 次" in fin["error"]
     assert any(k.get("status") == "canceled" for k in bp) and any(k.get("scraped_count") == 20 for k in bp)   # 第 1 页已落定的 20 条保留
 
 def test_kill_only_own_descendant_with_profile(tmp_path):
