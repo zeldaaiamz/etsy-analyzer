@@ -28,6 +28,9 @@ test("worker 原始报错 → 中文提示", () => {
   assert.equal(friendlyErr("Page.click: Timeout 30000ms exceeded."), "EHunt 页面响应超时，请稍后再试");   // 不是打不开页面 → 不说网络
   assert.match(friendlyErr("Failed to create a ProcessSingleton for your profile directory"), /浏览器被占用/);
   const pt = "EHunt 页面响应超时：已自动重试 2 次仍失败，请稍后再试（Page.click: Timeout 30000ms exceeded.）"; assert.equal(friendlyErr(pt), pt);
+  // 2026-11-18：Chrome 启动超时
+  assert.equal(friendlyErr("BrowserType.launch_persistent_context: Timeout 180000ms exceeded."), "box 抓取浏览器启动超时（box 太忙），请稍后再试");
+  const lt = "box 抓取浏览器启动超时（box 太忙）：已自动重试 2 次仍失败，请稍后再试（BrowserType.launch_persistent_context: Timeout 180000ms exceeded.）"; assert.equal(friendlyErr(lt), lt);
   // 登录失效与网络异常分开说
   const lg = friendlyErr("EHunt 登录已失效（页面顶栏显示 Login/Register，搜索弹出登录提示）：需要在 box 上运行 deploy/box-selection-worker.sh login 重新人工登录");
   assert.match(lg, /登录已失效/); assert.doesNotMatch(lg, /网络异常/);

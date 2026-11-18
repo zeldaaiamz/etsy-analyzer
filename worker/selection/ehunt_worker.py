@@ -148,6 +148,7 @@ def net_label(e):
     """网络类失败给人看的说法（2026-11-17 ②）：打不开页面 / 断网 / SSL / 数据库连不上 → 「box 网络异常」；
     Chrome profile 占用 → 「box 抓取浏览器被占用」；其它单步超时（点按钮、单页读取）→ 「EHunt 页面响应超时」（不一定是网络，不误导）。"""
     if is_profile_busy(e): return "box 抓取浏览器被占用"
+    if re.search(r"launch_persistent_context: Timeout|BrowserType\.launch.*Timeout", str(e)): return "box 抓取浏览器启动超时（box 太忙）"
     if isinstance(e, urllib.error.HTTPError): return f"数据库暂时不可用（HTTP {e.code}）"
     if isinstance(e, (PageNotReady, ssl.SSLError)) or (is_transient(e) and not isinstance(e, urllib.error.HTTPError)) or _BOX_NET_RE.search(str(e)): return NET_MSG
     return "EHunt 页面响应超时"
@@ -535,6 +536,30 @@ def _settle(pg, timeout_ms=None):
     try: pg.wait_for_load_state("networkidle", timeout=timeout_ms or SETTLE_MS)
     except Exception: pass
 
+# ---- 关键词生效（2026-11-18 Hongyan 批准）：搜索后轮询 Keyword 标签最多 KW_CHIP_WAIT_S 秒；前两次没生效直接重搜，
+#      第 3 次仍没有才按「未筛选巨量」判限流（09:07 screen 在 box 负载 241 时被这条推断误判）。EHunt 页面明确显示限流横幅 → 仍立即停（重搜只会加重限流）。
+KW_CHIP_WAIT_S = float(os.environ.get("SEL_KW_CHIP_WAIT_S", "15"))
+KW_ATTEMPTS = 3
+def _kw_applied(pg, U, keyword):
+    try: sel = pg.locator(U["selected_row"]).first.inner_text(timeout=3000)
+    except Exception: return False
+    return U["chip_keyword"].format(keyword=keyword).replace(" ", "").lower() in (sel or "").replace(" ", "").lower()
+def apply_keyword(pg, U, keyword):
+    """填关键词 + Search，直到 Selected: 出现 Keyword 标签。返回第几次搜索生效；3 次都没有 → RateLimited（未筛选巨量）或 KeywordNotApplied。"""
+    for attempt in range(1, KW_ATTEMPTS + 1):
+        dismiss_overlays(pg, U); pg.fill(U["search_input"], keyword); _click(pg, U, U["search_btn"]); _settle(pg)
+        deadline = _ready_clock() + KW_CHIP_WAIT_S
+        while True:
+            if _kw_applied(pg, U, keyword):
+                if attempt > 1: log.info("keyword %r applied on search attempt %d/%d", keyword, attempt, KW_ATTEMPTS)
+                return attempt
+            if _ready_clock() >= deadline: break
+            _ready_sleep(1.0); dismiss_overlays(pg, U)
+        log.warning("keyword %r not applied %.0fs after search (attempt %d/%d)", keyword, KW_CHIP_WAIT_S, attempt, KW_ATTEMPTS)
+        _check_rate_limit(pg, U)   # 只看明确的限流横幅
+        if attempt == KW_ATTEMPTS: _check_rate_limit(pg, U, keyword=keyword, after_search=True)   # 第 3 次才用「未筛选巨量」推断限流
+    raise KeywordNotApplied(f"关键词未生效：Selected: 中没有 Keyword: {keyword}（已重新搜索 {KW_ATTEMPTS} 次）")
+
 def _check_login(pg, U):
     if _visible(pg.locator(U["login_dialog"])) or _visible(pg.locator(U["header_login"])):
         try: cs = pg.context.cookies()
@@ -815,13 +840,7 @@ def _open_list(p, keyword, params):
         if b and b.is_visible(): b.click(); time.sleep(0.5)
         dismiss_overlays(pg, U); _check_login(pg, U)
         _check_rate_limit(pg, U)  # 横幅已在 → 立刻失败，不烧 3 次关键词重试
-        for attempt in range(3):   # 页面水合前填写的关键词会被清空 → 以 Selected: 的 Keyword 标签为准，最多重试 3 次
-            dismiss_overlays(pg, U); pg.fill(U["search_input"], keyword); _click(pg, U, U["search_btn"]); _settle(pg); time.sleep(2 + attempt * 2)
-            dismiss_overlays(pg, U)
-            if U["chip_keyword"].format(keyword=keyword).replace(" ", "").lower() in pg.locator(U["selected_row"]).first.inner_text().replace(" ", "").lower(): break
-            # 一次确认：Search 后仍无 Keyword chip → 查横幅 / 未筛选 Find；是限流则立即停，不是才继续重试
-            _check_rate_limit(pg, U, keyword=keyword, after_search=True)
-        else: raise KeywordNotApplied(f"关键词未生效：Selected: 中没有 Keyword: {keyword}")
+        apply_keyword(pg, U, keyword)
         set_price(pg, U, F)   # 每个筛选单独等面板就绪 / 回读输入 / 等 chip，缺了只重做它（2026-11-17）
         set_sales(pg, U, F)
         # 排序默认 ↓7-day sales，校验

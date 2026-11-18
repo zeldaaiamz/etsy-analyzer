@@ -15,7 +15,7 @@ export const safeName = (s) => (String(s ?? "").replace(/[^\p{L}\p{N}_-]+/gu, "_
 export function friendlyErr(e) {
   const t = String(e || "");
   if (!t) return "";
-  if (/box 网络异常|网络\/EHunt 连接超时/.test(t)) return t;   // worker 自己写的中文（已含是否自动重试）；「网络/EHunt 连接超时」= 2026-11-17 预览前的旧记录
+  if (/box 网络异常|box 抓取浏览器|网络\/EHunt 连接超时/.test(t)) return t;   // worker 自己写的中文（已含是否自动重试）；「网络/EHunt 连接超时」= 2026-11-17 预览前的旧记录
   if (/Playwright Sync API inside the asyncio loop/i.test(t)) return "box 抓取进程异常（上一次失败后浏览器没有释放），需要重启 box 上的抓取进程后再试";
   if (/Remote end closed|RemoteDisconnected|Connection reset|URLError|timed out|Temporary failure in name resolution/i.test(t)) return "box 与数据库的连接中断（网络抖动），可点“重试本批”或重新查询";
   if (/EHunt 登录已失效|EHunt 未登录/.test(t)) return "EHunt 登录已失效：需要在 box 上重新人工登录 EHunt";
@@ -25,6 +25,7 @@ export function friendlyErr(e) {
   // 2026-11-17 ②：打不开页面 / 断网 → box 网络异常；其它单步超时（点按钮等）→ EHunt 页面响应超时；浏览器 profile 占用单独说
   const again = /已自动重试/.test(t) ? "已自动重试，" : "";
   if (/Page\.goto: Timeout|net::ERR_|没有出现搜索框|WRONG_VERSION_NUMBER/i.test(t)) return `box 网络异常，${again}请稍后再试`;
+  if (/launch_persistent_context: Timeout|BrowserType\.launch.*Timeout/i.test(t)) return `box 抓取浏览器启动超时（box 太忙），${again}请稍后再试`;
   if (/ProcessSingleton|profile is already in use/i.test(t)) return `box 抓取浏览器被占用（上一个任务还没关完），${again}请稍后再试`;
   if (/EHunt 页面响应超时/.test(t)) return t;
   if (/Timeout \d+ms exceeded/i.test(t)) return `EHunt 页面响应超时，${again}请稍后再试`;
