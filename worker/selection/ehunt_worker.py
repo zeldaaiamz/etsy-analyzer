@@ -11,6 +11,7 @@ import argparse, json, os, re, socket, sys, time, logging, urllib.request, urlli
 from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "tools" / "etsy_selection"))
 from selection import ehunt_session as ES  # noqa: E402  2026-11-04：严格登录判定/掉线诊断/保活
+from selection import category_gate as CG  # noqa: E402  2026-11-19：三步查同一张排除品类表（ECS 判定，失败放行）
 import classify as C  # noqa: E402  审定默认：convertible + optional-custom=keep + temperature 0 + 3 次投票
 
 log = logging.getLogger("selection")
@@ -1323,7 +1324,7 @@ def process_batch(store, run, batch, scraper, idle=None):
             if lid in seen: pend.append((row, "dup", None))       # 跨批/同批重复：不重复调用、不重复入库
             else:
                 seen.add(lid); o = C.dedupe([row])[0]
-                r = C.guard(o) or C.rule(o["title"])               # ① 标题规则 + 7 天销量兜底：命中即排除，不调豆包
+                r = C.guard(o) or C.rule(o["title"]) or CG.title_rule(o["title"])   # ① 标题规则 + 7 天销量兜底 + 不做的品类（默认关）：命中即排除，不调豆包
                 pend.append((row, "rule", r) if r else (row, "vision", pool.submit(vision_task, o)))   # ② 规则通过 → 豆包视觉×3（并发）
             drain(); tick(**({"stage": "reading"} if n_seen == 1 else {}))
         tick(stage="vision")   # 列表已读完：剩下的只是等豆包判断
@@ -1634,6 +1635,11 @@ def handle_run(store, run, a, lookups):
     其他失败：查询数量 → failed（用户重新查询）；抓取批次 → 本批标记“已停止”+原因，网页「继续本批」从断点接着读。"""
     if run["status"] == "counting":
         stage("count_open")
+        hit = None if a.fake else CG.check_keyword(run["keyword"])
+        if hit:   # 不做的品类：不开 EHunt、不调视觉
+            _safe(store.patch_run_if, run["id"], "counting", status="failed", error=CG.block_message(hit), finished_at=NOW(),
+                  progress={"stage": "category_skipped", "why": hit["reason"], "at": NOW()})
+            return
         try:
             n = len(json.load(open(a.fake))) if a.fake else count_ehunt(run["keyword"], run.get("params") or {})
             store.patch_run_if(run["id"], "counting", status="counted", total_count=n, counted_at=NOW(), heartbeat_at=NOW()); NET.ok()
